@@ -1,0 +1,11 @@
+{
+  "name": "namar_custom",
+  "title": "Namar Custom",
+  "description": "App مخصص لكشف حساب أوامر البيع والدفعات",
+  "publisher": "Your Name",
+  "email": "you@example.com",
+  "icon": "octicon octicon-file-directory",
+  "color": "grey",
+  "version": "0.1.0",
+  "license": "MIT"
+}
