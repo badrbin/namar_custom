@@ -10,7 +10,3 @@ app_icon = "octicon octicon-file-directory"
 app_color = "grey"
 app_email = "you@example.com"
 app_license = "MIT"
-
-
-# Required for build process
-app_include_js = "/assets/namar_custom/js/placeholder.js"
