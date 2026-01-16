@@ -5,14 +5,14 @@ authors = [
 ]
 description = "Customizations for Namar"
 requires-python = ">=3.10"
-dynamic = ["version"]
+version = "0.0.1"
 dependencies = [
     "frappe"
 ]
 
 [build-system]
-requires = ["flit_core >=3.2,<4"]
-build-backend = "flit_core.buildapi"
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
 
 [tool.bench.app]
 title = "Namar Custom"
