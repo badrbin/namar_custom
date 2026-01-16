@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [tool.setuptools]
-packages = ["namar_custom"]
+packages = ["namar_custom", "namar_custom.api"]
 
 [tool.bench.app]
 title = "Namar Custom"
