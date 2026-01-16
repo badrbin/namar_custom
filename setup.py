@@ -1,11 +1,12 @@
-
 from setuptools import setup, find_packages
 
 setup(
-    name='namar_custom',
-    version='0.1.0',
-    description='App مخصص لكشف حساب أوامر البيع والدفعات',
-    author='Your Name',
+    name="namar_custom",
+    version="0.0.1",
+    description="Customizations for Namar",
+    author="Badr",
     packages=find_packages(),
-    install_requires=['frappe'],
+    zip_safe=False,
+    include_package_data=True,
+    install_requires=["frappe"]
 )

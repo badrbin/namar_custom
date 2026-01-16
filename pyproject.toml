@@ -1,0 +1,22 @@
+[project]
+name = "namar_custom"
+authors = [
+    { name = "Badr", email = "badrbin@gmail.com" }
+]
+description = "Customizations for Namar"
+requires-python = ">=3.10"
+dynamic = ["version"]
+dependencies = [
+    "frappe"
+]
+
+[build-system]
+requires = ["flit_core >=3.2,<4"]
+build-backend = "flit_core.buildapi"
+
+[tool.bench.app]
+title = "Namar Custom"
+publisher = "Badr"
+description = "Customizations for Namar"
+icon = "octicon octicon-file-directory"
+color = "grey"
