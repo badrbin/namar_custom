@@ -2,8 +2,6 @@ import frappe
 from frappe import _
 from frappe.utils import flt
 
-# --- Validations ---
-
 def validate_material_request_against_billed(doc, method=None):
     if doc.docstatus == 1 and doc.sales_order:
         billed_data = frappe.db.sql("""
@@ -72,8 +70,6 @@ def validate_sales_invoice_qty_against_so(doc, method=None):
                     title=_("تجاوز كمية أمر البيع")
                 )
 
-# --- API Functions ---
-
 @frappe.whitelist()
 def get_customer_gl_summary(customer=None):
     if not customer: customer = frappe.form_dict.get('customer')
@@ -96,32 +92,3 @@ def get_customer_gl_summary(customer=None):
     total_payments = flt(gl_aggregates[0].total_payments) if gl_aggregates and gl_aggregates[0] else 0.0
     current_balance = flt(gl_aggregates[0].balance) if gl_aggregates and gl_aggregates[0] else 0.0
     return {"total_invoices": total_invoices, "total_payments": total_payments, "current_balance": current_balance, "gl_entries": gl_entries}
-
-@frappe.whitelist()
-def get_sales_order_summary(sales_order=None):
-    if not sales_order: sales_order = frappe.form_dict.get('sales_order')
-    if not sales_order: return []
-    summary_data = {}
-    so_items = frappe.db.sql("""
-        SELECT so_item.name as so_detail, so_item.item_code, so_item.item_name, so_item.qty, so_item.delivered_qty,
-            IFNULL((SELECT SUM(sii.qty) FROM `tabSales Invoice Item` sii WHERE sii.so_detail = so_item.name AND sii.docstatus = 1), 0) as billed_actual_qty
-        FROM `tabSales Order Item` so_item WHERE so_item.parent = %s
-    """, (sales_order), as_dict=1)
-    for item in so_items:
-        if item.item_code in summary_data:
-            summary_data[item.item_code]['so_qty'] += item.qty
-            summary_data[item.item_code]['delivered_qty'] += item.delivered_qty
-            summary_data[item.item_code]['billed_qty'] += item.billed_actual_qty
-            summary_data[item.item_code]['balance'] += item.qty
-        else:
-            summary_data[item.item_code] = {"item_code": item.item_code, "item_name": item.item_name, "so_qty": item.qty, "delivered_qty": item.delivered_qty, "billed_qty": item.billed_actual_qty, "mr_qty": 0.0, "installed_qty": 0.0, "balance": item.qty, "is_extra": False}
-    related_mrs = frappe.get_all("Material Request", filters={"sales_order": sales_order, "docstatus": 1}, pluck="name", ignore_permissions=True)
-    if related_mrs:
-        mr_items = frappe.get_all("Material Request Item", filters={"parent": ["in", related_mrs]}, fields=["item_code", "item_name", "qty"], ignore_permissions=True)
-        for row in mr_items:
-            if row.item_code in summary_data:
-                summary_data[row.item_code]['mr_qty'] += row.qty
-                summary_data[row.item_code]['balance'] = summary_data[row.item_code]['so_qty'] - summary_data[row.item_code]['mr_qty']
-            else:
-                summary_data[row.item_code] = {"item_code": row.item_code, "item_name": row.item_name, "so_qty": 0.0, "delivered_qty": 0.0, "billed_qty": 0.0, "mr_qty": row.qty, "installed_qty": 0.0, "balance": 0.0 - row.qty, "is_extra": True}
-    return list(summary_data.values())

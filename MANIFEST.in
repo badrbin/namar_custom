@@ -1,0 +1,7 @@
+include *.md
+include *.txt
+recursive-include namar_custom *.py
+recursive-include namar_custom *.json
+recursive-include namar_custom *.js
+recursive-include namar_custom *.css
+recursive-include namar_custom *.html

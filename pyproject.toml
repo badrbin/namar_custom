@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "namar_custom"
 version = "0.0.1"
@@ -10,9 +14,8 @@ dependencies = [
     "frappe"
 ]
 
-[build-system]
-requires = ["setuptools>=42", "wheel"]
-build-backend = "setuptools.build_meta"
+[tool.setuptools]
+packages = ["namar_custom"]
 
 [tool.bench.app]
 title = "Namar Custom"
@@ -20,6 +23,3 @@ publisher = "Badr"
 description = "Customizations for Namar"
 icon = "octicon octicon-file-directory"
 color = "grey"
-
-[tool.setuptools.packages.find]
-include = ["namar_custom*"]
