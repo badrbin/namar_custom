@@ -1,10 +1,10 @@
 [project]
 name = "namar_custom"
 version = "0.0.1"
+description = "Customizations for Namar"
 authors = [
     { name = "Badr", email = "badrbin@gmail.com" }
 ]
-description = "Customizations for Namar"
 requires-python = ">=3.10"
 dependencies = [
     "frappe"
@@ -20,3 +20,6 @@ publisher = "Badr"
 description = "Customizations for Namar"
 icon = "octicon octicon-file-directory"
 color = "grey"
+
+[tool.setuptools.packages.find]
+include = ["namar_custom*"]
