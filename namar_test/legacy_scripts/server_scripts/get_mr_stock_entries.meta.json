@@ -1,0 +1,19 @@
+{
+  "allow_guest": 0,
+  "api_method": "get_mr_stock_entries",
+  "creation": "2025-12-20 16:33:58.452561",
+  "disabled": 1,
+  "docstatus": 0,
+  "doctype": "Server Script",
+  "doctype_event": "Before Insert",
+  "enable_rate_limit": 0,
+  "event_frequency": "All",
+  "idx": 0,
+  "modified": "2026-02-28 06:40:26.097974",
+  "modified_by": "badrarroug@namar.net",
+  "name": "get_mr_stock_entries",
+  "owner": "Administrator",
+  "rate_limit_count": 5,
+  "rate_limit_seconds": 86400,
+  "script_type": "API"
+}

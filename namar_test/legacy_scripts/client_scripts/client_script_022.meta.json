@@ -1,0 +1,13 @@
+{
+  "creation": "2026-03-04 02:56:33.226695",
+  "docstatus": 0,
+  "doctype": "Client Script",
+  "dt": "Material Request",
+  "enabled": 1,
+  "idx": 0,
+  "modified": "2026-05-17 14:00:24.628402",
+  "modified_by": "badrarroug@namar.net",
+  "name": "حساب التخصيم",
+  "owner": "badrarroug@namar.net",
+  "view": "Form"
+}

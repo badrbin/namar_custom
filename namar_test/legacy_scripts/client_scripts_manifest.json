@@ -1,0 +1,252 @@
+[
+  {
+    "code_file": "customer_statement_dn.js",
+    "dt": "Delivery Note",
+    "enabled": 1,
+    "meta_file": "customer_statement_dn.meta.json",
+    "modified": "2026-02-24 04:11:42.850839",
+    "name": "Customer Statement - DN",
+    "slug": "customer_statement_dn",
+    "view": "Form"
+  },
+  {
+    "code_file": "customer_statement_si.js",
+    "dt": "Sales Invoice",
+    "enabled": 1,
+    "meta_file": "customer_statement_si.meta.json",
+    "modified": "2026-02-24 03:47:05.551448",
+    "name": "Customer Statement - SI",
+    "slug": "customer_statement_si",
+    "view": "Form"
+  },
+  {
+    "code_file": "customer_statement_so.js",
+    "dt": "Sales Order",
+    "enabled": 1,
+    "meta_file": "customer_statement_so.meta.json",
+    "modified": "2026-02-24 04:08:34.146332",
+    "name": "Customer Statement - SO",
+    "slug": "customer_statement_so",
+    "view": "Form"
+  },
+  {
+    "code_file": "extract_google_map_coordinates.js",
+    "dt": "Material Request",
+    "enabled": 1,
+    "meta_file": "extract_google_map_coordinates.meta.json",
+    "modified": "2026-03-02 03:43:51.759245",
+    "name": "Extract Google Map Coordinates",
+    "slug": "extract_google_map_coordinates",
+    "view": "Form"
+  },
+  {
+    "code_file": "h.js",
+    "dt": "Installation Note",
+    "enabled": 1,
+    "meta_file": "h.meta.json",
+    "modified": "2026-02-10 23:18:57.995848",
+    "name": "h",
+    "slug": "h",
+    "view": "Form"
+  },
+  {
+    "code_file": "j.js",
+    "dt": "Delivery Note",
+    "enabled": 1,
+    "meta_file": "j.meta.json",
+    "modified": "2026-02-22 06:57:10.438243",
+    "name": "j",
+    "slug": "j",
+    "view": "Form"
+  },
+  {
+    "code_file": "lead_google_map_coordinates.js",
+    "dt": "Lead",
+    "enabled": 1,
+    "meta_file": "lead_google_map_coordinates.meta.json",
+    "modified": "2026-05-02 21:22:08.376769",
+    "name": "Lead Google Map Coordinates",
+    "slug": "lead_google_map_coordinates",
+    "view": "Form"
+  },
+  {
+    "code_file": "material_request_dashboard.js",
+    "dt": "Material Request",
+    "enabled": 1,
+    "meta_file": "material_request_dashboard.meta.json",
+    "modified": "2026-02-28 06:37:26.996019",
+    "name": "Material Request Dashboard",
+    "slug": "material_request_dashboard",
+    "view": "Form"
+  },
+  {
+    "code_file": "material_request_driver_filter.js",
+    "dt": "Material Request",
+    "enabled": 1,
+    "meta_file": "material_request_driver_filter.meta.json",
+    "modified": "2026-04-27 23:12:34.857111",
+    "name": "Material Request Driver Filter",
+    "slug": "material_request_driver_filter",
+    "view": "Form"
+  },
+  {
+    "code_file": "material_request_linked_request_autofill.js",
+    "dt": "Material Request",
+    "enabled": 1,
+    "meta_file": "material_request_linked_request_autofill.meta.json",
+    "modified": "2026-05-23 12:58:44.149050",
+    "name": "Material Request Linked Request Autofill",
+    "slug": "material_request_linked_request_autofill",
+    "view": "Form"
+  },
+  {
+    "code_file": "material_request_manufacturing_status_list.js",
+    "dt": "Material Request",
+    "enabled": 1,
+    "meta_file": "material_request_manufacturing_status_list.meta.json",
+    "modified": "2026-05-22 14:59:32.320204",
+    "name": "Material Request Manufacturing Status List",
+    "slug": "material_request_manufacturing_status_list",
+    "view": "List"
+  },
+  {
+    "code_file": "material_request_manufacturing_tab.js",
+    "dt": "Material Request",
+    "enabled": 1,
+    "meta_file": "material_request_manufacturing_tab.meta.json",
+    "modified": "2026-04-09 10:44:11.168602",
+    "name": "Material Request Manufacturing Tab",
+    "slug": "material_request_manufacturing_tab",
+    "view": "Form"
+  },
+  {
+    "code_file": "material_request_replacement_reference_filter.js",
+    "dt": "Material Request",
+    "enabled": 1,
+    "meta_file": "material_request_replacement_reference_filter.meta.json",
+    "modified": "2026-04-07 06:25:41.708714",
+    "name": "Material Request Replacement Reference Filter",
+    "slug": "material_request_replacement_reference_filter",
+    "view": "Form"
+  },
+  {
+    "code_file": "material_request_scenario_bypass.js",
+    "dt": "Material Request",
+    "enabled": 1,
+    "meta_file": "material_request_scenario_bypass.meta.json",
+    "modified": "2026-05-20 00:54:55.927384",
+    "name": "Material Request Scenario Bypass",
+    "slug": "material_request_scenario_bypass",
+    "view": "Form"
+  },
+  {
+    "code_file": "purchase_order_dashboard_po.js",
+    "dt": "Purchase Order",
+    "enabled": 1,
+    "meta_file": "purchase_order_dashboard_po.meta.json",
+    "modified": "2026-03-10 11:51:04.048848",
+    "name": "Purchase Order Dashboard PO",
+    "slug": "purchase_order_dashboard_po",
+    "view": "Form"
+  },
+  {
+    "code_file": "sales_order_dashboard_so.js",
+    "dt": "Sales Order",
+    "enabled": 1,
+    "meta_file": "sales_order_dashboard_so.meta.json",
+    "modified": "2026-02-24 14:46:49.009727",
+    "name": "Sales Order Dashboard SO",
+    "slug": "sales_order_dashboard_so",
+    "view": "Form"
+  },
+  {
+    "code_file": "sales_order_material_request_by_balance.js",
+    "dt": "Sales Order",
+    "enabled": 1,
+    "meta_file": "sales_order_material_request_by_balance.meta.json",
+    "modified": "2026-04-14 17:31:59.191756",
+    "name": "Sales Order Material Request By Balance",
+    "slug": "sales_order_material_request_by_balance",
+    "view": "Form"
+  },
+  {
+    "code_file": "supplier_statement_po.js",
+    "dt": "Purchase Order",
+    "enabled": 1,
+    "meta_file": "supplier_statement_po.meta.json",
+    "modified": "2026-03-10 11:57:02.205102",
+    "name": "Supplier Statement - PO",
+    "slug": "supplier_statement_po",
+    "view": "Form"
+  },
+  {
+    "code_file": "total_quantity.js",
+    "dt": "Material Request",
+    "enabled": 1,
+    "meta_file": "total_quantity.meta.json",
+    "modified": "2026-03-02 03:45:10.536126",
+    "name": "Total Quantity",
+    "slug": "total_quantity",
+    "view": "Form"
+  },
+  {
+    "code_file": "urgent_material_request_banner.js",
+    "dt": "Material Request",
+    "enabled": 1,
+    "meta_file": "urgent_material_request_banner.meta.json",
+    "modified": "2026-03-11 14:19:20.016209",
+    "name": "Urgent Material Request Banner",
+    "slug": "urgent_material_request_banner",
+    "view": "Form"
+  },
+  {
+    "code_file": "vip_customer_highlight.js",
+    "dt": "Material Request",
+    "enabled": 1,
+    "meta_file": "vip_customer_highlight.meta.json",
+    "modified": "2026-03-01 06:57:30.785880",
+    "name": "VIP Customer Highlight",
+    "slug": "vip_customer_highlight",
+    "view": "Form"
+  },
+  {
+    "code_file": "client_script_022.js",
+    "dt": "Material Request",
+    "enabled": 1,
+    "meta_file": "client_script_022.meta.json",
+    "modified": "2026-05-17 14:00:24.628402",
+    "name": "حساب التخصيم",
+    "slug": "client_script_022",
+    "view": "Form"
+  },
+  {
+    "code_file": "client_script_023.js",
+    "dt": "Material Request",
+    "enabled": 0,
+    "meta_file": "client_script_023.meta.json",
+    "modified": "2026-02-20 06:35:15.546109",
+    "name": "خصم تصنيع",
+    "slug": "client_script_023",
+    "view": "Form"
+  },
+  {
+    "code_file": "client_script_024.js",
+    "dt": "Cutting Template",
+    "enabled": 1,
+    "meta_file": "client_script_024.meta.json",
+    "modified": "2026-03-15 15:06:08.144658",
+    "name": "فلتر أصناف النطاقات",
+    "slug": "client_script_024",
+    "view": "Form"
+  },
+  {
+    "code_file": "client_script_025.js",
+    "dt": "Material Request",
+    "enabled": 1,
+    "meta_file": "client_script_025.meta.json",
+    "modified": "2026-04-07 07:22:53.150142",
+    "name": "كل طلبات المواد",
+    "slug": "client_script_025",
+    "view": "Form"
+  }
+]

@@ -1,0 +1,2 @@
+recursive-include namar_test *.py *.js *.json *.txt
+include README.md

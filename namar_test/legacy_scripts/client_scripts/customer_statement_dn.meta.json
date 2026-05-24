@@ -1,0 +1,13 @@
+{
+  "creation": "2026-02-24 04:11:42.850839",
+  "docstatus": 0,
+  "doctype": "Client Script",
+  "dt": "Delivery Note",
+  "enabled": 1,
+  "idx": 0,
+  "modified": "2026-02-24 04:11:42.850839",
+  "modified_by": "badrarroug@namar.net",
+  "name": "Customer Statement - DN",
+  "owner": "badrarroug@namar.net",
+  "view": "Form"
+}

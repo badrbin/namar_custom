@@ -1,0 +1,13 @@
+{
+  "creation": "2026-03-10 11:51:04.048848",
+  "docstatus": 0,
+  "doctype": "Client Script",
+  "dt": "Purchase Order",
+  "enabled": 1,
+  "idx": 0,
+  "modified": "2026-03-10 11:51:04.048848",
+  "modified_by": "badrarroug@namar.net",
+  "name": "Purchase Order Dashboard PO",
+  "owner": "badrarroug@namar.net",
+  "view": "Form"
+}

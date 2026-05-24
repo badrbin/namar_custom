@@ -1,0 +1,13 @@
+{
+  "creation": "2026-02-24 03:47:05.551448",
+  "docstatus": 0,
+  "doctype": "Client Script",
+  "dt": "Sales Invoice",
+  "enabled": 1,
+  "idx": 0,
+  "modified": "2026-02-24 03:47:05.551448",
+  "modified_by": "badrarroug@namar.net",
+  "name": "Customer Statement - SI",
+  "owner": "badrarroug@namar.net",
+  "view": "Form"
+}

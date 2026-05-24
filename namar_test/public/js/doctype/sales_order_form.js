@@ -1,0 +1,169 @@
+/* Auto-generated from live Client Script records on testnamar.u.frappe.cloud. */
+(function () {
+  if (!window.frappe || !frappe.boot || !frappe.boot.namar_test_client_scripts_enabled) {
+    return;
+  }
+  window.__namar_test_loaded_scripts = window.__namar_test_loaded_scripts || {};
+  if (!window.__namar_test_loaded_scripts["Customer Statement - SO"]) {
+    window.__namar_test_loaded_scripts["Customer Statement - SO"] = true;
+    // BEGIN legacy Client Script: Customer Statement - SO
+    // ============================================================
+    // Client Script: Customer Statement - SO (Fixed)
+    // DocType: Sales Order
+    // ============================================================
+
+    frappe.ui.form.on('Sales Order', {
+        refresh: function(frm) {
+            if (frm.doc.customer) {
+                render_customer_statement(frm, frm.doc.customer);
+            }
+        },
+        customer: function(frm) {
+            if (frm.doc.customer) {
+                frm._last_statement_customer = null;
+                frm._statement_loaded = false;
+                render_customer_statement(frm, frm.doc.customer);
+            } else {
+                clear_customer_statement(frm);
+            }
+        }
+    });
+
+    function render_customer_statement(frm, customer) {
+        if (!frm.fields_dict['custom_customer_statement']) return;
+        if (frm._last_statement_customer === customer && frm._statement_loaded) return;
+
+        frm.fields_dict['custom_customer_statement'].$wrapper.html(
+            '<div style="text-align:center; padding:15px; color:var(--text-muted);">جاري التحميل...</div>'
+        );
+
+        frappe.call({
+            method: 'get_customer_summary',
+            args: { customer: customer },
+            freeze: false,
+            callback: function(r) {
+                frm._last_statement_customer = customer;
+                frm._statement_loaded = true;
+                if (r.message) {
+                    frm.fields_dict['custom_customer_statement'].$wrapper.html(r.message);
+                } else {
+                    frm.fields_dict['custom_customer_statement'].$wrapper.html(
+                        '<div style="text-align:center; padding:15px; color:var(--text-muted);">لا توجد بيانات</div>'
+                    );
+                }
+            }
+        });
+    }
+
+    function clear_customer_statement(frm) {
+        if (frm.fields_dict['custom_customer_statement']) {
+            frm.fields_dict['custom_customer_statement'].$wrapper.html('');
+            frm._last_statement_customer = null;
+            frm._statement_loaded = false;
+        }
+    }
+    // END legacy Client Script: Customer Statement - SO
+  }
+  if (!window.__namar_test_loaded_scripts["Sales Order Dashboard SO"]) {
+    window.__namar_test_loaded_scripts["Sales Order Dashboard SO"] = true;
+    // BEGIN legacy Client Script: Sales Order Dashboard SO
+    // ============================================================
+    // Client Script: Sales Order Dashboard SO (محسّن)
+    // DocType: Sales Order
+    // ============================================================
+
+    frappe.ui.form.on("Sales Order", {
+        refresh(frm) {
+            if (frm.doc.name && frm.doc.docstatus >= 0) {
+                call_server_dashboard(frm);
+            } else {
+                clear_dashboard(frm);
+            }
+        }
+    });
+
+    function clear_dashboard(frm) {
+        if (!frm.fields_dict.custom_sales_order_statement) return;
+        frm.set_df_property("custom_sales_order_statement", "options", "");
+        frm.refresh_field("custom_sales_order_statement");
+        frm._dashboard_loaded = false;
+    }
+
+    function call_server_dashboard(frm) {
+        if (!frm.fields_dict.custom_sales_order_statement) return;
+        if (!frm.doc.name) {
+            clear_dashboard(frm);
+            return;
+        }
+        // منع الاستدعاء المتكرر
+        if (frm._dashboard_so === frm.doc.name && frm._dashboard_loaded) return;
+
+        frappe.call({
+            method: "get_sales_dashboard",
+            args: { sales_order: frm.doc.name },
+            freeze: false,
+            callback(r) {
+                frm._dashboard_so = frm.doc.name;
+                frm._dashboard_loaded = true;
+                var html = (!r.exc && r.message) ? r.message : "";
+                frm.set_df_property("custom_sales_order_statement", "options", html);
+                frm.refresh_field("custom_sales_order_statement");
+            }
+        });
+    }
+    // END legacy Client Script: Sales Order Dashboard SO
+  }
+  if (!window.__namar_test_loaded_scripts["Sales Order Material Request By Balance"]) {
+    window.__namar_test_loaded_scripts["Sales Order Material Request By Balance"] = true;
+    // BEGIN legacy Client Script: Sales Order Material Request By Balance
+    frappe.ui.form.on("Sales Order", {
+        refresh(frm) {
+            if (frm.doc.docstatus !== 1) return;
+            schedule_material_request_button_override(frm);
+        }
+    });
+
+    function schedule_material_request_button_override(frm) {
+        [0, 300, 1200].forEach((delay) => {
+            setTimeout(() => replace_material_request_button(frm), delay);
+        });
+    }
+
+    function replace_material_request_button(frm) {
+        remove_material_request_buttons(frm);
+        frm.add_custom_button(__("Material Request"), function () {
+            create_material_request_from_sales_order_balance(frm);
+        }, __("Create"));
+    }
+
+    function remove_material_request_buttons(frm) {
+        [__("Material Request"), __("طلب المواد")].forEach((label) => {
+            try { frm.remove_custom_button(label, __("Create")); } catch (e) {}
+            try { frm.remove_custom_button(label); } catch (e) {}
+        });
+    }
+
+    function create_material_request_from_sales_order_balance(frm) {
+        frappe.call({
+            method: "make_material_request_from_sales_order_balance",
+            args: { sales_order: frm.doc.name },
+            freeze: true,
+            freeze_message: __("جاري إنشاء طلب المواد من رصيد أمر البيع..."),
+            callback(r) {
+                if (r.exc) return;
+                var result = r.message || {};
+                if (!result.name) {
+                    frappe.msgprint(__("لم يتم إنشاء طلب المواد."));
+                    return;
+                }
+                frappe.show_alert({
+                    message: __("تم إنشاء طلب المواد {0}", [result.name]),
+                    indicator: "green"
+                });
+                frappe.set_route("Form", "Material Request", result.name);
+            }
+        });
+    }
+    // END legacy Client Script: Sales Order Material Request By Balance
+  }
+})();

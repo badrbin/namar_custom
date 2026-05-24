@@ -1,0 +1,13 @@
+{
+  "creation": "2026-02-10 23:37:44.256405",
+  "docstatus": 0,
+  "doctype": "Client Script",
+  "dt": "Delivery Note",
+  "enabled": 1,
+  "idx": 0,
+  "modified": "2026-02-22 06:57:10.438243",
+  "modified_by": "badrarroug@namar.net",
+  "name": "j",
+  "owner": "badrarroug@namar.net",
+  "view": "Form"
+}

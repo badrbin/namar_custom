@@ -1,0 +1,13 @@
+{
+  "creation": "2026-05-02 21:22:08.376769",
+  "docstatus": 0,
+  "doctype": "Client Script",
+  "dt": "Lead",
+  "enabled": 1,
+  "idx": 0,
+  "modified": "2026-05-02 21:22:08.376769",
+  "modified_by": "badrarroug@namar.net",
+  "name": "Lead Google Map Coordinates",
+  "owner": "badrarroug@namar.net",
+  "view": "Form"
+}

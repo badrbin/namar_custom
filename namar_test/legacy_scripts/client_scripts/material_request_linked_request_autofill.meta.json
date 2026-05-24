@@ -1,0 +1,13 @@
+{
+  "creation": "2026-05-23 12:58:44.149050",
+  "docstatus": 0,
+  "doctype": "Client Script",
+  "dt": "Material Request",
+  "enabled": 1,
+  "idx": 0,
+  "modified": "2026-05-23 12:58:44.149050",
+  "modified_by": "badrarroug@namar.net",
+  "name": "Material Request Linked Request Autofill",
+  "owner": "badrarroug@namar.net",
+  "view": "Form"
+}

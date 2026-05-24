@@ -1,0 +1,13 @@
+{
+  "creation": "2026-04-08 13:42:06.610310",
+  "docstatus": 0,
+  "doctype": "Client Script",
+  "dt": "Material Request",
+  "enabled": 1,
+  "idx": 0,
+  "modified": "2026-05-22 14:59:32.320204",
+  "modified_by": "badrarroug@namar.net",
+  "name": "Material Request Manufacturing Status List",
+  "owner": "badrarroug@namar.net",
+  "view": "List"
+}

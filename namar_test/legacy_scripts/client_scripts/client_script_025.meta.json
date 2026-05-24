@@ -1,0 +1,13 @@
+{
+  "creation": "2026-04-07 06:47:35.695579",
+  "docstatus": 0,
+  "doctype": "Client Script",
+  "dt": "Material Request",
+  "enabled": 1,
+  "idx": 0,
+  "modified": "2026-04-07 07:22:53.150142",
+  "modified_by": "badrarroug@namar.net",
+  "name": "كل طلبات المواد",
+  "owner": "badrarroug@namar.net",
+  "view": "Form"
+}

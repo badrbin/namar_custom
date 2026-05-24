@@ -1,0 +1,13 @@
+{
+  "creation": "2026-02-24 04:17:21.164877",
+  "docstatus": 0,
+  "doctype": "Client Script",
+  "dt": "Purchase Order",
+  "enabled": 1,
+  "idx": 0,
+  "modified": "2026-03-10 11:57:02.205102",
+  "modified_by": "badrarroug@namar.net",
+  "name": "Supplier Statement - PO",
+  "owner": "badrarroug@namar.net",
+  "view": "Form"
+}
