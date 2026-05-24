@@ -1,6 +1,32 @@
 from __future__ import annotations
 
+import frappe
+
 from .server_runtime import run_event_script
+
+def _customer_has_mobile(doc) -> bool:
+    mobile_no = (doc.get("mobile_no") or "").strip()
+    if mobile_no:
+        return True
+
+    primary_contact = (doc.get("customer_primary_contact") or "").strip()
+    if not primary_contact:
+        return False
+
+    contact_mobile = frappe.db.get_value("Contact", primary_contact, "mobile_no")
+    return bool((contact_mobile or "").strip())
+
+def validate_customer_mobile_on_insert(doc, method=None):
+    if _customer_has_mobile(doc):
+        return
+
+    frappe.throw(
+        '<div dir="rtl" style="text-align:right">'
+        "رقم الجوال إلزامي عند إنشاء عميل جديد. "
+        "اختر جهة اتصال أساسية تحتوي على رقم جوال قبل حفظ العميل."
+        "</div>",
+        title="رقم الجوال مطلوب",
+    )
 
 def stop_pay(doc, method=None):
     return run_event_script("Stop Pay", doc, method)
