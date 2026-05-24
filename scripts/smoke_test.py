@@ -24,10 +24,15 @@ SAFE_APP_METHODS = [
     "namar_test.api.get_related_items",
 ]
 
-REPORT_SMOKE_FILTERS = {
-    "view_mode": "طلبات المواد",
-    "limit": 1,
-}
+REPORT_SMOKE_FILTERS = [
+    {"view_mode": "طلبات المواد", "limit": 1},
+    {"view_mode": "ملخص أمر البيع", "limit": 1},
+    {"view_mode": "نتائج التخصيم", "material_request": "MREQ-08104", "limit": 1},
+    {"view_mode": "التصنيع اليومي", "limit": 1},
+    {"view_mode": "متابعة التصنيع", "limit": 1},
+    {"view_mode": "تفاصيل المخازن", "material_request": "MREQ-08104", "limit": 1},
+    {"view_mode": "حالات تشغيلية", "operation_preset": "جاري التصنيع", "limit": 1},
+]
 
 
 def load_env(path: Path) -> None:
@@ -157,17 +162,22 @@ def run_app_smoke(client: Client) -> None:
 
 
 def run_report_smoke(client: Client) -> None:
-    message = client.call_method(
-        "frappe.desk.query_report.run",
-        {
-            "report_name": "كل طلبات المواد",
-            "filters": json.dumps(REPORT_SMOKE_FILTERS, ensure_ascii=False),
-            "ignore_prepared_report": 1,
-        },
-    )
-    if not isinstance(message, dict) or "result" not in message:
-        raise RuntimeError(f"Unexpected report response: {message!r}")
-    print(f"Report OK: كل طلبات المواد -> {len(message.get('result') or [])} rows")
+    for filters in REPORT_SMOKE_FILTERS:
+        message = client.call_method(
+            "frappe.desk.query_report.run",
+            {
+                "report_name": "كل طلبات المواد",
+                "filters": json.dumps(filters, ensure_ascii=False),
+                "ignore_prepared_report": 1,
+            },
+        )
+        if not isinstance(message, dict) or "result" not in message:
+            raise RuntimeError(f"Unexpected report response for {filters}: {message!r}")
+        print(
+            "Report OK: "
+            f"كل طلبات المواد / {filters.get('view_mode')} -> "
+            f"{len(message.get('result') or [])} rows"
+        )
 
 
 def main() -> None:

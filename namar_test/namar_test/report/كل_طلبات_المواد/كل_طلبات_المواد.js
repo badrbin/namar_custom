@@ -4,7 +4,15 @@ frappe.query_reports["كل طلبات المواد"] = {
       fieldname: "view_mode",
       label: __("طريقة العرض"),
       fieldtype: "Select",
-      options: ["طلبات المواد", "ملخص أمر البيع"].join("\n"),
+      options: [
+        "طلبات المواد",
+        "ملخص أمر البيع",
+        "نتائج التخصيم",
+        "التصنيع اليومي",
+        "متابعة التصنيع",
+        "تفاصيل المخازن",
+        "حالات تشغيلية",
+      ].join("\n"),
       default: "طلبات المواد",
       reqd: 1,
     },
@@ -28,6 +36,13 @@ frappe.query_reports["كل طلبات المواد"] = {
       depends_on: "eval:doc.view_mode==='طلبات المواد'",
     },
     {
+      fieldname: "customer_name",
+      label: __("اسم العميل"),
+      fieldtype: "Data",
+      depends_on:
+        "eval:['نتائج التخصيم','التصنيع اليومي','متابعة التصنيع','تفاصيل المخازن','حالات تشغيلية'].includes(doc.view_mode)",
+    },
+    {
       fieldname: "company",
       label: __("الشركة"),
       fieldtype: "Link",
@@ -38,20 +53,30 @@ frappe.query_reports["كل طلبات المواد"] = {
       fieldname: "from_date",
       label: __("من تاريخ"),
       fieldtype: "Date",
-      depends_on: "eval:doc.view_mode==='طلبات المواد'",
+      depends_on:
+        "eval:['طلبات المواد','نتائج التخصيم','التصنيع اليومي','متابعة التصنيع','تفاصيل المخازن'].includes(doc.view_mode)",
     },
     {
       fieldname: "to_date",
       label: __("إلى تاريخ"),
       fieldtype: "Date",
-      depends_on: "eval:doc.view_mode==='طلبات المواد'",
+      depends_on:
+        "eval:['طلبات المواد','نتائج التخصيم','التصنيع اليومي','متابعة التصنيع','تفاصيل المخازن'].includes(doc.view_mode)",
     },
     {
       fieldname: "workflow_state",
       label: __("حالة Workflow"),
       fieldtype: "Link",
       options: "Workflow State",
-      depends_on: "eval:doc.view_mode==='طلبات المواد'",
+      depends_on:
+        "eval:['طلبات المواد','نتائج التخصيم','التصنيع اليومي','تفاصيل المخازن','حالات تشغيلية'].includes(doc.view_mode)",
+    },
+    {
+      fieldname: "workflow_style",
+      label: __("لون الحالة"),
+      fieldtype: "Select",
+      options: "\nغير محدد\nred\norange\nyellow\ngreen\nblue\ngray",
+      depends_on: "eval:doc.view_mode==='نتائج التخصيم'",
     },
     {
       fieldname: "branch",
@@ -86,7 +111,52 @@ frappe.query_reports["كل طلبات المواد"] = {
       label: __("الصنف"),
       fieldtype: "Link",
       options: "Item",
-      depends_on: "eval:doc.view_mode==='طلبات المواد'",
+      depends_on:
+        "eval:['طلبات المواد','التصنيع اليومي','متابعة التصنيع','حالات تشغيلية'].includes(doc.view_mode)",
+    },
+    {
+      fieldname: "item_group",
+      label: __("مجموعة الصنف"),
+      fieldtype: "Link",
+      options: "Item Group",
+      depends_on: "eval:['نتائج التخصيم','التصنيع اليومي'].includes(doc.view_mode)",
+    },
+    {
+      fieldname: "component",
+      label: __("المكون"),
+      fieldtype: "Link",
+      options: "Store Component",
+      depends_on: "eval:['نتائج التخصيم','تفاصيل المخازن'].includes(doc.view_mode)",
+    },
+    {
+      fieldname: "line_type",
+      label: __("نوع السطر"),
+      fieldtype: "Select",
+      options: "\nباب\nمكون",
+      depends_on: "eval:doc.view_mode==='التصنيع اليومي'",
+    },
+    {
+      fieldname: "manufactured_by",
+      label: __("تم بواسطة"),
+      fieldtype: "Link",
+      options: "User",
+      depends_on:
+        "eval:['التصنيع اليومي','متابعة التصنيع'].includes(doc.view_mode) && (frappe.user.has_role('System Manager') || frappe.user.has_role('HR Manager') || frappe.user.has_role('HR User'))",
+    },
+    {
+      fieldname: "operation_preset",
+      label: __("الحالة التشغيلية"),
+      fieldtype: "Select",
+      options: [
+        "جاري التصنيع",
+        "توريدات معلقة",
+        "مقاسات معلقة",
+        "صيانة معلقة",
+        "استحقاق خلال أسبوعين",
+        "طلبات التصنيع",
+      ].join("\n"),
+      default: "جاري التصنيع",
+      depends_on: "eval:doc.view_mode==='حالات تشغيلية'",
     },
     {
       fieldname: "customer_vip",
@@ -105,7 +175,8 @@ frappe.query_reports["كل طلبات المواد"] = {
       label: __("الحد الأقصى"),
       fieldtype: "Int",
       default: 500,
-      depends_on: "eval:doc.view_mode==='طلبات المواد'",
+      depends_on:
+        "eval:['طلبات المواد','التصنيع اليومي','متابعة التصنيع','تفاصيل المخازن','حالات تشغيلية'].includes(doc.view_mode)",
     },
   ],
 

@@ -3,10 +3,26 @@ from __future__ import annotations
 from typing import Any
 
 import frappe
-from frappe.utils import cint, flt
+from frappe.utils import add_days, cint, flt, nowdate
 
 
 MR_BRANCH_FIELD = "الفرع"
+PERSON_FIELDNAMES = {
+    "manufactured_by",
+    "custom_manufactured_by",
+    "manufacturing_completed_by",
+    "custom_manufacturing_completed_by",
+    "completed_by",
+    "employee",
+    "employee_name",
+    "owner",
+    "modified_by",
+}
+PERSON_LABEL_HINTS = ("تم بواسطة", "بواسطة التصنيع", "الموظف", "المستخدم")
+DELEGATED_REPORTS = {
+    "نتائج التخصيم": "نتائج التخصيم",
+    "تفاصيل المخازن": "داشبورد تفاصيل المخازن",
+}
 
 
 def _parse_current_items(raw_items: Any) -> list[dict[str, Any]]:
@@ -241,7 +257,120 @@ def _mr_column(fieldname: str, alias: str) -> str:
 
 
 def _filters_dict(filters: dict[str, Any] | None) -> frappe._dict:
+    if isinstance(filters, str):
+        try:
+            filters = frappe.parse_json(filters)
+        except Exception:
+            filters = {}
     return frappe._dict(filters or {})
+
+
+def _has_mri_column(fieldname: str) -> bool:
+    return bool(frappe.db.has_column("Material Request Item", fieldname))
+
+
+def _can_view_person_fields() -> bool:
+    roles = set(frappe.get_roles(frappe.session.user))
+    if "System Manager" in roles:
+        return True
+    if frappe.db.exists("DocType", "Employee") and frappe.has_permission("Employee", "read"):
+        return True
+    return bool(roles.intersection({"HR Manager", "HR User"}))
+
+
+def _column_fieldname(column: Any) -> str:
+    if isinstance(column, dict):
+        return (column.get("fieldname") or "").strip()
+    if isinstance(column, str):
+        return (column.split(":", 1)[0] or "").strip()
+    return ""
+
+
+def _column_label(column: Any) -> str:
+    if isinstance(column, dict):
+        return (column.get("label") or column.get("fieldname") or "").strip()
+    if isinstance(column, str):
+        return (column.split(":", 1)[0] or "").strip()
+    return ""
+
+
+def _is_person_column(column: Any) -> bool:
+    fieldname = _column_fieldname(column)
+    label = _column_label(column)
+    if fieldname in PERSON_FIELDNAMES:
+        return True
+    if any(hint in label for hint in PERSON_LABEL_HINTS):
+        return True
+    return False
+
+
+def _apply_person_permissions(columns: list[Any], rows: list[Any]) -> tuple[list[Any], list[Any]]:
+    if _can_view_person_fields():
+        return columns, rows
+
+    blocked_indexes = []
+    allowed_columns = []
+    blocked_fieldnames = set()
+    for index, column in enumerate(columns or []):
+        if _is_person_column(column):
+            blocked_indexes.append(index)
+            fieldname = _column_fieldname(column)
+            if fieldname:
+                blocked_fieldnames.add(fieldname)
+            continue
+        allowed_columns.append(column)
+
+    cleaned_rows = []
+    for row in rows or []:
+        if isinstance(row, dict):
+            cleaned = dict(row)
+            for fieldname in blocked_fieldnames:
+                cleaned.pop(fieldname, None)
+            cleaned_rows.append(cleaned)
+        elif isinstance(row, (list, tuple)) and blocked_indexes:
+            cleaned_rows.append([value for index, value in enumerate(row) if index not in blocked_indexes])
+        else:
+            cleaned_rows.append(row)
+    return allowed_columns, cleaned_rows
+
+
+def _safe_limit(filters: frappe._dict, default: int = 500, maximum: int = 2000) -> int:
+    return max(1, min(cint(filters.get("limit")) or default, maximum))
+
+
+def _empty_report(message: str):
+    return [_column("رسالة", "message", "Data", 420)], [{"message": message}]
+
+
+def _run_existing_report(report_name: str, filters: frappe._dict):
+    from frappe.desk.query_report import run
+
+    delegated_filters = {
+        key: value
+        for key, value in dict(filters).items()
+        if key not in {"view_mode", "operation_preset", "limit"} and value not in (None, "")
+    }
+    try:
+        response = run(
+            report_name=report_name,
+            filters=frappe.as_json(delegated_filters),
+            ignore_prepared_report=1,
+        )
+    except Exception as exc:
+        columns, rows = _empty_report(f"تعذر تشغيل التقرير المرتبط {report_name}: {exc}")
+        return columns, rows
+
+    columns = response.get("columns") or []
+    rows = response.get("result") or []
+    columns, rows = _apply_person_permissions(columns, rows)
+    return (
+        columns,
+        rows,
+        response.get("message"),
+        response.get("chart"),
+        response.get("report_summary"),
+        response.get("skip_total_row") or 0,
+    )
 
 
 def get_all_material_requests(filters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
@@ -344,6 +473,462 @@ def get_all_material_requests(filters: dict[str, Any] | None = None) -> list[dic
     return rows
 
 
+def get_manufacturing_daily_report(filters: dict[str, Any] | None = None):
+    filters = _filters_dict(filters)
+    can_view_people = _can_view_person_fields()
+
+    columns = [
+        _column("وقت التصنيع", "manufactured_at", "Datetime", 155),
+        _column("نوع السطر", "line_type", "Data", 90),
+        _column("طلب المواد", "material_request", "Link", 130, "Material Request"),
+        _column("أمر البيع", "sales_order", "Link", 130, "Sales Order"),
+        _column("حالة الطلب", "workflow_state", "Data", 120),
+        _column("العميل", "customer_name", "Data", 180),
+        _column("رقم الباب", "door_no", "Int", 80),
+        _column("المكون", "component_label", "Data", 130),
+        _column("كود الصنف", "item_code", "Link", 130, "Item"),
+        _column("اسم الصنف", "item_name", "Data", 220),
+        _column("مجموعة الصنف", "item_group", "Link", 150, "Item Group"),
+        _column("المطلوب", "required_qty", "Float", 90),
+        _column("الكمية المصنعة", "manufactured_qty", "Float", 110),
+        _column("المتبقي", "remaining_qty", "Float", 90),
+        _column("حالة السطر", "manufacturing_status", "Data", 100),
+    ]
+    if can_view_people:
+        columns.append(_column("تم بواسطة", "manufactured_by", "Link", 170, "User"))
+
+    if not frappe.db.exists("DocType", "Material Request Manufacturing Detail"):
+        return columns, [], "لا يوجد جدول تفاصيل التصنيع في هذه البيئة.", None, [], 0
+
+    conditions = [
+        "mr.docstatus = 1",
+        "IFNULL(mrd.manufactured_qty, 0) > 0",
+    ]
+    values: dict[str, Any] = {"limit": _safe_limit(filters, default=500)}
+
+    if filters.get("from_date"):
+        conditions.append("DATE(mrd.manufactured_at) >= %(from_date)s")
+        values["from_date"] = filters.from_date
+    if filters.get("to_date"):
+        conditions.append("DATE(mrd.manufactured_at) <= %(to_date)s")
+        values["to_date"] = filters.to_date
+    if filters.get("material_request"):
+        conditions.append("mrd.parent = %(material_request)s")
+        values["material_request"] = filters.material_request
+    if filters.get("sales_order"):
+        conditions.append("IFNULL(mr.sales_order, '') = %(sales_order)s")
+        values["sales_order"] = filters.sales_order
+    if filters.get("customer_name"):
+        conditions.append("INSTR(IFNULL(mr.customer_name, ''), %(customer_name)s) > 0")
+        values["customer_name"] = filters.customer_name
+    if filters.get("workflow_state"):
+        conditions.append("IFNULL(mr.workflow_state, '') = %(workflow_state)s")
+        values["workflow_state"] = filters.workflow_state
+    if filters.get("manufactured_by") and can_view_people:
+        conditions.append("IFNULL(mrd.manufactured_by, '') = %(manufactured_by)s")
+        values["manufactured_by"] = filters.manufactured_by
+    if filters.get("line_type"):
+        conditions.append("mrd.line_type = %(line_type)s")
+        values["line_type"] = filters.line_type
+    if filters.get("item_code"):
+        conditions.append("mrd.item_code = %(item_code)s")
+        values["item_code"] = filters.item_code
+    if filters.get("item_group"):
+        conditions.append("IFNULL(it.item_group, '') = %(item_group)s")
+        values["item_group"] = filters.item_group
+
+    select_parts = [
+        "mrd.manufactured_at AS manufactured_at",
+        "mrd.line_type AS line_type",
+        "mrd.parent AS material_request",
+        "mr.sales_order AS sales_order",
+        "mr.workflow_state AS workflow_state",
+        "IFNULL(mr.customer_name, '') AS customer_name",
+        "mrd.material_request_row AS door_no",
+        "IFNULL(mrd.component_label, '') AS component_label",
+        "mrd.item_code AS item_code",
+        "mrd.item_name AS item_name",
+        "IFNULL(it.item_group, '') AS item_group",
+        "mrd.required_qty AS required_qty",
+        "mrd.manufactured_qty AS manufactured_qty",
+        "mrd.remaining_qty AS remaining_qty",
+        "mrd.status AS manufacturing_status",
+    ]
+    if can_view_people:
+        select_parts.append("IFNULL(mrd.manufactured_by, '') AS manufactured_by")
+
+    rows = frappe.db.sql(
+        f"""
+        SELECT {", ".join(select_parts)}
+        FROM `tabMaterial Request Manufacturing Detail` mrd
+        INNER JOIN `tabMaterial Request` mr ON mr.name = mrd.parent
+        LEFT JOIN `tabItem` it ON it.name = mrd.item_code
+        WHERE {" AND ".join(conditions)}
+        ORDER BY
+            IFNULL(mrd.manufactured_at, '') DESC,
+            mrd.parent DESC,
+            mrd.material_request_row ASC,
+            mrd.line_type ASC,
+            mrd.component_label ASC
+        LIMIT %(limit)s
+        """,
+        values,
+        as_dict=True,
+    )
+
+    total_manufactured_qty = 0
+    request_names = {}
+    item_codes = {}
+    line_type_totals = {}
+    for row in rows:
+        manufactured_qty = flt(row.get("manufactured_qty") or 0)
+        total_manufactured_qty += manufactured_qty
+        if row.get("material_request"):
+            request_names[row.material_request] = 1
+        if row.get("item_code"):
+            item_codes[row.item_code] = 1
+        line_type = row.get("line_type") or "غير محدد"
+        line_type_totals[line_type] = line_type_totals.get(line_type, 0) + manufactured_qty
+
+    report_summary = [
+        {"value": total_manufactured_qty, "label": "إجمالي الكمية المصنعة", "datatype": "Float", "indicator": "green"},
+        {"value": len(rows), "label": "عدد السطور المصنعة", "datatype": "Int", "indicator": "blue"},
+        {"value": len(request_names), "label": "عدد طلبات المواد", "datatype": "Int", "indicator": "blue"},
+        {"value": len(item_codes), "label": "عدد الأصناف", "datatype": "Int", "indicator": "orange"},
+    ]
+    for line_type, manufactured_qty in sorted(line_type_totals.items()):
+        report_summary.append(
+            {
+                "value": manufactured_qty,
+                "label": "مصنع - " + line_type,
+                "datatype": "Float",
+                "indicator": "green" if line_type == "باب" else "blue",
+            }
+        )
+
+    message = "لا توجد أبواب أو مكونات مصنعة ضمن الفلاتر الحالية." if not rows else None
+    if filters.get("manufactured_by") and not can_view_people:
+        message = "تم إخفاء فلتر وعمود المستخدم لعدم وجود صلاحية قراءة بيانات الموظفين."
+    return columns, rows, message, None, report_summary, 0
+
+
+def get_manufacturing_followup_report(filters: dict[str, Any] | None = None):
+    filters = _filters_dict(filters)
+    required_fields = ("custom_is_manufactured", "custom_manufactured_at", "custom_manufactured_by")
+    if not all(_has_mri_column(fieldname) for fieldname in required_fields):
+        columns, rows = _empty_report("حقول متابعة التصنيع غير موجودة على سطور طلب المواد.")
+        return columns, rows
+
+    can_view_people = _can_view_person_fields()
+    columns = [
+        _column("تاريخ التصنيع", "manufactured_at", "Datetime", 170),
+        _column("طلب المواد", "material_request", "Link", 150, "Material Request"),
+        _column("رقم الباب", "door_no", "Int", 90),
+        _column("كود الصنف", "item_code", "Link", 140, "Item"),
+        _column("اسم الصنف", "item_name", "Data", 260),
+        _column("الكمية", "qty", "Float", 90),
+        _column("الكمية المتبقية", "remaining_qty", "Float", 110),
+        _column("العميل", "customer_name", "Data", 220),
+        _column("الحالة", "workflow_state", "Data", 140),
+    ]
+    if can_view_people:
+        columns.append(_column("بواسطة التصنيع", "manufactured_by", "Data", 180))
+
+    conditions = ["IFNULL(mri.custom_is_manufactured, 0) = 1"]
+    values: dict[str, Any] = {"limit": _safe_limit(filters, default=500)}
+    if filters.get("from_date"):
+        conditions.append("DATE(mri.custom_manufactured_at) >= %(from_date)s")
+        values["from_date"] = filters.from_date
+    if filters.get("to_date"):
+        conditions.append("DATE(mri.custom_manufactured_at) <= %(to_date)s")
+        values["to_date"] = filters.to_date
+    if filters.get("material_request"):
+        conditions.append("mri.parent = %(material_request)s")
+        values["material_request"] = filters.material_request
+    if filters.get("item_code"):
+        conditions.append("mri.item_code = %(item_code)s")
+        values["item_code"] = filters.item_code
+    if filters.get("customer_name"):
+        conditions.append("INSTR(IFNULL(mr.customer_name, ''), %(customer_name)s) > 0")
+        values["customer_name"] = filters.customer_name
+    if filters.get("manufactured_by") and can_view_people:
+        conditions.append("IFNULL(mri.custom_manufactured_by, '') = %(manufactured_by)s")
+        values["manufactured_by"] = filters.manufactured_by
+
+    select_parts = [
+        "mri.custom_manufactured_at AS manufactured_at",
+        "mr.name AS material_request",
+        "mri.idx AS door_no",
+        "mri.item_code AS item_code",
+        "mri.item_name AS item_name",
+        "mri.qty AS qty",
+        "0 AS remaining_qty",
+        "COALESCE(mr.customer_name, mr.customer, '') AS customer_name",
+        "mr.workflow_state AS workflow_state",
+    ]
+    if can_view_people:
+        select_parts.append("mri.custom_manufactured_by AS manufactured_by")
+
+    rows = frappe.db.sql(
+        f"""
+        SELECT {", ".join(select_parts)}
+        FROM `tabMaterial Request Item` mri
+        INNER JOIN `tabMaterial Request` mr ON mr.name = mri.parent
+        WHERE {" AND ".join(conditions)}
+        ORDER BY mri.custom_manufactured_at DESC, mr.name DESC, mri.idx ASC
+        LIMIT %(limit)s
+        """,
+        values,
+        as_dict=True,
+    )
+    message = None
+    if filters.get("manufactured_by") and not can_view_people:
+        message = "تم إخفاء فلتر وعمود المستخدم لعدم وجود صلاحية قراءة بيانات الموظفين."
+    return columns, rows, message, None, [{"value": len(rows), "label": "عدد السطور", "datatype": "Int"}], 0
+
+
+def get_store_details_report(filters: dict[str, Any] | None = None):
+    filters = _filters_dict(filters)
+    if not _has_mri_column("custom_store_data"):
+        columns, rows = _empty_report("حقل بيانات المخازن غير موجود على سطور طلب المواد.")
+        return columns, rows
+
+    columns = [
+        _column("طلب المواد", "material_request", "Link", 140, "Material Request"),
+        _column("التاريخ", "transaction_date", "Date", 110),
+        _column("الحالة", "workflow_state", "Data", 140),
+        _column("العميل", "customer_name", "Data", 180),
+        _column("كود الصنف", "item_code", "Link", 140, "Item"),
+        _column("اسم الصنف", "item_name", "Data", 220),
+        _column("كمية السطر", "line_qty", "Float", 90),
+        _column("النموذج", "cutting_template", "Data", 140),
+        _column("المكون", "component", "Data", 130),
+        _column("الصنف المخزني", "store_item", "Link", 180, "Item"),
+        _column("اللون", "color", "Data", 100),
+        _column("كمية المخزن", "store_qty", "Float", 110),
+    ]
+
+    conditions = ["mr.docstatus < 2", "IFNULL(mri.custom_store_data, '') != ''"]
+    values: dict[str, Any] = {"limit": _safe_limit(filters, default=500)}
+    if filters.get("from_date"):
+        conditions.append("mr.transaction_date >= %(from_date)s")
+        values["from_date"] = filters.from_date
+    if filters.get("to_date"):
+        conditions.append("mr.transaction_date <= %(to_date)s")
+        values["to_date"] = filters.to_date
+    if filters.get("workflow_state"):
+        conditions.append("mr.workflow_state = %(workflow_state)s")
+        values["workflow_state"] = filters.workflow_state
+    if filters.get("material_request"):
+        conditions.append("mri.parent = %(material_request)s")
+        values["material_request"] = filters.material_request
+    if filters.get("customer_name"):
+        conditions.append("INSTR(IFNULL(mr.customer_name, ''), %(customer_name)s) > 0")
+        values["customer_name"] = filters.customer_name
+    if filters.get("item_code"):
+        conditions.append("mri.item_code = %(item_code)s")
+        values["item_code"] = filters.item_code
+
+    item_rows = frappe.db.sql(
+        f"""
+        SELECT
+            mri.parent AS material_request,
+            mr.transaction_date,
+            mr.workflow_state,
+            mr.customer_name,
+            mri.item_code,
+            mri.item_name,
+            mri.qty AS line_qty,
+            {_mri_optional_column("custom_cutting_template", "cutting_template")},
+            mri.custom_store_data AS store_data
+        FROM `tabMaterial Request Item` mri
+        INNER JOIN `tabMaterial Request` mr ON mr.name = mri.parent
+        WHERE {" AND ".join(conditions)}
+        ORDER BY mr.transaction_date DESC, mri.parent DESC, mri.idx ASC
+        LIMIT %(limit)s
+        """,
+        values,
+        as_dict=True,
+    )
+
+    component_labels = {
+        row.component_name: row.label_ar or row.component_name
+        for row in frappe.get_all("Store Component", fields=["component_name", "label_ar"], limit_page_length=0)
+    } if frappe.db.exists("DocType", "Store Component") else {}
+
+    selected_component = (filters.get("component") or "").strip()
+    rows = []
+    for item in item_rows:
+        try:
+            stores = frappe.parse_json(item.store_data) or []
+        except Exception:
+            stores = []
+        if not isinstance(stores, list):
+            continue
+        for store in stores:
+            if not isinstance(store, dict):
+                continue
+            component = (store.get("component") or "").strip()
+            if selected_component and component != selected_component:
+                continue
+            rows.append(
+                {
+                    "material_request": item.material_request,
+                    "transaction_date": item.transaction_date,
+                    "workflow_state": item.workflow_state,
+                    "customer_name": item.customer_name,
+                    "item_code": item.item_code,
+                    "item_name": item.item_name,
+                    "line_qty": item.line_qty,
+                    "cutting_template": item.cutting_template,
+                    "component": component_labels.get(component, component),
+                    "store_item": store.get("item") or store.get("item_code"),
+                    "color": store.get("color") or store.get("colour") or "",
+                    "store_qty": flt(store.get("qty")) * flt(item.line_qty or 1),
+                }
+            )
+    message = "لا توجد بيانات مخازن ضمن الفلاتر الحالية." if not rows else None
+    return columns, rows, message, None, [{"value": len(rows), "label": "عدد السطور", "datatype": "Int"}], 0
+
+
+def _mri_optional_column(fieldname: str, alias: str) -> str:
+    if not _has_mri_column(fieldname):
+        return f"NULL AS {_quote_identifier(alias)}"
+    return f"mri.{_quote_identifier(fieldname)} AS {_quote_identifier(alias)}"
+
+
+def get_operational_states_report(filters: dict[str, Any] | None = None):
+    filters = _filters_dict(filters)
+    preset = filters.get("operation_preset") or "جاري التصنيع"
+    if preset == "طلبات التصنيع":
+        return get_manufacturing_requests_items_report(filters)
+
+    columns = [
+        _column("حالة Workflow", "workflow_state", "Data", 150),
+        _column("طلب المواد", "material_request", "Link", 150, "Material Request"),
+        _column("حالة المستند", "docstatus", "Int", 90),
+        _column("تاريخ الطلب", "transaction_date", "Date", 110),
+        _column("أمر البيع", "sales_order", "Link", 140, "Sales Order"),
+        _column("العميل", "customer_name", "Data", 190),
+        _column("الجوال", "mobile_no", "Data", 120),
+        _column("المنطقة", "territory", "Link", 120, "Territory"),
+        _column("الحي", "district", "Data", 120),
+        _column("رابط الخريطة", "google_map", "Data", 220),
+    ]
+
+    conditions = ["mr.docstatus < 2"]
+    values: dict[str, Any] = {"limit": _safe_limit(filters, default=100)}
+    if preset == "جاري التصنيع":
+        conditions.append("mr.workflow_state IN ('جاري تصنيع الاستبدال', 'جاري التصنيع')")
+    elif preset == "توريدات معلقة":
+        conditions.append("mr.workflow_state IN ('تم تصنيع الاستبدال', 'تم التصنيع')")
+    elif preset == "مقاسات معلقة":
+        conditions.append("mr.workflow_state = 'مقاسات معلقة'")
+    elif preset == "صيانة معلقة":
+        conditions.append("mr.workflow_state = 'صيانة معلقة'")
+        if _has_mr_column("company"):
+            conditions.append("IFNULL(mr.company, '') LIKE %(company_like)s")
+            values["company_like"] = "%شركة رواد المهارة للمقاولات المعمارية%"
+    elif preset == "استحقاق خلال أسبوعين":
+        conditions.append("mr.workflow_state IN ('جاري التصنيع', 'اعتماد التصنيع', 'تم التصنيع', 'المصنع')")
+        if _has_mr_column("delivery_date"):
+            conditions.append("mr.delivery_date BETWEEN %(today)s AND %(after_14)s")
+            values["today"] = nowdate()
+            values["after_14"] = add_days(nowdate(), 14)
+        if _has_mr_column(MR_BRANCH_FIELD):
+            conditions.append(f"IFNULL(mr.{_quote_identifier(MR_BRANCH_FIELD)}, '') != 'المصنع'")
+
+    if filters.get("material_request"):
+        conditions.append("mr.name = %(material_request)s")
+        values["material_request"] = filters.material_request
+    if filters.get("customer_name"):
+        conditions.append("INSTR(IFNULL(mr.customer_name, ''), %(customer_name)s) > 0")
+        values["customer_name"] = filters.customer_name
+    if filters.get("workflow_state"):
+        conditions.append("mr.workflow_state = %(workflow_state)s")
+        values["workflow_state"] = filters.workflow_state
+
+    rows = frappe.db.sql(
+        f"""
+        SELECT
+            {_mr_column("workflow_state", "workflow_state")},
+            mr.name AS material_request,
+            mr.docstatus,
+            {_mr_column("transaction_date", "transaction_date")},
+            {_mr_column("sales_order", "sales_order")},
+            {_mr_column("customer_name", "customer_name")},
+            {_mr_column("custom_mobile_no", "mobile_no")},
+            {_mr_column("territory", "territory")},
+            {_mr_column("custom_district", "district")},
+            {_mr_column("custom_google_map", "google_map")}
+        FROM `tabMaterial Request` mr
+        WHERE {" AND ".join(conditions)}
+        ORDER BY mr.transaction_date DESC, mr.name DESC
+        LIMIT %(limit)s
+        """,
+        values,
+        as_dict=True,
+    )
+    return columns, rows, None, None, [{"value": len(rows), "label": preset, "datatype": "Int"}], 0
+
+
+def get_manufacturing_requests_items_report(filters: dict[str, Any] | None = None):
+    filters = _filters_dict(filters)
+    columns = [
+        _column("طلب المواد", "material_request", "Link", 150, "Material Request"),
+        _column("العميل", "customer", "Link", 140, "Customer"),
+        _column("التاريخ", "transaction_date", "Date", 110),
+        _column("الحالة", "status", "Data", 110),
+        _column("فاتورة المبيعات", "sales_invoice", "Link", 140, "Sales Invoice"),
+        _column("الكمية", "qty", "Float", 90),
+        _column("الصنف", "item_code", "Link", 140, "Item"),
+        _column("اسم الصنف", "item_name", "Data", 220),
+        _column("نوع الباب", "door_type", "Data", 110),
+        _column("عرض", "width", "Float", 90),
+        _column("طول", "height", "Float", 90),
+        _column("عرض الجدار", "wall_width", "Float", 100),
+        _column("ملاحظات", "notes", "Data", 220),
+    ]
+    conditions = ["mr.docstatus != 2"]
+    values: dict[str, Any] = {"limit": _safe_limit(filters, default=200)}
+    if filters.get("material_request"):
+        conditions.append("mr.name = %(material_request)s")
+        values["material_request"] = filters.material_request
+    if filters.get("item_code"):
+        conditions.append("mri.item_code = %(item_code)s")
+        values["item_code"] = filters.item_code
+    if filters.get("customer_name"):
+        conditions.append("INSTR(COALESCE(mr.customer_name, mr.customer, ''), %(customer_name)s) > 0")
+        values["customer_name"] = filters.customer_name
+
+    rows = frappe.db.sql(
+        f"""
+        SELECT
+            mr.name AS material_request,
+            {_mr_column("customer", "customer")},
+            {_mr_column("transaction_date", "transaction_date")},
+            {_mr_column("status", "status")},
+            {_mr_column("sales_invoice", "sales_invoice")},
+            mri.qty,
+            mri.item_code,
+            mri.item_name,
+            {_mri_optional_column("نوع_الباب", "door_type")},
+            {_mri_optional_column("عرض", "width")},
+            {_mri_optional_column("طول", "height")},
+            {_mri_optional_column("عرض_الجدار", "wall_width")},
+            {_mri_optional_column("ملاحظات", "notes")}
+        FROM `tabMaterial Request` mr
+        INNER JOIN `tabMaterial Request Item` mri ON mri.parent = mr.name
+        WHERE {" AND ".join(conditions)}
+        ORDER BY mr.transaction_date DESC, mr.name DESC, mri.idx ASC
+        LIMIT %(limit)s
+        """,
+        values,
+        as_dict=True,
+    )
+    return columns, rows, None, None, [{"value": len(rows), "label": "طلبات التصنيع", "datatype": "Int"}], 0
+
+
 def get_all_material_requests_columns() -> list[dict[str, Any]]:
     return [
         _column("طلب المواد", "material_request", "Link", 160, "Material Request"),
@@ -389,12 +974,25 @@ def get_sales_order_summary_columns() -> list[dict[str, Any]]:
     ]
 
 
+@frappe.whitelist()
 def execute_all_material_requests_report(filters: dict[str, Any] | None = None):
     filters = _filters_dict(filters)
-    if filters.get("view_mode") == "ملخص أمر البيع":
+    view_mode = filters.get("view_mode") or "طلبات المواد"
+
+    if view_mode == "ملخص أمر البيع":
         rows = get_related_items(
             sales_order=filters.get("sales_order"),
             mr_name=filters.get("material_request"),
         )
         return get_sales_order_summary_columns(), rows
+    if view_mode == "نتائج التخصيم":
+        return _run_existing_report(DELEGATED_REPORTS[view_mode], filters)
+    if view_mode == "التصنيع اليومي":
+        return get_manufacturing_daily_report(filters)
+    if view_mode == "متابعة التصنيع":
+        return get_manufacturing_followup_report(filters)
+    if view_mode == "تفاصيل المخازن":
+        return get_store_details_report(filters)
+    if view_mode == "حالات تشغيلية":
+        return get_operational_states_report(filters)
     return get_all_material_requests_columns(), get_all_material_requests(filters)
