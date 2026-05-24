@@ -12,14 +12,25 @@
 
 1. ارفع هذا المستودع إلى GitHub.
 2. أضف التطبيق `namar_test` في Frappe Cloud وثبته على موقع التجريبي.
-3. بعد التثبيت، شغل أداة التعطيل أولًا من مستودع التطبيق:
+3. قبل التعطيل، تحقق أن التطبيق المثبت يعمل وأن السكربتات القديمة ما زالت موجودة:
+   ```bash
+   python3 scripts/smoke_test.py --env test --expect-legacy any --app-installed
+   ```
+4. بعد التثبيت، شغل أداة التعطيل أولًا من مستودع التطبيق:
    ```bash
    python3 scripts/manage_legacy_scripts.py --env test --action disable --execute
    ```
-4. اختبر النماذج والـ APIs.
-5. بعد نجاح الاختبار، احذف السكربتات القديمة:
+5. اختبر أن السكربتات القديمة أصبحت معطلة وأن التطبيق ما زال يرد:
+   ```bash
+   python3 scripts/smoke_test.py --env test --expect-legacy disabled --app-installed
+   ```
+6. بعد نجاح الاختبار، احذف السكربتات القديمة:
    ```bash
    python3 scripts/manage_legacy_scripts.py --env test --action delete --execute
+   ```
+7. تحقق أن السكربتات القديمة حذفت وأن التطبيق ما زال يرد:
+   ```bash
+   python3 scripts/smoke_test.py --env test --expect-legacy deleted --app-installed
    ```
 
 الأدوات تعمل بوضع `dry-run` افتراضيًا ما لم تمرر `--execute`.

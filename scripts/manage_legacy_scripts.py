@@ -95,7 +95,7 @@ def load_names() -> list[tuple[str, str]]:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Disable or delete migrated legacy Server/Client Scripts.")
     parser.add_argument("--env", choices=["test", "prod"], default="test")
-    parser.add_argument("--action", choices=["disable", "delete", "count"], default="count")
+    parser.add_argument("--action", choices=["disable", "delete", "count", "status"], default="count")
     parser.add_argument("--execute", action="store_true", help="Actually mutate Frappe records. Default is dry-run.")
     args = parser.parse_args()
 
@@ -118,8 +118,25 @@ def main() -> None:
         safe = name.replace("/", "_")
         (backup_dir / f"{doctype.replace(' ', '_')}__{safe}.json").write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    print(f"Existing: {len(existing)} | Missing: {len(missing)} | Backup: {backup_dir}")
-    if args.action == "count":
+    enabled = []
+    disabled = []
+    for doctype, name, doc in existing:
+        if doctype == "Server Script":
+            is_enabled = int(doc.get("disabled") or 0) == 0
+        else:
+            is_enabled = int(doc.get("enabled") or 0) == 1
+        (enabled if is_enabled else disabled).append((doctype, name))
+
+    print(
+        f"Existing: {len(existing)} | Enabled: {len(enabled)} | "
+        f"Disabled: {len(disabled)} | Missing: {len(missing)} | Backup: {backup_dir}"
+    )
+    if args.action in {"count", "status"}:
+        if args.action == "status":
+            for label, rows in (("Enabled", enabled), ("Disabled", disabled), ("Missing", missing)):
+                print(f"{label}: {len(rows)}")
+                for doctype, name in rows:
+                    print(f"  - {doctype}: {name}")
         return
     if not args.execute:
         print(f"Dry-run only. Would {args.action} {len(existing)} records.")
