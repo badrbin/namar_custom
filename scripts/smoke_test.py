@@ -24,6 +24,11 @@ SAFE_APP_METHODS = [
     "namar_test.api.get_related_items",
 ]
 
+REPORT_SMOKE_FILTERS = {
+    "view_mode": "طلبات المواد",
+    "limit": 1,
+}
+
 
 def load_env(path: Path) -> None:
     if not path.exists():
@@ -151,11 +156,26 @@ def run_app_smoke(client: Client) -> None:
         print(f"App method OK: {method} -> {kind}")
 
 
+def run_report_smoke(client: Client) -> None:
+    message = client.call_method(
+        "frappe.desk.query_report.run",
+        {
+            "report_name": "كل طلبات المواد",
+            "filters": json.dumps(REPORT_SMOKE_FILTERS, ensure_ascii=False),
+            "ignore_prepared_report": 1,
+        },
+    )
+    if not isinstance(message, dict) or "result" not in message:
+        raise RuntimeError(f"Unexpected report response: {message!r}")
+    print(f"Report OK: كل طلبات المواد -> {len(message.get('result') or [])} rows")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Read-only smoke tests for the namar_test migration.")
     parser.add_argument("--env", choices=["test", "prod"], default="test")
     parser.add_argument("--expect-legacy", choices=["any", "enabled", "disabled", "deleted"], default="any")
     parser.add_argument("--app-installed", action="store_true", help="Call safe namespaced app APIs.")
+    parser.add_argument("--report-installed", action="store_true", help="Run the migrated Script Report.")
     args = parser.parse_args()
 
     if args.env != "test":
@@ -166,6 +186,8 @@ def main() -> None:
     assert_legacy(status, args.expect_legacy)
     if args.app_installed:
         run_app_smoke(client)
+    if args.report_installed:
+        run_report_smoke(client)
 
 
 if __name__ == "__main__":

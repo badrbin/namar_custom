@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import frappe
 
+from .material_requests import get_related_items as get_related_material_request_items
 from .server_runtime import run_api_script
 
 @frappe.whitelist()
@@ -150,4 +151,8 @@ def get_supplier_summary(**kwargs):
 
 @frappe.whitelist()
 def get_related_items(**kwargs):
-    return run_api_script("كل طلبات المواد", kwargs)
+    return get_related_material_request_items(
+        sales_order=kwargs.get("sales_order"),
+        mr_name=kwargs.get("mr_name"),
+        current_items=kwargs.get("current_items"),
+    )
