@@ -1,13 +1,13 @@
 {
-  "creation": "2026-05-25 18:11:47.025170",
+  "creation": "2026-05-26 16:53:25.272265",
   "docstatus": 0,
   "doctype": "Client Script",
-  "dt": "Material Request",
+  "dt": "Sales Order",
   "enabled": 1,
   "idx": 0,
-  "modified": "2026-05-25 18:34:48.326180",
+  "modified": "2026-05-27 02:55:30.050385",
   "modified_by": "badrarroug@namar.net",
-  "name": "حساب التخصيم",
+  "name": "Sales Order Cancel Visibility By Role",
   "owner": "badrarroug@namar.net",
   "view": "Form"
 }

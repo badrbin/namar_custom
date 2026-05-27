@@ -40,26 +40,6 @@
     "view": "Form"
   },
   {
-    "code_file": "h.js",
-    "dt": "Installation Note",
-    "enabled": 1,
-    "meta_file": "h.meta.json",
-    "modified": "2026-02-10 23:18:57.995848",
-    "name": "h",
-    "slug": "h",
-    "view": "Form"
-  },
-  {
-    "code_file": "j.js",
-    "dt": "Delivery Note",
-    "enabled": 1,
-    "meta_file": "j.meta.json",
-    "modified": "2026-02-22 06:57:10.438243",
-    "name": "j",
-    "slug": "j",
-    "view": "Form"
-  },
-  {
     "code_file": "lead_google_map_coordinates.js",
     "dt": "Lead",
     "enabled": 1,
@@ -150,6 +130,16 @@
     "view": "Form"
   },
   {
+    "code_file": "sales_order_cancel_visibility_by_role.js",
+    "dt": "Sales Order",
+    "enabled": 1,
+    "meta_file": "sales_order_cancel_visibility_by_role.meta.json",
+    "modified": "2026-05-27 02:55:30.050385",
+    "name": "Sales Order Cancel Visibility By Role",
+    "slug": "sales_order_cancel_visibility_by_role",
+    "view": "Form"
+  },
+  {
     "code_file": "sales_order_dashboard_so.js",
     "dt": "Sales Order",
     "enabled": 1,
@@ -210,11 +200,31 @@
     "view": "Form"
   },
   {
+    "code_file": "h.js",
+    "dt": "Installation Note",
+    "enabled": 1,
+    "meta_file": "h.meta.json",
+    "modified": "2026-02-10 23:18:57.995848",
+    "name": "h",
+    "slug": "h",
+    "view": "Form"
+  },
+  {
+    "code_file": "j.js",
+    "dt": "Delivery Note",
+    "enabled": 1,
+    "meta_file": "j.meta.json",
+    "modified": "2026-02-22 06:57:10.438243",
+    "name": "j",
+    "slug": "j",
+    "view": "Form"
+  },
+  {
     "code_file": "client_script_022.js",
     "dt": "Material Request",
     "enabled": 1,
     "meta_file": "client_script_022.meta.json",
-    "modified": "2026-05-17 14:00:24.628402",
+    "modified": "2026-05-25 18:34:48.326180",
     "name": "حساب التخصيم",
     "slug": "client_script_022",
     "view": "Form"

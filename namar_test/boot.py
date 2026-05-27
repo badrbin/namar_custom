@@ -1,34 +1,20 @@
 from __future__ import annotations
 
+import json
+from importlib.resources import files
+
 import frappe
 
-MIGRATED_CLIENT_SCRIPT_NAMES = {
-    "Customer Statement - DN",
-    "Customer Statement - SI",
-    "Customer Statement - SO",
-    "Extract Google Map Coordinates",
-    "h",
-    "j",
-    "Lead Google Map Coordinates",
-    "Material Request Dashboard",
-    "Material Request Driver Filter",
-    "Material Request Linked Request Autofill",
-    "Material Request Manufacturing Status List",
-    "Material Request Manufacturing Tab",
-    "Material Request Replacement Reference Filter",
-    "Material Request Scenario Bypass",
-    "Purchase Order Dashboard PO",
-    "Sales Order Dashboard SO",
-    "Sales Order Material Request By Balance",
-    "Supplier Statement - PO",
-    "Total Quantity",
-    "Urgent Material Request Banner",
-    "VIP Customer Highlight",
-    "حساب التخصيم",
-    "خصم تصنيع",
-    "فلتر أصناف النطاقات",
-    "كل طلبات المواد",
-}
+
+def _migrated_client_script_names() -> set[str]:
+    try:
+        manifest_path = files("namar_test.legacy_scripts") / "client_scripts_manifest.json"
+        return {entry["name"] for entry in json.loads(manifest_path.read_text(encoding="utf-8"))}
+    except Exception:
+        return set()
+
+
+MIGRATED_CLIENT_SCRIPT_NAMES = _migrated_client_script_names()
 
 
 def boot_session(bootinfo):

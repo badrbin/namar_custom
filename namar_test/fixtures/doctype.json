@@ -1,0 +1,248 @@
+[
+  {
+    "doctype": "DocType",
+    "name": "Material Request Manufacturing Detail",
+    "module": "Stock",
+    "custom": 1,
+    "istable": 1,
+    "editable_grid": 1,
+    "quick_entry": 0,
+    "engine": "InnoDB",
+    "fields": [
+      {
+        "fieldname": "line_type",
+        "label": "النوع",
+        "fieldtype": "Select",
+        "options": "باب\nمكون",
+        "reqd": 1,
+        "in_list_view": 1,
+        "read_only": 1
+      },
+      {
+        "fieldname": "material_request_row",
+        "label": "رقم الباب",
+        "fieldtype": "Int",
+        "in_list_view": 1,
+        "read_only": 1
+      },
+      {
+        "fieldname": "component_label",
+        "label": "اسم المكون",
+        "fieldtype": "Data",
+        "in_list_view": 1,
+        "read_only": 1
+      },
+      {
+        "fieldname": "component",
+        "label": "المكون",
+        "fieldtype": "Link",
+        "options": "Store Component",
+        "in_list_view": 1,
+        "read_only": 1
+      },
+      {
+        "fieldname": "item_code",
+        "label": "الصنف",
+        "fieldtype": "Link",
+        "options": "Item",
+        "in_list_view": 1,
+        "read_only": 1
+      },
+      {
+        "fieldname": "item_name",
+        "label": "اسم الصنف",
+        "fieldtype": "Data",
+        "read_only": 1
+      },
+      {
+        "fieldname": "required_qty",
+        "label": "المطلوب",
+        "fieldtype": "Float",
+        "in_list_view": 1,
+        "read_only": 1
+      },
+      {
+        "fieldname": "manufactured_qty",
+        "label": "تم تصنيعه",
+        "fieldtype": "Float",
+        "in_list_view": 1,
+        "read_only": 1
+      },
+      {
+        "fieldname": "remaining_qty",
+        "label": "المتبقي",
+        "fieldtype": "Float",
+        "in_list_view": 1,
+        "read_only": 1
+      },
+      {
+        "fieldname": "status",
+        "label": "الحالة",
+        "fieldtype": "Select",
+        "options": "غير مصنع\nجزئي\nمكتمل",
+        "in_list_view": 1,
+        "read_only": 1
+      },
+      {
+        "fieldname": "tracking_mode",
+        "label": "طريقة التتبع",
+        "fieldtype": "Select",
+        "options": "مع الباب\nمستقل\nلا يتتبع",
+        "read_only": 1
+      },
+      {
+        "fieldname": "required_for_delivery",
+        "label": "مطلوب للتوريد",
+        "fieldtype": "Check",
+        "default": "1",
+        "read_only": 1
+      },
+      {
+        "fieldname": "manufactured_at",
+        "label": "وقت التصنيع",
+        "fieldtype": "Datetime",
+        "read_only": 1
+      },
+      {
+        "fieldname": "manufactured_by",
+        "label": "تم بواسطة",
+        "fieldtype": "Link",
+        "options": "User",
+        "read_only": 1
+      },
+      {
+        "fieldname": "source_key",
+        "label": "مفتاح المصدر",
+        "fieldtype": "Data",
+        "hidden": 1,
+        "read_only": 1
+      },
+      {
+        "fieldname": "notes",
+        "label": "ملاحظات",
+        "fieldtype": "Small Text",
+        "read_only": 1
+      }
+    ],
+    "permissions": [
+      {
+        "role": "System Manager",
+        "read": 1,
+        "write": 1,
+        "create": 1,
+        "delete": 1
+      },
+      {
+        "role": "Stock Manager",
+        "read": 1,
+        "write": 1,
+        "create": 1,
+        "delete": 1
+      },
+      {
+        "role": "Stock User",
+        "read": 1,
+        "report": 1,
+        "export": 1,
+        "print": 1
+      }
+    ]
+  },
+  {
+    "doctype": "DocType",
+    "name": "Material Request Manufactured Door",
+    "module": "Stock",
+    "custom": 1,
+    "istable": 1,
+    "editable_grid": 0,
+    "quick_entry": 0,
+    "engine": "InnoDB",
+    "fields": [
+      {
+        "fieldname": "material_request_row",
+        "label": "رقم سطر الباب",
+        "fieldtype": "Int",
+        "in_list_view": 1,
+        "read_only": 1
+      },
+      {
+        "fieldname": "door_sequence",
+        "label": "رقم الباب",
+        "fieldtype": "Int",
+        "in_list_view": 1,
+        "read_only": 1
+      },
+      {
+        "fieldname": "material_request_item",
+        "label": "سطر طلب المواد",
+        "fieldtype": "Data",
+        "hidden": 1,
+        "read_only": 1
+      },
+      {
+        "fieldname": "item_code",
+        "label": "الصنف",
+        "fieldtype": "Link",
+        "options": "Item",
+        "in_list_view": 1,
+        "read_only": 1
+      },
+      {
+        "fieldname": "item_name",
+        "label": "اسم الصنف",
+        "fieldtype": "Data",
+        "read_only": 1
+      },
+      {
+        "fieldname": "manufactured_at",
+        "label": "وقت التسجيل",
+        "fieldtype": "Datetime",
+        "in_list_view": 1,
+        "read_only": 1
+      },
+      {
+        "fieldname": "manufactured_by",
+        "label": "تم بواسطة",
+        "fieldtype": "Data",
+        "in_list_view": 1,
+        "read_only": 1
+      },
+      {
+        "fieldname": "source",
+        "label": "مصدر التسجيل",
+        "fieldtype": "Select",
+        "options": "QR\nيدوي\nتصحيح\nترحيل",
+        "read_only": 1
+      },
+      {
+        "fieldname": "notes",
+        "label": "ملاحظات",
+        "fieldtype": "Small Text",
+        "read_only": 1
+      }
+    ],
+    "permissions": [
+      {
+        "role": "System Manager",
+        "read": 1,
+        "write": 1,
+        "create": 1,
+        "delete": 1
+      },
+      {
+        "role": "Stock Manager",
+        "read": 1,
+        "write": 1,
+        "create": 1,
+        "delete": 1
+      },
+      {
+        "role": "Stock User",
+        "read": 1,
+        "report": 1,
+        "export": 1,
+        "print": 1
+      }
+    ]
+  }
+]

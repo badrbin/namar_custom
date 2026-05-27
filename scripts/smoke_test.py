@@ -108,6 +108,16 @@ class Client:
         body = response.json()
         return body.get("message")
 
+    def list_docs(self, doctype: str, fields: list[str]) -> list[dict]:
+        response = self.session.get(
+            f"{self.base}/api/resource/{quote(doctype, safe='')}",
+            params={"fields": json.dumps(fields), "limit_page_length": 500},
+            timeout=90,
+        )
+        if not response.ok:
+            raise RuntimeError(f"LIST {doctype} failed: {response.status_code} {response.text}")
+        return response.json().get("data") or []
+
 
 def load_names() -> list[tuple[str, str]]:
     items: list[tuple[str, str]] = []
@@ -118,9 +128,9 @@ def load_names() -> list[tuple[str, str]]:
     return items
 
 
-def legacy_status(client: Client) -> dict[str, list[tuple[str, str]]]:
+def legacy_status(client: Client, items: list[tuple[str, str]]) -> dict[str, list[tuple[str, str]]]:
     status = {"enabled": [], "disabled": [], "missing": []}
-    for doctype, name in load_names():
+    for doctype, name in items:
         doc = client.get_doc(doctype, name)
         if doc is None:
             status["missing"].append((doctype, name))
@@ -133,7 +143,7 @@ def legacy_status(client: Client) -> dict[str, list[tuple[str, str]]]:
     return status
 
 
-def assert_legacy(status: dict[str, list[tuple[str, str]]], expected: str) -> None:
+def assert_legacy(status: dict[str, list[tuple[str, str]]], expected: str, expected_total: int) -> None:
     total = sum(len(rows) for rows in status.values())
     print(
         "Legacy scripts: "
@@ -141,17 +151,36 @@ def assert_legacy(status: dict[str, list[tuple[str, str]]], expected: str) -> No
         f"disabled={len(status['disabled'])} missing={len(status['missing'])}"
     )
     if expected == "any":
-        if total != 83 or status["missing"]:
-            raise SystemExit("Expected all 83 legacy scripts to exist.")
+        if total != expected_total or status["missing"]:
+            raise SystemExit(f"Expected all {expected_total} managed legacy scripts to exist.")
     elif expected == "enabled":
-        if len(status["enabled"]) != 83 or status["disabled"] or status["missing"]:
-            raise SystemExit("Expected all 83 legacy scripts to be enabled.")
+        if len(status["enabled"]) != expected_total or status["disabled"] or status["missing"]:
+            raise SystemExit(f"Expected all {expected_total} managed legacy scripts to be enabled.")
     elif expected == "disabled":
-        if len(status["disabled"]) != 83 or status["enabled"] or status["missing"]:
-            raise SystemExit("Expected all 83 legacy scripts to be disabled.")
+        if len(status["disabled"]) != expected_total or status["enabled"] or status["missing"]:
+            raise SystemExit(f"Expected all {expected_total} managed legacy scripts to be disabled.")
     elif expected == "deleted":
-        if status["enabled"] or status["disabled"] or len(status["missing"]) != 83:
-            raise SystemExit("Expected all 83 legacy scripts to be deleted.")
+        if status["enabled"] or status["disabled"] or len(status["missing"]) != expected_total:
+            raise SystemExit(f"Expected all {expected_total} managed legacy scripts to be deleted.")
+
+
+def assert_no_unmanaged_live_scripts(client: Client, managed_items: list[tuple[str, str]]) -> None:
+    managed = set(managed_items)
+    unmanaged: list[tuple[str, str]] = []
+    for row in client.list_docs("Server Script", ["name", "disabled"]):
+        name = row.get("name")
+        if name and ("Server Script", name) not in managed and int(row.get("disabled") or 0) == 0:
+            unmanaged.append(("Server Script", name))
+    for row in client.list_docs("Client Script", ["name", "enabled"]):
+        name = row.get("name")
+        if name and ("Client Script", name) not in managed and int(row.get("enabled") or 0) == 1:
+            unmanaged.append(("Client Script", name))
+
+    print(f"Unmanaged active scripts: {len(unmanaged)}")
+    if unmanaged:
+        for doctype, name in unmanaged:
+            print(f"  - {doctype}: {name}")
+        raise SystemExit("Found active live scripts that are not tracked in the migration manifest.")
 
 
 def run_app_smoke(client: Client) -> None:
@@ -186,14 +215,22 @@ def main() -> None:
     parser.add_argument("--expect-legacy", choices=["any", "enabled", "disabled", "deleted"], default="any")
     parser.add_argument("--app-installed", action="store_true", help="Call safe namespaced app APIs.")
     parser.add_argument("--report-installed", action="store_true", help="Run the migrated Script Report.")
+    parser.add_argument(
+        "--strict-no-unmanaged-live-scripts",
+        action="store_true",
+        help="Fail if an enabled Server Script or Client Script exists outside the managed manifest.",
+    )
     args = parser.parse_args()
 
     if args.env != "test":
         raise SystemExit("Smoke tests are intentionally limited to test for this migration.")
 
     client = Client(args.env)
-    status = legacy_status(client)
-    assert_legacy(status, args.expect_legacy)
+    managed_items = load_names()
+    status = legacy_status(client, managed_items)
+    assert_legacy(status, args.expect_legacy, len(managed_items))
+    if args.strict_no_unmanaged_live_scripts:
+        assert_no_unmanaged_live_scripts(client, managed_items)
     if args.app_installed:
         run_app_smoke(client)
     if args.report_installed:

@@ -778,7 +778,7 @@ function open_manual_manufacturing_dialog(frm) {
             }
 
             frappe.call({
-                method: "mark_manufactured_rows",
+                method: "mark_manufactured_rows_v2",
                 args: {
                     mr: frm.doc.name,
                     selected_rows: selected.map(function(entry) {

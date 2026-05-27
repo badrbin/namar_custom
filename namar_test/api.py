@@ -77,9 +77,17 @@ def map_update_field(**kwargs):
 def mark_label_manufactured(**kwargs):
     return run_api_script("mark_label_manufactured", kwargs)
 
+@frappe.whitelist(allow_guest=True)
+def mark_label_manufactured_v2(**kwargs):
+    return run_api_script("mark_label_manufactured_v2", kwargs)
+
 @frappe.whitelist()
 def mark_manufactured_rows(**kwargs):
     return run_api_script("mark_manufactured_rows", kwargs)
+
+@frappe.whitelist()
+def mark_manufactured_rows_v2(**kwargs):
+    return run_api_script("mark_manufactured_rows_v2", kwargs)
 
 @frappe.whitelist(allow_guest=True)
 def namar_capture_lead(**kwargs):

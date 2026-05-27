@@ -71,3 +71,11 @@ python3 scripts/smoke_test.py --env test --expect-legacy deleted --app-installed
   - `/assets/namar_test/js/doctype/material_request_form.js`
   - `/assets/namar_test/js/doctype/material_request_list.js`
   - `/assets/namar_test/js/doctype/sales_order_form.js`
+
+## مراجعة 2026-05-27
+
+تم اكتشاف بقايا سكربتات حية بعد الترحيل، أهمها سكربتات تصنيع `v2` وسكربت `حساب التخصيم` وسكربت إخفاء إلغاء أمر البيع. تم نقل هذه النسخ إلى التطبيق وإضافة Fixtures/Patch لتعريفات تتبع التصنيع:
+
+- Server Script مؤرشف: `60`
+- Client Script مؤرشف: `26`
+- التحقق الموسع يستخدم `--strict-no-unmanaged-live-scripts` لكشف أي سكربت حي مفعّل خارج manifest.
