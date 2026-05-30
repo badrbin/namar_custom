@@ -16,7 +16,6 @@ square_counts_str = frappe.form_dict.get('square_counts', '')
 glass_types_str = frappe.form_dict.get('glass_types', '')
 glass_models_str = frappe.form_dict.get('glass_models', '')
 component_exclusion_groups_str = frappe.form_dict.get('component_exclusion_groups', '')
-component_exclusions_str = frappe.form_dict.get('component_exclusions', '')
 frame_components_str = frappe.form_dict.get('frame_components', '')
 
 if not item_codes_str:
@@ -53,7 +52,6 @@ else:
 	glass_types = glass_types_str.split(',') if glass_types_str else []
 	glass_models = glass_models_str.split(',') if glass_models_str else []
 	component_exclusion_groups = component_exclusion_groups_str.split(';') if component_exclusion_groups_str else []
-	component_exclusions = component_exclusions_str.split(';') if component_exclusions_str else []
 	frame_components = frame_components_str.split(';') if frame_components_str else []
 	while len(taksiya1s) < len(codes):
 		taksiya1s.append('0')
@@ -73,8 +71,6 @@ else:
 		glass_models.append('')
 	while len(component_exclusion_groups) < len(codes):
 		component_exclusion_groups.append('')
-	while len(component_exclusions) < len(codes):
-		component_exclusions.append('')
 	while len(frame_components) < len(codes):
 		frame_components.append('')
 
@@ -148,6 +144,17 @@ else:
 				components.append(component)
 		components.sort()
 		return components
+
+	def split_component_exclusion_groups(value):
+		seen = {}
+		groups = []
+		for part in str(value or '').replace('\n', '|').replace(';', '|').replace(',', '|').split('|'):
+			group_name = part.strip()
+			if group_name and group_name not in seen:
+				seen[group_name] = 1
+				groups.append(group_name)
+		groups.sort()
+		return groups
 
 	def merge_component_exclusion_lists(*values):
 		seen = {}
@@ -608,18 +615,18 @@ else:
 		requested_square_count = square_counts[i].strip()
 		requested_glass_type = glass_types[i].strip()
 		requested_glass_model = glass_models[i].strip()
-		requested_component_exclusion_group = component_exclusion_groups[i].strip()
+		requested_component_exclusion_groups = split_component_exclusion_groups(component_exclusion_groups[i])
 		requested_frame_component = frame_components[i].strip()
-		requested_manual_excluded_components = split_component_exclusions(component_exclusions[i])
-		requested_excluded_components = merge_component_exclusion_lists(
-			get_component_exclusion_group_components(requested_component_exclusion_group),
-			requested_manual_excluded_components
-		)
-		excluded_component_key = ','.join(requested_excluded_components)
-		request_component_exclusion_key = ','.join(requested_manual_excluded_components)
+		requested_excluded_components = []
+		for group_name in requested_component_exclusion_groups:
+			requested_excluded_components = merge_component_exclusion_lists(
+				requested_excluded_components,
+				get_component_exclusion_group_components(group_name)
+			)
+		request_component_exclusion_key = '|'.join(requested_component_exclusion_groups)
 		if not ic:
 			continue
-		key = ic + '||' + sl + '||' + w_str + '||' + h_str + '||' + ww_str + '||' + str(lc) + '||' + st + '||' + str(flw) + '||' + str(tk1) + '||' + str(tk2) + '||' + str(noq) + '||' + str(nl) + '||' + str(pq) + '||' + requested_square_count + '||' + requested_glass_type + '||' + requested_glass_model + '||' + requested_component_exclusion_group + '||' + request_component_exclusion_key + '||' + requested_frame_component
+		key = ic + '||' + sl + '||' + w_str + '||' + h_str + '||' + ww_str + '||' + str(lc) + '||' + st + '||' + str(flw) + '||' + str(tk1) + '||' + str(tk2) + '||' + str(noq) + '||' + str(nl) + '||' + str(pq) + '||' + requested_square_count + '||' + requested_glass_type + '||' + requested_glass_model + '||' + request_component_exclusion_key + '||' + requested_frame_component
 		if key in result:
 			continue
 
@@ -640,8 +647,7 @@ else:
 				       cti.custom_u_fallback, cti.custom_panel_fallback,
 				       cti.custom_allow_missing_dimensions, cti.custom_force_no_qitaat_when_missing_dimensions,
 				       cti.custom_dimension_display_mode, cti.custom_dimension_repeat_count,
-				       cti.custom_show_square_count, cti.custom_show_glass_options,
-				       cti.custom_show_component_exclusions
+				       cti.custom_show_square_count, cti.custom_show_glass_options
 				FROM `tabCutting Template Item` cti INNER JOIN `tabCutting Template` ct ON ct.name = cti.parent AND IFNULL(ct.disabled, 0) = 0 WHERE cti.item_code = %s
 			""", ic, as_dict=True)
 
@@ -658,8 +664,7 @@ else:
 					       cti.custom_u_fallback, cti.custom_panel_fallback,
 					       cti.custom_allow_missing_dimensions, cti.custom_force_no_qitaat_when_missing_dimensions,
 					       cti.custom_dimension_display_mode, cti.custom_dimension_repeat_count,
-					       cti.custom_show_square_count, cti.custom_show_glass_options,
-					       cti.custom_show_component_exclusions
+					       cti.custom_show_square_count, cti.custom_show_glass_options
 					FROM `tabCutting Template Item` cti INNER JOIN `tabCutting Template` ct ON ct.name = cti.parent AND IFNULL(ct.disabled, 0) = 0 WHERE cti.item_group = %s
 				""", ig, as_dict=True)
 
@@ -688,11 +693,10 @@ else:
 		tmpl = best.parent
 		show_square_count = flag_value(best.get('custom_show_square_count'), 0)
 		show_glass_options = flag_value(best.get('custom_show_glass_options'), 0)
-		show_component_exclusions = flag_value(best.get('custom_show_component_exclusions'), 0)
 		effective_square_count = requested_square_count if show_square_count else ''
 		effective_glass_type = requested_glass_type if show_glass_options else ''
 		effective_glass_model = requested_glass_model if show_glass_options else ''
-		effective_excluded_components = requested_excluded_components if show_component_exclusions else []
+		effective_excluded_components = requested_excluded_components
 		allow_missing_dimensions = flag_value(best.get('custom_allow_missing_dimensions'), 0)
 		force_no_qitaat_when_missing_dimensions = flag_value(best.get('custom_force_no_qitaat_when_missing_dimensions'), 1)
 		effective_noq = requested_noq
@@ -927,7 +931,6 @@ else:
 			'square_count': effective_square_count,
 			'show_square_count': show_square_count,
 			'show_glass_options': show_glass_options,
-			'show_component_exclusions': show_component_exclusions,
 			'excluded_components': ','.join(effective_excluded_components),
 			'item_sliding_options': item_opts,
 			'stores': stores
