@@ -41,6 +41,9 @@ if (base && !base.startsWith("http")) base = `https://${base}`;
 const email = process.env.BROWSER_LOGIN_EMAIL;
 const password = process.env.BROWSER_LOGIN_PASSWORD;
 const materialRequest = argValue("--mr", "MREQ-06077-1");
+const explicitSalesOrder = argValue("--sales-order");
+const explicitLead = argValue("--lead");
+const explicitCuttingTemplate = argValue("--cutting-template");
 const clickSync = process.argv.includes("--click-sync");
 const chromeExecutable =
   process.env.CHROME_EXECUTABLE ||
@@ -133,62 +136,94 @@ if (clickSync) {
   syncClicked = true;
 }
 
-const salesOrderName = await page
-  .evaluate(async () => {
-    const result = await frappe.call({
-      method: "frappe.client.get_list",
-      args: {
-        doctype: "Sales Order",
-        fields: ["name"],
-        filters: { docstatus: 1 },
-        limit_page_length: 1,
-        order_by: "modified desc",
+async function getFirstDocName(doctype, args) {
+  return page
+    .evaluate(
+      async ({ doctype, args }) => {
+        const result = await frappe.call({
+          method: "frappe.client.get_list",
+          args: { doctype, fields: ["name"], limit_page_length: 1, ...args },
+        });
+        return (result.message && result.message[0] && result.message[0].name) || "";
       },
-    });
-    return (result.message && result.message[0] && result.message[0].name) || "";
-  })
-  .catch(() => "");
+      { doctype, args },
+    )
+    .catch(() => "");
+}
+
+const salesOrderName =
+  explicitSalesOrder ||
+  (await getFirstDocName("Sales Order", {
+    filters: { docstatus: 1 },
+    order_by: "modified desc",
+  }));
 
 let salesOrderHasButton = false;
 if (salesOrderName) {
   await gotoApp(`/app/sales-order/${encodeURIComponent(salesOrderName)}`);
   salesOrderHasButton = await page.getByText("Material Request").count().then((count) => count > 0);
   requireCondition(salesOrderHasButton, "Sales Order Material Request button is missing");
+} else {
+  requireCondition(!explicitSalesOrder, "Sales Order was explicitly required but no name was provided");
 }
 
-const leadName = await page
-  .evaluate(async () => {
-    const result = await frappe.call({
-      method: "frappe.client.get_list",
-      args: { doctype: "Lead", fields: ["name"], limit_page_length: 1, order_by: "modified desc" },
-    });
-    return (result.message && result.message[0] && result.message[0].name) || "";
-  })
-  .catch(() => "");
+const leadName =
+  explicitLead ||
+  (await getFirstDocName("Lead", {
+    order_by: "modified desc",
+  }));
 
 let leadHasMapButton = false;
 if (leadName) {
   await gotoApp(`/app/lead/${encodeURIComponent(leadName)}`);
   leadHasMapButton = await page.getByText("تحديث الموقع من رابط قوقل").count().then((count) => count > 0);
   requireCondition(leadHasMapButton, "Lead Google Map button is missing");
+} else {
+  requireCondition(!explicitLead, "Lead was explicitly required but no name was provided");
 }
 
-const cuttingTemplateName = await page
-  .evaluate(async () => {
-    const result = await frappe.call({
-      method: "frappe.client.get_list",
-      args: { doctype: "Cutting Template", fields: ["name"], limit_page_length: 1, order_by: "modified desc" },
-    });
-    return (result.message && result.message[0] && result.message[0].name) || "";
-  })
-  .catch(() => "");
+const cuttingTemplateName =
+  explicitCuttingTemplate ||
+  (await getFirstDocName("Cutting Template", {
+    order_by: "modified desc",
+  }));
 
 let cuttingHasButtons = false;
+let cuttingDialogsOpened = { items: false, ranges: false };
 if (cuttingTemplateName) {
   await gotoApp(`/app/cutting-template/${encodeURIComponent(cuttingTemplateName)}`);
-  const bodyText = await page.locator("body").innerText();
-  cuttingHasButtons = bodyText.includes("إضافة أصناف متعددة") && bodyText.includes("إضافة نطاقات متعددة");
+  const cuttingState = await page.evaluate(() => {
+    const customButtons = window.cur_frm && window.cur_frm.custom_buttons ? Object.keys(window.cur_frm.custom_buttons) : [];
+    return {
+      customButtons,
+      hasBulkItems: customButtons.includes("إضافة أصناف متعددة"),
+      hasBulkRanges: customButtons.includes("إضافة نطاقات متعددة"),
+    };
+  });
+  cuttingHasButtons = cuttingState.hasBulkItems && cuttingState.hasBulkRanges;
   requireCondition(cuttingHasButtons, "Cutting Template bulk buttons are missing");
+
+  await page.evaluate(() => window.cur_frm.custom_buttons["إضافة أصناف متعددة"].trigger("click"));
+  await page.waitForSelector(".modal:has-text('إضافة أصناف')", { timeout: 7000 }).catch(() => {});
+  cuttingDialogsOpened.items = await page
+    .locator(".modal")
+    .filter({ hasText: "إضافة أصناف" })
+    .count()
+    .then((count) => count > 0);
+  await page.keyboard.press("Escape").catch(() => {});
+  requireCondition(cuttingDialogsOpened.items, "Cutting Template bulk item dialog did not open");
+
+  await page.evaluate(() => window.cur_frm.custom_buttons["إضافة نطاقات متعددة"].trigger("click"));
+  await page.waitForSelector(".modal:has-text('إضافة نطاقات')", { timeout: 7000 }).catch(() => {});
+  cuttingDialogsOpened.ranges = await page
+    .locator(".modal")
+    .filter({ hasText: "إضافة نطاقات" })
+    .count()
+    .then((count) => count > 0);
+  await page.keyboard.press("Escape").catch(() => {});
+  requireCondition(cuttingDialogsOpened.ranges, "Cutting Template bulk range dialog did not open");
+} else {
+  requireCondition(!explicitCuttingTemplate, "Cutting Template was explicitly required but no name was provided");
 }
 
 await browser.close();
@@ -200,9 +235,14 @@ console.log(
       materialRequest: materialRequestState,
       manualDialogOpened,
       syncClicked,
-      salesOrder: { name: salesOrderName, hasMaterialRequestButton: salesOrderHasButton },
-      lead: { name: leadName, hasMapButton: leadHasMapButton },
-      cuttingTemplate: { name: cuttingTemplateName, hasBulkButtons: cuttingHasButtons },
+      salesOrder: { name: salesOrderName, explicit: !!explicitSalesOrder, hasMaterialRequestButton: salesOrderHasButton },
+      lead: { name: leadName, explicit: !!explicitLead, hasMapButton: leadHasMapButton },
+      cuttingTemplate: {
+        name: cuttingTemplateName,
+        explicit: !!explicitCuttingTemplate,
+        hasBulkButtons: cuttingHasButtons,
+        dialogsOpened: cuttingDialogsOpened,
+      },
       consoleMessages: consoleMessages.slice(0, 20),
     },
     null,

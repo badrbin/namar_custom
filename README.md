@@ -77,3 +77,15 @@ NODE_PATH=/path/to/node_modules node scripts/browser_smoke_test.mjs --mr MREQ-06
 ```
 
 إذا كان `playwright` مثبتًا محليًا داخل المستودع، لا تحتاج إلى `NODE_PATH`. داخل Codex Desktop يمكن استخدام حزمة Node المرفقة. الاختبار يفتح التجريبي، يسجل الدخول ببيانات `.env.local`، ويتأكد أن أزرار Material Request وSales Order وLead وCutting Template تظهر من التطبيق بعد حذف السكربتات الحية.
+
+لجعل فحص الأزرار إلزاميًا على مستندات معروفة بدل الاعتماد على قدرة جلسة المتصفح على جلب آخر مستند، مرر أسماء المستندات صراحة:
+
+```bash
+NODE_PATH=/path/to/node_modules node scripts/browser_smoke_test.mjs \
+  --mr MREQ-06077-1 \
+  --sales-order SO253900 \
+  --lead LEAD260040 \
+  --cutting-template "فلات درفتين"
+```
+
+هذا المسار يفشل الاختبار إذا اختفى زر `Material Request` في Sales Order، أو زر تحديث موقع Google Map في Lead، أو أزرار الإضافة المتعددة في Cutting Template. أزرار Cutting Template تُفحص من `cur_frm.custom_buttons` لأن Frappe يضعها تحت قائمة `إضافة`، ثم يفتح الاختبار حواري `إضافة أصناف` و`إضافة نطاقات` للتأكد أن الزرين يعملان.
