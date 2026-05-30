@@ -89,10 +89,20 @@
     );
   }
 
-  function bindDashboardSearch(field) {
+  function bindDashboardInteractions(field, frm) {
     if (!field || !field.$wrapper || !field.$wrapper.length) return;
     var wrapper = field.$wrapper;
     wrapper.off(".namarDeliveryComponents");
+    wrapper.on(
+      "click.namarDeliveryComponents",
+      ".delivery-component-sync-btn",
+      function() { syncPackages(frm); }
+    );
+    wrapper.on(
+      "click.namarDeliveryComponents",
+      ".manual-delivery-component-package-btn",
+      function() { openManualDialog(frm); }
+    );
     wrapper.on(
       "input.namarDeliveryComponents keyup.namarDeliveryComponents change.namarDeliveryComponents search.namarDeliveryComponents",
       ".delivery-component-dashboard-search",
@@ -390,9 +400,7 @@
     frm.set_df_property("custom_delivery_component_dashboard", "options", html);
     frm.refresh_field("custom_delivery_component_dashboard");
     if (field.$wrapper) {
-      field.$wrapper.find(".delivery-component-sync-btn").on("click", function() { syncPackages(frm); });
-      field.$wrapper.find(".manual-delivery-component-package-btn").on("click", function() { openManualDialog(frm); });
-      bindDashboardSearch(field);
+      bindDashboardInteractions(field, frm);
     }
     setupRealtime();
     setupFocusFallback();
