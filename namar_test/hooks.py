@@ -88,6 +88,9 @@ override_whitelisted_methods = {
     "save_lead_visit_log": "namar_test.api.save_lead_visit_log",
     "save_map_lead": "namar_test.api.save_map_lead",
     "sync_customer_vip_from_gl": "namar_test.api.sync_customer_vip_from_gl",
+    "sync_delivery_component_packages": "namar_test.delivery_components.api.sync_delivery_component_packages",
+    "get_delivery_component_packages": "namar_test.delivery_components.api.get_delivery_component_packages",
+    "mark_delivery_component_package_ready": "namar_test.delivery_components.api.mark_delivery_component_package_ready",
     "sync_material_request_customer_vip": "namar_test.api.sync_material_request_customer_vip",
     "update_old_coordinates": "namar_test.api.update_old_coordinates",
     "update_total_qty": "namar_test.api.update_total_qty",
@@ -149,3 +152,11 @@ doctype_js = {
 doctype_list_js = {
     "Material Request": "public/js/doctype/material_request_list.js",
 }
+
+app_include_js = [
+    "/assets/namar_test/js/delivery_components/material_request_delivery_components.js",
+]
+
+web_include_js = [
+    "/assets/namar_test/js/delivery_components/factory_delivery_components.js",
+]
