@@ -10,6 +10,45 @@ def clean_count(value):
     return round(number, 3)
 
 
+def normalize_barcode_digits(value):
+    text = str(value or "").strip()
+    text = text.replace("٠", "0").replace("١", "1").replace("٢", "2").replace("٣", "3").replace("٤", "4")
+    text = text.replace("٥", "5").replace("٦", "6").replace("٧", "7").replace("٨", "8").replace("٩", "9")
+    text = text.replace("۰", "0").replace("۱", "1").replace("۲", "2").replace("۳", "3").replace("۴", "4")
+    text = text.replace("۵", "5").replace("۶", "6").replace("۷", "7").replace("۸", "8").replace("۹", "9")
+    return text.replace(" ", "")
+
+
+def build_material_request_name(value):
+    text = normalize_barcode_digits(value)
+    if not text:
+        return ""
+    if text.upper().startswith("MREQ-"):
+        return "MREQ-" + text[5:]
+    return "MREQ-" + text
+
+
+def resolve_material_request_and_row(value, row_idx):
+    text = normalize_barcode_digits(value)
+    if not text:
+        return "", row_idx
+
+    direct_name = build_material_request_name(text)
+    if frappe.db.exists("Material Request", direct_name):
+        return direct_name, row_idx
+
+    # Legacy fallback: old manual payloads may be MR suffix + row, e.g. 08950-38.
+    if not row_idx:
+        suffix = text[5:] if text.upper().startswith("MREQ-") else text
+        parts = suffix.split("-")
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            fallback_name = "MREQ-" + parts[0]
+            if frappe.db.exists("Material Request", fallback_name):
+                return fallback_name, cint(parts[1])
+
+    return direct_name, row_idx
+
+
 def has_dimension_text(item_row, fieldname):
     text = str(item_row.get(fieldname) or "").strip()
     return bool(text and text != "-")
@@ -590,27 +629,18 @@ if (not material_request or not row_idx) and qr_value:
     material_request = parts.get("MR") or material_request
     row_idx = cint(parts.get("ROW") or row_idx)
 
-if material_request and not material_request.startswith("MREQ-"):
-    raw_parts = material_request.split("-")
-    if len(raw_parts) == 2 and raw_parts[0].isdigit() and raw_parts[1].isdigit():
-        if not row_idx:
-            row_idx = cint(raw_parts[1])
-        material_request = raw_parts[0]
-    material_request = "MREQ-" + material_request
-
-if material_request and material_request.startswith("MREQ-"):
-    mr_parts = material_request.split("-")
-    if len(mr_parts) == 3 and mr_parts[1].isdigit() and mr_parts[2].isdigit():
-        exact_material_request_exists = frappe.db.exists("Material Request", material_request)
-        if not exact_material_request_exists:
-            if not row_idx:
-                row_idx = cint(mr_parts[2])
-            material_request = "MREQ-" + mr_parts[1]
+material_request, row_idx = resolve_material_request_and_row(material_request, row_idx)
 
 if not material_request or not row_idx:
     frappe.throw("بيانات QR غير مكتملة")
 
-mr_workflow_state = frappe.db.get_value("Material Request", material_request, "workflow_state") or ""
+mr_info = frappe.db.get_value("Material Request", material_request, ["docstatus", "workflow_state"], as_dict=1)
+if not mr_info:
+    frappe.throw("لم يتم العثور على طلب المواد: " + material_request)
+if cint(mr_info.get("docstatus")) == 2:
+    frappe.throw("طلب المواد ملغي: " + material_request)
+
+mr_workflow_state = mr_info.get("workflow_state") or ""
 item_meta = frappe.get_meta("Material Request Item")
 has_manufactured_qty_field = item_meta.has_field("custom_manufactured_qty")
 fields = [
