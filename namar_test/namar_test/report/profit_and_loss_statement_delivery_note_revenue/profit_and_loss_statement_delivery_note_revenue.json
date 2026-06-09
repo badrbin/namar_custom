@@ -1,0 +1,20 @@
+{
+  "add_total_row": 0,
+  "columns": [],
+  "disabled": 0,
+  "doctype": "Report",
+  "filters": [],
+  "is_standard": "Yes",
+  "letter_head": "فراغ",
+  "module": "Namar Test",
+  "name": "Profit and Loss Statement - Delivery Note Revenue",
+  "prepared_report": 0,
+  "ref_doctype": "Account",
+  "report_name": "Profit and Loss Statement - Delivery Note Revenue",
+  "report_type": "Script Report",
+  "roles": [
+    {
+      "role": "Accounts User"
+    }
+  ]
+}
