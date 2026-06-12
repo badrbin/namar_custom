@@ -9,3 +9,6 @@ description = "Production-safe Namar ERPNext customizations."
 requires-python = ">=3.10"
 authors = [{ name = "Namar", email = "badrarroug@namar.net" }]
 dependencies = []
+
+[tool.bench.frappe-dependencies]
+frappe = ">=15.0.0,<16.0.0"
