@@ -97,6 +97,9 @@ override_whitelisted_methods = {
 }
 
 doc_events = {
+    "Comment": {
+        "on_update": ["namar_test.comment_mentions.notify_new_mentions_on_comment_update"],
+    },
     "Payment Entry": {
         "before_save": ["namar_test.events.stop_pay"],
         "on_cancel": ["namar_test.events.sync_customer_vip_on_payment_cancel"],
