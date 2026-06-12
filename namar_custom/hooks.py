@@ -1,20 +1,19 @@
+from __future__ import annotations
+
 app_name = "namar_custom"
-app_title = "Namar Custom"
-app_publisher = "Badr"
-app_description = "Customizations for Namar"
+app_title = "Namar Customizations"
+app_publisher = "Namar"
+app_description = "Production-safe Namar ERPNext customizations."
 app_icon = "octicon octicon-file-directory"
 app_color = "grey"
-app_email = "badrbin@gmail.com"
+app_email = "badrarroug@namar.net"
 app_license = "MIT"
 
+# Keep this production branch intentionally narrow: it currently contains only
+# edited-comment mention notifications.  Do not merge the broad `namar_test`
+# branch into production; cherry-pick approved changes only.
 doc_events = {
-    "Material Request": {
-        "validate": "namar_custom.api.manus_logic.validate_material_request_against_billed"
+    "Comment": {
+        "on_update": "namar_custom.comment_mentions.notify_mentions_on_comment_update",
     },
-    "Payment Entry": {
-        "validate": "namar_custom.api.manus_logic.validate_payment_entry_supplier"
-    },
-    "Sales Invoice": {
-        "validate": "namar_custom.api.manus_logic.validate_sales_invoice_qty_against_so"
-    }
 }
