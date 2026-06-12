@@ -26,16 +26,19 @@ def _unique_preserve_order(values: Iterable[str] | None) -> list[str]:
     return unique
 
 
-def get_new_mentions(
+def get_mentions_to_notify_on_update(
     old_content: str | None,
     new_content: str | None,
     extractor: MentionExtractor | None = None,
 ) -> list[str]:
-    """Return mentions that exist in the new comment content only.
+    """Return current mentions to notify when an existing comment changes.
 
     Frappe's default Comment controller sends mention notifications only on
-    insert.  This helper intentionally computes a delta for updates so saving
-    an already-mentioned user again does not duplicate notifications.
+    insert.  For Namar, editing an existing comment should notify every user
+    mentioned in the current edited content whenever the content changes, even
+    if the mention already existed before the edit.  Comments with no current
+    mentions intentionally do not produce a mention notification because there
+    is no explicit recipient.
     """
 
     if not new_content:
@@ -46,9 +49,22 @@ def get_new_mentions(
 
         extractor = extract_mentions
 
-    old_mentions = set(_unique_preserve_order(extractor(old_content or "")))
-    new_mentions = _unique_preserve_order(extractor(new_content or ""))
-    return [mention for mention in new_mentions if mention not in old_mentions]
+    return _unique_preserve_order(extractor(new_content or ""))
+
+
+def get_new_mentions(
+    old_content: str | None,
+    new_content: str | None,
+    extractor: MentionExtractor | None = None,
+) -> list[str]:
+    """Backward-compatible alias for tests/imports.
+
+    The notification policy used to send only newly added mentions.  The
+    current requirement is to notify all current mentions when an existing
+    comment text changes.
+    """
+
+    return get_mentions_to_notify_on_update(old_content, new_content, extractor)
 
 
 def _server_script_fallback_enabled() -> bool:
@@ -134,7 +150,7 @@ def _enqueue_mention_notifications(comment_doc: Any, mentioned_users: Iterable[s
 
 
 def notify_new_mentions_on_comment_update(comment_doc: Any, method: str | None = None) -> None:
-    """Notify only users newly mentioned when an existing Comment is edited."""
+    """Notify current mentioned users whenever an existing Comment is edited."""
 
     if _get_value(comment_doc, "comment_type") != "Comment":
         return
@@ -164,8 +180,8 @@ def notify_new_mentions_on_comment_update(comment_doc: Any, method: str | None =
     if previous_content == current_content:
         return
 
-    new_mentions = get_new_mentions(previous_content, current_content)
-    if not new_mentions:
+    mentions_to_notify = get_mentions_to_notify_on_update(previous_content, current_content)
+    if not mentions_to_notify:
         return
 
-    _enqueue_mention_notifications(comment_doc, new_mentions)
+    _enqueue_mention_notifications(comment_doc, mentions_to_notify)
