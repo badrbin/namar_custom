@@ -1,0 +1,11 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "namar_custom"
+version = "0.0.1"
+description = "Production-safe Namar ERPNext customizations."
+requires-python = ">=3.10"
+authors = [{ name = "Namar", email = "badrarroug@namar.net" }]
+dependencies = []
