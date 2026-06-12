@@ -5,6 +5,7 @@ from typing import Any
 
 
 MentionExtractor = Callable[[str], Iterable[str]]
+SERVER_SCRIPT_FALLBACK_NAME = "notify_new_comment_mentions_on_update"
 
 
 def _get_value(doc: Any, fieldname: str, default: Any = None) -> Any:
@@ -48,6 +49,22 @@ def get_new_mentions(
     old_mentions = set(_unique_preserve_order(extractor(old_content or "")))
     new_mentions = _unique_preserve_order(extractor(new_content or ""))
     return [mention for mention in new_mentions if mention not in old_mentions]
+
+
+def _server_script_fallback_enabled() -> bool:
+    """Avoid duplicate notifications if the temporary test Server Script is active."""
+
+    try:
+        import frappe
+
+        return bool(
+            frappe.db.exists(
+                "Server Script",
+                {"name": SERVER_SCRIPT_FALLBACK_NAME, "disabled": 0},
+            )
+        )
+    except Exception:
+        return False
 
 
 def _get_allowed_mention_recipient_emails(usernames: Iterable[str]) -> list[str]:
@@ -137,6 +154,9 @@ def notify_new_mentions_on_comment_update(comment_doc: Any, method: str | None =
     # On insert, Frappe's built-in Comment.after_insert already handles all
     # mentions.  Without a previous document there is no safe update delta.
     if not previous_doc:
+        return
+
+    if _server_script_fallback_enabled():
         return
 
     previous_content = _get_value(previous_doc, "content")
