@@ -12,6 +12,7 @@ from namar_test.operation.logic import (
     parse_mapping,
     role_can_edit,
     sanitize_fields,
+    source_link_is_allowed,
     timestamps_match,
 )
 
@@ -52,6 +53,14 @@ class OperationLogicTestCase(unittest.TestCase):
         self.assertEqual(date_not_before("2025-12-02", "2026-08-05"), "2026-08-05")
         self.assertEqual(date_not_before("2026-08-08", "2026-08-05"), "2026-08-08")
         self.assertEqual(date_not_before("", "2026-08-05"), "2026-08-05")
+
+    def test_source_link_is_server_owned_for_existing_and_new_rows(self):
+        self.assertTrue(source_link_is_allowed("SO-ROW-1", "SO-ROW-1", existing_row=True))
+        self.assertTrue(source_link_is_allowed("SO-ROW-1", "", existing_row=True))
+        self.assertFalse(source_link_is_allowed("SO-ROW-1", "FAKE", existing_row=True))
+        self.assertFalse(source_link_is_allowed("", "FAKE", existing_row=True))
+        self.assertTrue(source_link_is_allowed("", "", existing_row=False))
+        self.assertFalse(source_link_is_allowed("", "FAKE", existing_row=False))
 
     def test_sanitize_fields_uses_allowlist(self):
         self.assertEqual(

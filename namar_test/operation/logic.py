@@ -85,6 +85,14 @@ def date_not_before(value: Any, minimum: Any) -> str:
     return max(candidate, minimum_date).isoformat()
 
 
+def source_link_is_allowed(actual: Any, incoming: Any, *, existing_row: bool) -> bool:
+    actual_link = clean_text(actual, 140)
+    incoming_link = clean_text(incoming, 140)
+    if not existing_row:
+        return not incoming_link
+    return not incoming_link or incoming_link == actual_link
+
+
 def sanitize_fields(payload: Mapping[str, Any], allowed_fields: Iterable[str]) -> dict[str, Any]:
     allowed = set(allowed_fields)
     return {fieldname: value for fieldname, value in payload.items() if fieldname in allowed}

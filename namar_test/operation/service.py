@@ -22,6 +22,7 @@ from namar_test.operation.logic import (
     parse_mapping,
     role_can_edit,
     sanitize_fields,
+    source_link_is_allowed,
     timestamps_match,
 )
 
@@ -851,9 +852,15 @@ def _replace_existing_items(doc, incoming_items: Any) -> None:
     desired = []
     for row_values in rows:
         row_name = clean_text(row_values.pop("name", ""))
-        row_values.pop("sales_order_item", None)
+        incoming_source = clean_text(row_values.pop("sales_order_item", ""), 140)
         if row_name:
             item_row = existing[row_name]
+            actual_source = clean_text(item_row.get("sales_order_item"), 140)
+            if not source_link_is_allowed(actual_source, incoming_source, existing_row=True):
+                frappe.throw(
+                    "لا يمكن تغيير رابط بند أمر البيع في سطر موجود",
+                    frappe.PermissionError,
+                )
             linked = bool(clean_text(item_row.get("sales_order_item")))
             _assert_linked_row_identity(item_row, row_values)
             item_changed = clean_text(row_values.get("item_code")) != clean_text(item_row.get("item_code"))
@@ -869,6 +876,11 @@ def _replace_existing_items(doc, incoming_items: Any) -> None:
             )
             desired.append(item_row)
         else:
+            if not source_link_is_allowed("", incoming_source, existing_row=False):
+                frappe.throw(
+                    "لا يمكن تعيين رابط بند أمر بيع لسطر جديد",
+                    frappe.PermissionError,
+                )
             item_row = doc.append("items", row_values)
             _derive_item_units(item_row, require_select_permission=True)
             desired.append(item_row)
