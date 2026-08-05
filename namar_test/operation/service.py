@@ -16,6 +16,7 @@ from frappe.utils import cint, flt, nowdate
 from namar_test.operation.logic import (
     MAX_PAGE_LENGTH,
     clean_text,
+    date_not_before,
     normalize_item_payloads,
     page_window,
     parse_mapping,
@@ -667,6 +668,10 @@ def _prepare_sales_order_doc(sales_order: str):
         doc.set("schedule_date", doc.get("delivery_date") or nowdate())
     if doc.meta.has_field("material_request_type") and not doc.get("material_request_type"):
         doc.set("material_request_type", "Purchase")
+    transaction_date = clean_text(doc.get("transaction_date"), 10) or nowdate()
+    for item in doc.get("items") or []:
+        proposed_date = item.get("schedule_date") or doc.get("delivery_date") or transaction_date
+        item.schedule_date = date_not_before(proposed_date, transaction_date)
     if not doc.get("items"):
         frappe.throw(
             "لا توجد كميات متبقية لإنشاء طلب مواد من أمر البيع",

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import math
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Iterable, Mapping
 
 
@@ -74,6 +74,15 @@ def canonical_timestamp(value: Any) -> str:
 def timestamps_match(expected: Any, actual: Any) -> bool:
     expected_timestamp = canonical_timestamp(expected)
     return bool(expected_timestamp) and expected_timestamp == canonical_timestamp(actual)
+
+
+def date_not_before(value: Any, minimum: Any) -> str:
+    minimum_date = date.fromisoformat(clean_text(minimum, 10))
+    try:
+        candidate = date.fromisoformat(clean_text(value, 10))
+    except ValueError:
+        candidate = minimum_date
+    return max(candidate, minimum_date).isoformat()
 
 
 def sanitize_fields(payload: Mapping[str, Any], allowed_fields: Iterable[str]) -> dict[str, Any]:

@@ -6,6 +6,7 @@ from namar_test.operation.logic import (
     MAX_PAGE,
     MAX_PAGE_LENGTH,
     MAX_QUANTITY,
+    date_not_before,
     normalize_item_payloads,
     page_window,
     parse_mapping,
@@ -46,6 +47,11 @@ class OperationLogicTestCase(unittest.TestCase):
         self.assertTrue(timestamps_match("2026-08-05T10:00:00", "2026-08-05 10:00:00.000000"))
         self.assertFalse(timestamps_match("2026-08-05 10:00:00", "2026-08-05 10:00:01"))
         self.assertFalse(timestamps_match("", "2026-08-05 10:00:01"))
+
+    def test_schedule_date_is_not_before_transaction_date(self):
+        self.assertEqual(date_not_before("2025-12-02", "2026-08-05"), "2026-08-05")
+        self.assertEqual(date_not_before("2026-08-08", "2026-08-05"), "2026-08-08")
+        self.assertEqual(date_not_before("", "2026-08-05"), "2026-08-05")
 
     def test_sanitize_fields_uses_allowlist(self):
         self.assertEqual(
