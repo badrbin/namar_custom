@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "namar_test"
-version = "0.0.4"
+version = "0.0.5"
 description = "Namar ERPNext customizations migrated from live test scripts, including delivery component tracking."
 requires-python = ">=3.10"
 authors = [{ name = "Namar", email = "badrarroug@namar.net" }]

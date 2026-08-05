@@ -669,9 +669,28 @@ def _prepare_sales_order_doc(sales_order: str):
     if doc.meta.has_field("material_request_type") and not doc.get("material_request_type"):
         doc.set("material_request_type", "Purchase")
     transaction_date = clean_text(doc.get("transaction_date"), 10) or nowdate()
+    adjusted_dates = 0
+
+    def normalize_prepared_date(value, fallback: str) -> str:
+        nonlocal adjusted_dates
+        original = clean_text(value, 10)
+        normalized = date_not_before(original or fallback, transaction_date)
+        if original and normalized != original:
+            adjusted_dates += 1
+        return normalized
+
+    delivery_date = transaction_date
+    if doc.meta.has_field("delivery_date"):
+        delivery_date = normalize_prepared_date(doc.get("delivery_date"), transaction_date)
+        doc.set("delivery_date", delivery_date)
+    if doc.meta.has_field("schedule_date"):
+        doc.set(
+            "schedule_date",
+            normalize_prepared_date(doc.get("schedule_date"), delivery_date),
+        )
     for item in doc.get("items") or []:
-        proposed_date = item.get("schedule_date") or doc.get("delivery_date") or transaction_date
-        item.schedule_date = date_not_before(proposed_date, transaction_date)
+        item.schedule_date = normalize_prepared_date(item.get("schedule_date"), delivery_date)
+    doc.flags.operation_date_adjustment_count = adjusted_dates
     if not doc.get("items"):
         frappe.throw(
             "لا توجد كميات متبقية لإنشاء طلب مواد من أمر البيع",
@@ -683,7 +702,14 @@ def _prepare_sales_order_doc(sales_order: str):
 def prepare_from_sales_order(sales_order: str) -> dict[str, Any]:
     _assert_authenticated()
     doc = _prepare_sales_order_doc(sales_order)
-    return _detail_response(doc, prepared=True)
+    result = _detail_response(doc, prepared=True)
+    adjusted_dates = cint(doc.flags.get("operation_date_adjustment_count"))
+    if adjusted_dates:
+        result["date_adjustments"] = adjusted_dates
+        result["warnings"] = [
+            f"عُدّلت {adjusted_dates} تواريخ قديمة إلى تاريخ الطلب حتى يقبل النظام الحفظ."
+        ]
+    return result
 
 
 def _assert_source_rows(source_doc, rows: list[dict[str, Any]]) -> None:
