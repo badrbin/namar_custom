@@ -10,7 +10,7 @@ def sync_delivery_component_packages(mr: str | None = None, dry_run: int | str |
     return service.sync_delivery_component_packages(mr, dry_run)
 
 
-@frappe.whitelist()
+@frappe.whitelist(allow_guest=True)
 def get_delivery_component_packages(
     mr: str | None = None,
     component_package: str | None = None,
@@ -19,7 +19,7 @@ def get_delivery_component_packages(
     return service.get_delivery_component_packages(mr, component_package or package)
 
 
-@frappe.whitelist()
+@frappe.whitelist(allow_guest=True)
 def mark_delivery_component_package_ready(
     mr: str | None = None,
     component_package: str | None = None,
@@ -38,7 +38,7 @@ def mark_delivery_component_package_ready(
     )
 
 
-@frappe.whitelist()
+@frappe.whitelist(allow_guest=True)
 def mark_delivery_component_package_event(
     mr: str | None = None,
     component_package: str | None = None,
@@ -59,6 +59,6 @@ def mark_delivery_component_package_event(
     )
 
 
-@frappe.whitelist()
+@frappe.whitelist(allow_guest=True)
 def get_material_request_fulfillment_readiness(mr: str | None = None):
     return service.get_material_request_fulfillment_readiness(mr)

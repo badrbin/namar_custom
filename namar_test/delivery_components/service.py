@@ -62,8 +62,10 @@ def normalize_material_request(value: str | None) -> str:
     return material_request
 
 
-def ensure_material_request_access(material_request: str) -> Any:
+def ensure_material_request_access(material_request: str, *, allow_guest: bool = False) -> Any:
     mr_doc = frappe.get_doc("Material Request", material_request)
+    if allow_guest and frappe.session.user == "Guest":
+        return mr_doc
     if not frappe.has_permission("Material Request", ptype="read", doc=mr_doc):
         frappe.throw("لا تملك صلاحية الوصول إلى طلب المواد", frappe.PermissionError)
     return mr_doc
@@ -880,7 +882,7 @@ def get_delivery_component_packages(
         frappe.throw("اسم طلب المواد مطلوب")
     if not frappe.db.exists("Material Request", material_request):
         frappe.throw("طلب المواد غير موجود: " + material_request)
-    mr_doc = ensure_material_request_access(material_request)
+    mr_doc = ensure_material_request_access(material_request, allow_guest=True)
 
     packages = get_packages(material_request)
     selected_package = None
@@ -958,7 +960,7 @@ def mark_delivery_component_package_event(
         frappe.throw("اسم طلب المواد مطلوب")
     if not frappe.db.exists("Material Request", material_request):
         frappe.throw("طلب المواد غير موجود: " + material_request)
-    mr_doc = ensure_material_request_access(material_request)
+    mr_doc = ensure_material_request_access(material_request, allow_guest=True)
 
     package_row = get_package(material_request, package_token)
     if not package_row:
