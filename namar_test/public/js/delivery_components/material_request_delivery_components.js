@@ -2,7 +2,9 @@
   var api = window.NAMAR_DELIVERY_COMPONENT_API = window.NAMAR_DELIVERY_COMPONENT_API || {
     sync: "namar_test.delivery_components.api.sync_delivery_component_packages",
     get: "namar_test.delivery_components.api.get_delivery_component_packages",
-    markReady: "namar_test.delivery_components.api.mark_delivery_component_package_ready"
+    markReady: "namar_test.delivery_components.api.mark_delivery_component_package_ready",
+    markEvent: "namar_test.delivery_components.api.mark_delivery_component_package_event",
+    fulfillment: "namar_test.delivery_components.api.get_material_request_fulfillment_readiness"
   };
   var realtimeBound = false;
   var focusBound = false;
@@ -42,7 +44,7 @@
 
   function pendingRows(frm) {
     return rows(frm).filter(function(row) {
-      return flt(row.remaining_qty || 0) > 0;
+      return (row.tracking_status || row.status || "غير جاهز") === "غير جاهز";
     });
   }
 
@@ -323,20 +325,34 @@
     }
     var readyPackages = Math.max(totalPackages - remainingPackages, 0);
     var statusText = frm.doc.custom_delivery_component_status || (packageRows.length ? "غير جاهز" : "لا توجد مكونات");
+    var loadedPackages = 0;
+    var deliveredPackages = 0;
+    var fullRoutePackages = 0;
+    var overallStatus = frm.doc.custom_fulfillment_readiness_status || "غير جاهز";
+    var overallSummary = frm.doc.custom_fulfillment_readiness_summary || "";
     var totalRequiredQty = 0;
     var readyRequiredQty = 0;
     packageRows.forEach(function(row) {
       if (!parseInt(row.required_for_delivery || 0, 10)) return;
       totalRequiredQty += flt(row.package_qty || 0);
       readyRequiredQty += flt(row.ready_qty || 0);
+      var trackingStatus = row.tracking_status || (flt(row.remaining_qty || 0) > 0 ? "غير جاهز" : "جاهز");
+      if ((row.tracking_route || "تصنيع وتغليف") !== "تجهيز فقط") fullRoutePackages += 1;
+      if (trackingStatus === "محمل" || trackingStatus === "تم التوريد") loadedPackages += 1;
+      if (trackingStatus === "تم التوريد") deliveredPackages += 1;
     });
     var loadingCode = frm.doc.custom_delivery_loading_code || "-";
     var statusBg = statusText === "مكتمل" ? "rgba(34,197,94,0.14)" : statusText === "جزئي" ? "rgba(245,158,11,0.14)" : "rgba(148,163,184,0.16)";
     var statusColor = statusText === "مكتمل" ? "#16a34a" : statusText === "جزئي" ? "#b45309" : "#475569";
+    var overallComplete = ["جاهز بالكامل", "تم التحميل بالكامل", "تم التوريد بالكامل"].indexOf(overallStatus) !== -1;
+    var overallBg = overallComplete ? "rgba(34,197,94,0.14)" : overallStatus === "جاهزية جزئية" ? "rgba(245,158,11,0.14)" : "rgba(239,68,68,0.10)";
+    var overallColor = overallComplete ? "#16a34a" : overallStatus === "جاهزية جزئية" ? "#b45309" : "#dc2626";
     var packageRowsHtml = packageRows.map(function(row) {
       var remaining = flt(row.remaining_qty || 0);
-      var rowStatusBg = remaining > 0 ? "rgba(245,158,11,0.14)" : "rgba(34,197,94,0.14)";
-      var rowStatusColor = remaining > 0 ? "#b45309" : "#16a34a";
+      var trackingStatus = row.tracking_status || (remaining > 0 ? "غير جاهز" : "جاهز");
+      var rowDone = trackingStatus === "جاهز" || trackingStatus === "محمل" || trackingStatus === "تم التوريد";
+      var rowStatusBg = rowDone ? "rgba(34,197,94,0.14)" : "rgba(245,158,11,0.14)";
+      var rowStatusColor = rowDone ? "#16a34a" : "#b45309";
       var rowLoadingCode = row.loading_code || "";
       var packageText = (row.package_no || "-") + "/" + (row.package_count || "-");
       var searchText = [
@@ -349,7 +365,7 @@
         row.item_code || "",
         row.item_name || "",
         formatCount(row.package_qty || 0),
-        row.status || ""
+        trackingStatus
       ].join(" ").toLowerCase();
       return ''
         + '<tr class="delivery-component-dashboard-row" data-search="' + escapeHtml(searchText) + '">'
@@ -358,7 +374,7 @@
         + '<td style="padding:9px 8px; border-bottom:1px solid var(--border-color); text-align:right; direction:rtl; vertical-align:middle; font-weight:800; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="' + escapeHtml(row.item_code || row.item_name || "") + '">' + escapeHtml(row.component_label || row.component || "-") + '</td>'
         + '<td style="padding:9px 8px; border-bottom:1px solid var(--border-color); text-align:center; direction:rtl; vertical-align:middle; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">' + escapeHtml(row.package_label || "حزمة") + '</td>'
         + '<td style="padding:9px 8px; border-bottom:1px solid var(--border-color); text-align:center; direction:ltr; vertical-align:middle; white-space:nowrap; font-weight:800;">' + formatCount(row.package_qty || 0) + '</td>'
-        + '<td style="padding:9px 8px; border-bottom:1px solid var(--border-color); text-align:center; direction:rtl; vertical-align:middle;"><span style="display:inline-flex; justify-content:center; min-width:72px; padding:3px 9px; border-radius:999px; background:' + rowStatusBg + '; color:' + rowStatusColor + '; font-size:12px; font-weight:800; white-space:nowrap;">' + escapeHtml(row.status || "غير جاهز") + '</span></td>'
+        + '<td style="padding:9px 8px; border-bottom:1px solid var(--border-color); text-align:center; direction:rtl; vertical-align:middle;"><span style="display:inline-flex; justify-content:center; min-width:72px; padding:3px 9px; border-radius:999px; background:' + rowStatusBg + '; color:' + rowStatusColor + '; font-size:12px; font-weight:800; white-space:nowrap;">' + escapeHtml(trackingStatus) + '</span></td>'
         + '</tr>';
     }).join("");
     var tableHtml = packageRows.length ? ''
@@ -380,13 +396,19 @@
       + '</tr></thead><tbody>' + packageRowsHtml + '</tbody></table></div></div>' : '<div style="margin-top:12px; color:var(--text-muted);">لا توجد حزم مكونات للتوريد بعد. استخدم زر التحديث بعد ظهور نتائج التخصيم.</div>';
     var html = ''
       + '<div class="delivery-component-wrap" data-delivery-tracking-source="custom-app" style="padding:16px; border:1px solid var(--border-color); border-radius:12px; background:var(--card-bg); margin-bottom:12px;">'
+      + '<div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; padding:12px 14px; margin-bottom:14px; border-radius:10px; background:' + overallBg + '; color:' + overallColor + ';">'
+      + '<div><div style="font-size:13px; font-weight:800; margin-bottom:3px;">جاهزية الطلب الشاملة</div><div style="font-size:19px; font-weight:900;">' + escapeHtml(overallStatus) + '</div></div>'
+      + '<div style="font-size:13px; font-weight:800; direction:rtl; text-align:right;">' + escapeHtml(overallSummary || "حدّث الحزم لاحتساب جاهزية الأبواب والمكونات معًا") + '</div>'
+      + '</div>'
       + '<div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap;">'
       + '<div><div style="font-size:18px; font-weight:900; margin-bottom:4px;">جاهزية مكونات التوريد</div>'
-      + '<div style="color:var(--text-muted);">مسار مستقل لتجهيز المكونات قبل التحميل، ولا يغير حالة تصنيع الأبواب.</div></div>'
+      + '<div style="color:var(--text-muted);">تتبع الحزم من التجهيز إلى التحميل والتوريد، مع إبقاء أعدادها منفصلة عن عدد الأبواب.</div></div>'
       + '<span style="display:inline-flex; padding:5px 11px; border-radius:999px; background:' + statusBg + '; color:' + statusColor + '; font-size:12px; font-weight:900;">' + escapeHtml(statusText) + '</span>'
       + '</div>'
       + '<div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:14px;">'
       + statCard("الحزم الجاهزة", formatCount(readyPackages) + " / " + formatCount(totalPackages), remainingPackages > 0 ? "amber" : "green")
+      + (fullRoutePackages ? statCard("تم تحميلها", formatCount(loadedPackages) + " / " + formatCount(fullRoutePackages), loadedPackages >= fullRoutePackages ? "green" : "default") : "")
+      + (fullRoutePackages ? statCard("تم توريدها", formatCount(deliveredPackages) + " / " + formatCount(fullRoutePackages), deliveredPackages >= fullRoutePackages ? "green" : "default") : "")
       + (packageRows.length ? statCard("الكمية الجاهزة", formatCount(readyRequiredQty) + " / " + formatCount(totalRequiredQty), statusText === "مكتمل" ? "green" : "amber") : "")
       + statCard("رمز التحميل", escapeHtml(loadingCode), "default")
       + '</div>'
@@ -407,6 +429,22 @@
     return true;
   }
 
+  function refreshFulfillment(frm) {
+    if (!frm || frm.is_new() || formHasUnsavedDeliveryChanges(frm)) return;
+    frappe.call({
+      method: api.fulfillment,
+      args: { mr: frm.doc.name },
+      callback: function(r) {
+        var data = r.message || {};
+        var fulfillment = data.fulfillment || {};
+        frm.doc.custom_fulfillment_readiness_status = fulfillment.status || "غير جاهز";
+        frm.doc.custom_fulfillment_readiness_summary = fulfillment.summary || "";
+        frm.doc.custom_fulfillment_ready = fulfillment.is_ready ? 1 : 0;
+        renderDashboard(frm);
+      }
+    });
+  }
+
   function reloadCurrentFormFromExternalEvent(eventData) {
     var frm = window.cur_frm;
     if (!frm || frm.doctype !== "Material Request" || !frm.doc || frm.doc.name !== eventData.material_request) return;
@@ -423,7 +461,7 @@
   function setupRealtime() {
     if (realtimeBound || !frappe.realtime || typeof frappe.realtime.on !== "function") return;
     realtimeBound = true;
-    frappe.realtime.on("delivery_component_package_ready", reloadCurrentFormFromExternalEvent);
+    frappe.realtime.on("delivery_component_package_changed", reloadCurrentFormFromExternalEvent);
   }
 
   function maybeReloadOnFocus() {
@@ -462,6 +500,7 @@
   frappe.ui.form.on("Material Request", {
     refresh: function(frm) {
       renderDashboard(frm);
+      refreshFulfillment(frm);
     }
   });
 })();

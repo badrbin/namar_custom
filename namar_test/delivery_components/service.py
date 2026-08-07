@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any
 
@@ -7,10 +8,21 @@ import frappe
 from frappe.utils import cint, flt, now_datetime
 
 from namar_test.delivery_components.package_logic import (
+    TRACKING_ACTION_DELIVER,
+    TRACKING_ACTION_LOAD,
+    TRACKING_ACTION_READY,
+    TRACKING_ACTION_REOPEN,
+    TRACKING_STATUS_DELIVERED,
+    TRACKING_STATUS_LOADED,
+    TRACKING_STATUS_PENDING,
+    TRACKING_STATUS_READY,
+    build_fulfillment_readiness,
     build_package_specs,
     clean_count,
     is_valid_loading_prefix,
     loading_prefix_from_index,
+    next_tracking_status,
+    normalize_tracking_status,
     package_status,
 )
 
@@ -18,9 +30,28 @@ from namar_test.delivery_components.package_logic import (
 PACKAGE_DOCTYPE = "Material Request Delivery Component Package"
 PACKAGE_PARENTFIELD = "custom_delivery_component_packages"
 RULE_DOCTYPE = "Delivery Component Packaging Rule"
+EVENT_DOCTYPE = "Material Request Component Package Event"
 MR_LOADING_CODE_FIELD = "custom_delivery_loading_code"
 PACKAGE_LOADING_CODE_FIELD = "loading_code"
-REALTIME_EVENT = "delivery_component_package_ready"
+MR_SOURCE_HASH_FIELD = "custom_delivery_component_source_hash"
+REALTIME_EVENT = "delivery_component_package_changed"
+
+TRACKING_ROUTE_FULL = "تصنيع وتغليف"
+TRACKING_ROUTE_READY_ONLY = "تجهيز فقط"
+TRACKING_ROUTE_NONE = "لا يتتبع"
+
+PACKAGE_OPTIONAL_FIELDS = (
+    "packaging_rule",
+    "tracking_route",
+    "pack_size_snapshot",
+    "tracking_status",
+    "tracking_revision",
+    "active",
+    "loaded_at",
+    "loaded_by",
+    "delivered_at",
+    "delivered_by",
+)
 
 
 def normalize_material_request(value: str | None) -> str:
@@ -28,6 +59,36 @@ def normalize_material_request(value: str | None) -> str:
     if material_request and not material_request.startswith("MREQ-"):
         material_request = "MREQ-" + material_request
     return material_request
+
+
+def ensure_material_request_access(material_request: str) -> Any:
+    mr_doc = frappe.get_doc("Material Request", material_request)
+    if not frappe.has_permission("Material Request", ptype="read", doc=mr_doc):
+        frappe.throw("لا تملك صلاحية الوصول إلى طلب المواد", frappe.PermissionError)
+    return mr_doc
+
+
+def doctype_fields(doctype: str) -> set[str]:
+    if not frappe.db.exists("DocType", doctype):
+        return set()
+    return {field.fieldname for field in frappe.get_meta(doctype).fields if field.fieldname}
+
+
+def selected_fields(doctype: str, required: list[str], optional: tuple[str, ...] | list[str]) -> list[str]:
+    available = doctype_fields(doctype)
+    return required + [fieldname for fieldname in optional if fieldname in available]
+
+
+def tracking_route(value: str | None) -> str:
+    route = (value or TRACKING_ROUTE_FULL).strip()
+    if route not in (TRACKING_ROUTE_FULL, TRACKING_ROUTE_READY_ONLY, TRACKING_ROUTE_NONE):
+        return TRACKING_ROUTE_FULL
+    return route
+
+
+def source_value(value: str | None) -> str:
+    source = (value or "QR").strip()
+    return source if source in ("QR", "يدوي", "تزامن", "ترحيل") else "QR"
 
 
 def parse_store_data(item_row: Any) -> list[dict[str, Any]]:
@@ -67,8 +128,10 @@ def load_rules() -> list[dict[str, Any]]:
         "required_for_delivery",
         "sort_order",
     ]
-    if frappe.get_meta(RULE_DOCTYPE).has_field("exclude_from_delivery"):
-        fields.append("exclude_from_delivery")
+    rule_meta = frappe.get_meta(RULE_DOCTYPE)
+    for optional_field in ("exclude_from_delivery", "tracking_route"):
+        if rule_meta.has_field(optional_field):
+            fields.append(optional_field)
     return frappe.get_all(
         RULE_DOCTYPE,
         filters={"enabled": 1},
@@ -160,18 +223,18 @@ def throw_missing_delivery_rules(component_rows: list[dict[str, Any]]) -> None:
 
 
 def get_existing_packages(material_request: str) -> dict[str, dict[str, Any]]:
-    fields = [
+    fields = selected_fields(PACKAGE_DOCTYPE, [
         "name",
         "package_key",
+        "package_qty",
+        "package_label",
         "ready_qty",
         "ready_at",
         "ready_by",
         "source",
         "status",
         "barcode_key",
-    ]
-    if frappe.get_meta(PACKAGE_DOCTYPE).has_field(PACKAGE_LOADING_CODE_FIELD):
-        fields.append(PACKAGE_LOADING_CODE_FIELD)
+    ], (PACKAGE_LOADING_CODE_FIELD,) + PACKAGE_OPTIONAL_FIELDS)
     rows = frappe.get_all(
         PACKAGE_DOCTYPE,
         filters={"parent": material_request, "parentfield": PACKAGE_PARENTFIELD},
@@ -182,10 +245,15 @@ def get_existing_packages(material_request: str) -> dict[str, dict[str, Any]]:
 
 
 def get_packages_for_summary(material_request: str) -> list[dict[str, Any]]:
+    fields = selected_fields(
+        PACKAGE_DOCTYPE,
+        ["name", "package_qty", "ready_qty", "required_for_delivery", "status"],
+        ("tracking_route", "tracking_status", "active"),
+    )
     return frappe.get_all(
         PACKAGE_DOCTYPE,
         filters={"parent": material_request, "parentfield": PACKAGE_PARENTFIELD},
-        fields=["name", "package_qty", "ready_qty", "required_for_delivery"],
+        fields=fields,
         limit_page_length=0,
     )
 
@@ -218,6 +286,48 @@ def aggregate_components(mr_doc: Any) -> list[dict[str, Any]]:
                 order.append(key)
             grouped[key]["required_qty"] = flt(grouped[key].get("required_qty") or 0) + (per_row_qty * row_qty)
     return [grouped[key] for key in order]
+
+
+def build_source_hash(mr_doc: Any, rules: list[dict[str, Any]] | None = None) -> str:
+    rules = rules if rules is not None else load_rules()
+    payload: list[dict[str, Any]] = []
+    component_rows = sorted(
+        aggregate_components(mr_doc),
+        key=lambda row: (
+            row.get("component") or "",
+            row.get("item_code") or "",
+        ),
+    )
+    for row in component_rows:
+        rule = find_rule(row.get("component"), row.get("component_label"), rules) or {}
+        payload.append(
+            {
+                "component": row.get("component") or "",
+                "component_label": row.get("component_label") or "",
+                "item_code": row.get("item_code") or "",
+                "required_qty": clean_count(row.get("required_qty") or 0),
+                "rule": rule.get("name") or "",
+                "full_pack_qty": clean_count(rule.get("full_pack_qty") or 0),
+                "full_pack_label": rule.get("full_pack_label") or "",
+                "remainder_pack_label": rule.get("remainder_pack_label") or "",
+                "remainder_multi_pack_label": rule.get("remainder_multi_pack_label") or "",
+                "required_for_delivery": cint(rule.get("required_for_delivery", 1)),
+                "exclude_from_delivery": cint(rule.get("exclude_from_delivery") or 0),
+                "tracking_route": tracking_route(rule.get("tracking_route")),
+            }
+        )
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def packages_need_sync(mr_doc: Any, packages: list[dict[str, Any]] | None = None) -> bool:
+    mr_meta = frappe.get_meta("Material Request")
+    current_hash = build_source_hash(mr_doc)
+    saved_hash = (mr_doc.get(MR_SOURCE_HASH_FIELD) or "").strip() if mr_meta.has_field(MR_SOURCE_HASH_FIELD) else ""
+    if saved_hash:
+        return saved_hash != current_hash
+    package_rows = packages if packages is not None else get_packages_for_summary(mr_doc.name)
+    return bool(aggregate_components(mr_doc) or package_rows)
 
 
 def get_or_make_loading_prefix(mr_doc: Any, dry_run: bool) -> str:
@@ -256,7 +366,8 @@ def build_package_rows(mr_doc: Any) -> list[dict[str, Any]]:
     sort_map = load_component_sort_order()
     component_rows = sorted(component_rows, key=lambda row: component_sort_key(row, sort_map))
     existing = get_existing_packages(mr_doc.name)
-    has_loading_code_field = frappe.get_meta(PACKAGE_DOCTYPE).has_field(PACKAGE_LOADING_CODE_FIELD)
+    package_fields = doctype_fields(PACKAGE_DOCTYPE)
+    has_loading_code_field = PACKAGE_LOADING_CODE_FIELD in package_fields
     package_rows: list[dict[str, Any]] = []
     missing_rule_rows: list[dict[str, Any]] = []
 
@@ -268,7 +379,8 @@ def build_package_rows(mr_doc: Any) -> list[dict[str, Any]]:
         if not rule:
             missing_rule_rows.append(component_row)
             continue
-        if cint(rule.get("exclude_from_delivery") or 0):
+        rule_tracking_route = tracking_route(rule.get("tracking_route"))
+        if cint(rule.get("exclude_from_delivery") or 0) or rule_tracking_route == TRACKING_ROUTE_NONE:
             continue
 
         package_specs = build_package_specs(
@@ -291,6 +403,9 @@ def build_package_rows(mr_doc: Any) -> list[dict[str, Any]]:
             package_qty = flt(package_spec.get("package_qty") or 0)
             ready_qty = min(flt(existing_row.get("ready_qty") or 0), package_qty)
             remaining = max(package_qty - ready_qty, 0)
+            package_tracking_status = normalize_tracking_status(
+                existing_row.get("tracking_status"), package_qty, ready_qty
+            )
             package_row = {
                 "package_key": package_key,
                 "component": component_row.get("component") or "",
@@ -310,6 +425,21 @@ def build_package_rows(mr_doc: Any) -> list[dict[str, Any]]:
                 "source": existing_row.get("source") or "",
                 "barcode_key": existing_row.get("barcode_key") or "",
             }
+            optional_values = {
+                "packaging_rule": rule.get("name") or "",
+                "tracking_route": rule_tracking_route,
+                "pack_size_snapshot": clean_count(rule.get("full_pack_qty") or 0),
+                "tracking_status": package_tracking_status,
+                "tracking_revision": cint(existing_row.get("tracking_revision") or 0),
+                "active": 1,
+                "loaded_at": existing_row.get("loaded_at"),
+                "loaded_by": existing_row.get("loaded_by"),
+                "delivered_at": existing_row.get("delivered_at"),
+                "delivered_by": existing_row.get("delivered_by"),
+            }
+            for fieldname, value in optional_values.items():
+                if fieldname in package_fields:
+                    package_row[fieldname] = value
             if has_loading_code_field:
                 package_row[PACKAGE_LOADING_CODE_FIELD] = existing_row.get(PACKAGE_LOADING_CODE_FIELD) or ""
             package_rows.append(package_row)
@@ -324,16 +454,33 @@ def summarize_packages(package_rows: list[dict[str, Any]]) -> dict[str, Any]:
     ready_required = 0
     total_packages = 0
     remaining_packages = 0
+    ready_packages = 0
+    loaded_packages = 0
+    delivered_packages = 0
+    full_route_packages = 0
     for row in package_rows:
         if not cint(row.get("required_for_delivery")):
+            continue
+        route = tracking_route(row.get("tracking_route"))
+        if route == TRACKING_ROUTE_NONE:
             continue
         total_packages += 1
         package_qty = flt(row.get("package_qty") or 0)
         ready_qty = flt(row.get("ready_qty") or 0)
+        package_tracking_status = normalize_tracking_status(row.get("tracking_status"), package_qty, ready_qty)
         total_required += package_qty
         ready_required += ready_qty
-        if package_qty and ready_qty + 0.000001 < package_qty:
+        if package_tracking_status in (TRACKING_STATUS_READY, TRACKING_STATUS_LOADED, TRACKING_STATUS_DELIVERED):
+            ready_packages += 1
+        else:
             remaining_packages += 1
+        if route == TRACKING_ROUTE_READY_ONLY:
+            continue
+        full_route_packages += 1
+        if package_tracking_status in (TRACKING_STATUS_LOADED, TRACKING_STATUS_DELIVERED):
+            loaded_packages += 1
+        if package_tracking_status == TRACKING_STATUS_DELIVERED:
+            delivered_packages += 1
 
     if total_packages <= 0:
         status = "لا توجد مكونات"
@@ -345,7 +492,7 @@ def summarize_packages(package_rows: list[dict[str, Any]]) -> dict[str, Any]:
         status = "غير جاهز"
 
     summary = "حزم %s/%s | كمية %s/%s" % (
-        clean_count(total_packages - remaining_packages),
+        clean_count(ready_packages),
         clean_count(total_packages),
         clean_count(ready_required),
         clean_count(total_required),
@@ -354,67 +501,254 @@ def summarize_packages(package_rows: list[dict[str, Any]]) -> dict[str, Any]:
         "status": status,
         "total_packages": clean_count(total_packages),
         "remaining_packages": clean_count(remaining_packages),
+        "ready_packages": clean_count(ready_packages),
+        "loaded_packages": clean_count(loaded_packages),
+        "delivered_packages": clean_count(delivered_packages),
+        "full_route_packages": clean_count(full_route_packages),
         "total_required_qty": clean_count(total_required),
         "ready_required_qty": clean_count(ready_required),
         "summary": summary,
     }
 
 
-def update_material_request_summary(material_request: str, package_rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+def door_manufacturing_counts(mr_doc: Any) -> tuple[float, float]:
+    mr_meta = frappe.get_meta("Material Request")
+    total = flt(mr_doc.get("custom_manufacturing_total_count") or 0) if mr_meta.has_field("custom_manufacturing_total_count") else 0
+    remaining = flt(mr_doc.get("custom_manufacturing_remaining_count") or 0) if mr_meta.has_field("custom_manufacturing_remaining_count") else 0
+    return total, remaining
+
+
+def fulfillment_readiness(
+    mr_doc: Any,
+    package_summary: dict[str, Any],
+    needs_sync: bool,
+) -> dict[str, Any]:
+    door_total, door_remaining = door_manufacturing_counts(mr_doc)
+    return build_fulfillment_readiness(
+        door_total=door_total,
+        door_remaining=door_remaining,
+        package_total=package_summary.get("total_packages"),
+        package_ready=package_summary.get("ready_packages"),
+        package_loaded=package_summary.get("loaded_packages"),
+        package_delivered=package_summary.get("delivered_packages"),
+        package_load_total=package_summary.get("full_route_packages"),
+        packages_need_sync=needs_sync,
+    )
+
+
+def update_material_request_summary(
+    material_request: str,
+    package_rows: list[dict[str, Any]] | None = None,
+    *,
+    source_hash: str | None = None,
+) -> dict[str, Any]:
     if package_rows is None:
         package_rows = get_packages_for_summary(material_request)
     summary = summarize_packages(package_rows)
+    mr_doc = frappe.get_doc("Material Request", material_request)
+    needs_sync = packages_need_sync(mr_doc, package_rows)
+    if source_hash is not None:
+        needs_sync = source_hash != build_source_hash(mr_doc)
+    overall = fulfillment_readiness(mr_doc, summary, needs_sync)
     mr_meta = frappe.get_meta("Material Request")
     field_map = {
         "custom_delivery_component_status": summary.get("status"),
         "custom_delivery_component_total_packages": summary.get("total_packages"),
         "custom_delivery_component_remaining_packages": summary.get("remaining_packages"),
         "custom_delivery_component_summary": summary.get("summary"),
+        "custom_delivery_component_loaded_packages": summary.get("loaded_packages"),
+        "custom_delivery_component_delivered_packages": summary.get("delivered_packages"),
+        "custom_fulfillment_readiness_status": overall.get("status"),
+        "custom_fulfillment_readiness_summary": overall.get("summary"),
+        "custom_fulfillment_ready": 1 if overall.get("is_ready") else 0,
     }
-    update_values = {
+    if source_hash is not None:
+        field_map[MR_SOURCE_HASH_FIELD] = source_hash
+        field_map["custom_delivery_component_synced_at"] = now_datetime()
+    candidate_values = {
         fieldname: value
         for fieldname, value in field_map.items()
         if mr_meta.has_field(fieldname)
     }
+    update_values = {
+        fieldname: value
+        for fieldname, value in candidate_values.items()
+        if str(mr_doc.get(fieldname) or "") != str(value or "")
+    }
     if update_values:
         frappe.db.set_value("Material Request", material_request, update_values, update_modified=False)
-    return summary
+    return {**summary, "overall": overall, "needs_sync": 1 if needs_sync else 0}
 
 
-def replace_package_rows(material_request: str, package_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    existing_names = frappe.get_all(
+def package_started(row: dict[str, Any]) -> bool:
+    package_qty = flt(row.get("package_qty") or 0)
+    ready_qty = flt(row.get("ready_qty") or 0)
+    status = normalize_tracking_status(row.get("tracking_status"), package_qty, ready_qty)
+    return ready_qty > 0.000001 or status != TRACKING_STATUS_PENDING or cint(row.get("tracking_revision") or 0) > 0
+
+
+def insert_package_event(
+    *,
+    material_request: str,
+    package_row: dict[str, Any],
+    action: str,
+    from_status: str,
+    to_status: str,
+    quantity: float | int,
+    source: str,
+    revision: int,
+    event_at: Any | None = None,
+    user: str | None = None,
+) -> None:
+    if not frappe.db.exists("DocType", EVENT_DOCTYPE):
+        return
+    package_name = package_row.get("name") or ""
+    event_key = "%s|%s|%s" % (package_name, cint(revision), action)
+    if frappe.db.exists(EVENT_DOCTYPE, {"event_key": event_key}):
+        return
+    event_doc = frappe.get_doc(
+        {
+            "doctype": EVENT_DOCTYPE,
+            "event_key": event_key,
+            "material_request": material_request,
+            "package_id": package_name,
+            "package_key": package_row.get("package_key") or "",
+            "barcode_key": package_row.get("barcode_key") or package_name,
+            "loading_code": package_row.get(PACKAGE_LOADING_CODE_FIELD) or "",
+            "component": package_row.get("component") or "",
+            "item_code": package_row.get("item_code") or "",
+            "action": action,
+            "from_status": from_status or "",
+            "to_status": to_status or "",
+            "quantity": clean_count(quantity),
+            "source": source_value(source),
+            "event_at": event_at or now_datetime(),
+            "event_by": user or frappe.session.user or "Guest",
+            "revision": cint(revision),
+        }
+    )
+    event_doc.insert(ignore_permissions=True)
+
+
+def ensure_package_event_baseline(material_request: str, package_row: dict[str, Any]) -> None:
+    if not frappe.db.exists("DocType", EVENT_DOCTYPE):
+        return
+    package_name = package_row.get("name") or ""
+    if not package_name or frappe.db.exists(EVENT_DOCTYPE, {"package_id": package_name}):
+        return
+    package_qty = flt(package_row.get("package_qty") or 0)
+    ready_qty = flt(package_row.get("ready_qty") or 0)
+    status = normalize_tracking_status(package_row.get("tracking_status"), package_qty, ready_qty)
+    action = "ترحيل" if package_started(package_row) else "توليد"
+    insert_package_event(
+        material_request=material_request,
+        package_row=package_row,
+        action=action,
+        from_status="",
+        to_status=status,
+        quantity=ready_qty,
+        source="ترحيل" if action == "ترحيل" else "تزامن",
+        revision=0,
+        event_at=package_row.get("ready_at") or now_datetime(),
+        user=package_row.get("ready_by") or frappe.session.user,
+    )
+
+
+def upsert_package_rows(material_request: str, package_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    package_fields = doctype_fields(PACKAGE_DOCTYPE)
+    existing_rows = frappe.get_all(
         PACKAGE_DOCTYPE,
         filters={"parent": material_request, "parentfield": PACKAGE_PARENTFIELD},
-        pluck="name",
+        fields=selected_fields(
+            PACKAGE_DOCTYPE,
+            ["name", "package_key", "package_qty", "package_label", "ready_qty", "ready_at", "ready_by", "barcode_key"],
+            (PACKAGE_LOADING_CODE_FIELD,) + PACKAGE_OPTIONAL_FIELDS,
+        ),
         limit_page_length=0,
     )
-    for existing_name in existing_names:
-        frappe.delete_doc(PACKAGE_DOCTYPE, existing_name, ignore_permissions=True, force=True)
+    existing_by_key = {row.get("package_key"): row for row in existing_rows if row.get("package_key")}
+    desired_by_key = {row.get("package_key"): row for row in package_rows if row.get("package_key")}
+    blockers: list[str] = []
 
-    for index, row in enumerate(package_rows, start=1):
-        child = dict(row)
-        child.update(
-            {
-                "doctype": PACKAGE_DOCTYPE,
-                "parent": material_request,
-                "parenttype": "Material Request",
-                "parentfield": PACKAGE_PARENTFIELD,
-                "idx": index,
-            }
+    for package_key, desired in desired_by_key.items():
+        existing = existing_by_key.get(package_key)
+        if not existing or not package_started(existing):
+            continue
+        if abs(flt(existing.get("package_qty") or 0) - flt(desired.get("package_qty") or 0)) > 0.000001:
+            blockers.append("تغيرت كمية الحزمة %s بعد بدء تتبعها" % package_key)
+        old_package_label = (existing.get("package_label") or "").strip()
+        new_package_label = (desired.get("package_label") or "").strip()
+        if old_package_label and old_package_label != new_package_label:
+            blockers.append("تغير نوع تغليف الحزمة %s بعد بدء تتبعها" % package_key)
+        old_pack_size = flt(existing.get("pack_size_snapshot") or 0)
+        if old_pack_size > 0 and abs(old_pack_size - flt(desired.get("pack_size_snapshot") or 0)) > 0.000001:
+            blockers.append("تغير حجم التغليف للحزمة %s بعد بدء تتبعها" % package_key)
+        old_route = (existing.get("tracking_route") or "").strip()
+        new_route = (desired.get("tracking_route") or "").strip()
+        if old_route and new_route and old_route != new_route:
+            blockers.append("تغير مسار تتبع الحزمة %s بعد بدء تتبعها" % package_key)
+        old_loading_code = (existing.get(PACKAGE_LOADING_CODE_FIELD) or "").strip()
+        new_loading_code = (desired.get(PACKAGE_LOADING_CODE_FIELD) or "").strip()
+        if old_loading_code and new_loading_code and old_loading_code != new_loading_code:
+            blockers.append("تغير تكويد التحميل للحزمة %s بعد بدء تتبعها" % package_key)
+
+    for package_key, existing in existing_by_key.items():
+        if package_key not in desired_by_key and package_started(existing):
+            blockers.append("الحزمة %s مسجلة ولا يمكن حذفها تلقائيًا" % package_key)
+
+    if blockers:
+        frappe.throw(
+            "تعذر تحديث حزم المكونات حفاظًا على سجل المسح:<br>" + "<br>".join("- " + row for row in blockers)
         )
-        doc = frappe.get_doc(child)
-        doc.db_insert()
-        if not child.get("barcode_key"):
-            frappe.db.set_value(PACKAGE_DOCTYPE, doc.name, "barcode_key", doc.name, update_modified=False)
-            row["barcode_key"] = doc.name
-        row["name"] = doc.name
-    return package_rows
+
+    for package_key, existing in existing_by_key.items():
+        if package_key not in desired_by_key:
+            frappe.delete_doc(PACKAGE_DOCTYPE, existing.get("name"), ignore_permissions=True, force=True)
+
+    result: list[dict[str, Any]] = []
+    for index, desired in enumerate(package_rows, start=1):
+        package_key = desired.get("package_key")
+        existing = existing_by_key.get(package_key)
+        row = dict(desired)
+        if existing:
+            row["name"] = existing.get("name")
+            row["barcode_key"] = existing.get("barcode_key") or existing.get("name")
+            update_values = {
+                fieldname: value
+                for fieldname, value in row.items()
+                if fieldname in package_fields and fieldname != "name"
+            }
+            update_values["idx"] = index
+            frappe.db.set_value(PACKAGE_DOCTYPE, existing.get("name"), update_values, update_modified=False)
+        else:
+            child = {
+                fieldname: value
+                for fieldname, value in row.items()
+                if fieldname in package_fields
+            }
+            child.update(
+                {
+                    "doctype": PACKAGE_DOCTYPE,
+                    "parent": material_request,
+                    "parenttype": "Material Request",
+                    "parentfield": PACKAGE_PARENTFIELD,
+                    "idx": index,
+                }
+            )
+            doc = frappe.get_doc(child)
+            doc.db_insert()
+            row["name"] = doc.name
+            row["barcode_key"] = row.get("barcode_key") or doc.name
+            frappe.db.set_value(PACKAGE_DOCTYPE, doc.name, "barcode_key", row["barcode_key"], update_modified=False)
+        ensure_package_event_baseline(material_request, row)
+        result.append(row)
+    return result
 
 
 def get_packages(material_request: str) -> list[dict[str, Any]]:
     if not frappe.db.exists("DocType", PACKAGE_DOCTYPE):
         return []
-    fields = [
+    fields = selected_fields(PACKAGE_DOCTYPE, [
         "name",
         "package_key",
         "component",
@@ -433,9 +767,7 @@ def get_packages(material_request: str) -> list[dict[str, Any]]:
         "ready_by",
         "source",
         "barcode_key",
-    ]
-    if frappe.get_meta(PACKAGE_DOCTYPE).has_field(PACKAGE_LOADING_CODE_FIELD):
-        fields.append(PACKAGE_LOADING_CODE_FIELD)
+    ], (PACKAGE_LOADING_CODE_FIELD,) + PACKAGE_OPTIONAL_FIELDS)
     rows = frappe.get_all(
         PACKAGE_DOCTYPE,
         filters={"parent": material_request, "parentfield": PACKAGE_PARENTFIELD},
@@ -452,6 +784,10 @@ def get_packages(material_request: str) -> list[dict[str, Any]]:
         row["ready_qty"] = clean_count(ready_qty)
         row["remaining_qty"] = clean_count(remaining)
         row["status"] = package_status(package_qty, ready_qty)
+        row["tracking_status"] = normalize_tracking_status(row.get("tracking_status"), package_qty, ready_qty)
+        row["tracking_route"] = tracking_route(row.get("tracking_route"))
+        if "active" not in row:
+            row["active"] = 1
         row["barcode_key"] = row.get("barcode_key") or row.get("name")
         result.append(row)
     return result
@@ -469,6 +805,18 @@ def get_package(material_request: str, package_token: str) -> dict[str, Any] | N
     return None
 
 
+def get_package_events(package_id: str | None, limit: int = 50) -> list[dict[str, Any]]:
+    if not package_id or not frappe.db.exists("DocType", EVENT_DOCTYPE):
+        return []
+    return frappe.get_all(
+        EVENT_DOCTYPE,
+        filters={"package_id": package_id},
+        fields=["name", "action", "from_status", "to_status", "quantity", "source", "event_at", "event_by", "revision"],
+        order_by="event_at desc, creation desc",
+        limit_page_length=max(min(cint(limit or 50), 200), 1),
+    )
+
+
 def sync_delivery_component_packages(material_request: str | None, dry_run: int | str | bool = 0) -> dict[str, Any]:
     material_request = normalize_material_request(material_request)
     dry_run_bool = bool(cint(dry_run or 0))
@@ -479,15 +827,16 @@ def sync_delivery_component_packages(material_request: str | None, dry_run: int 
     if not frappe.db.exists("DocType", PACKAGE_DOCTYPE):
         frappe.throw("جدول حزم مكونات التوريد غير مثبت على الموقع")
 
-    mr_doc = frappe.get_doc("Material Request", material_request)
+    mr_doc = ensure_material_request_access(material_request)
+    source_hash = build_source_hash(mr_doc)
     package_rows = build_package_rows(mr_doc)
     loading_prefix = get_or_make_loading_prefix(mr_doc, dry_run_bool)
     package_rows = assign_loading_codes(package_rows, loading_prefix)
     summary = summarize_packages(package_rows)
 
     if not dry_run_bool:
-        package_rows = replace_package_rows(material_request, package_rows)
-        summary = update_material_request_summary(material_request, package_rows)
+        package_rows = upsert_package_rows(material_request, package_rows)
+        summary = update_material_request_summary(material_request, package_rows, source_hash=source_hash)
         frappe.db.commit()
 
     return {
@@ -497,6 +846,7 @@ def sync_delivery_component_packages(material_request: str | None, dry_run: int 
         "loading_code": loading_prefix,
         "packages": package_rows,
         "package_count": len(package_rows),
+        "source_hash": source_hash,
     }
 
 
@@ -518,6 +868,7 @@ def get_delivery_component_packages(
         frappe.throw("اسم طلب المواد مطلوب")
     if not frappe.db.exists("Material Request", material_request):
         frappe.throw("طلب المواد غير موجود: " + material_request)
+    mr_doc = ensure_material_request_access(material_request)
 
     packages = get_packages(material_request)
     selected_package = None
@@ -535,18 +886,22 @@ def get_delivery_component_packages(
             frappe.throw("حزمة مكونات التوريد غير موجودة أو لم يتم توليدها بعد")
 
     summary = summarize_packages(packages)
+    needs_sync = packages_need_sync(mr_doc, packages)
+    overall = fulfillment_readiness(mr_doc, summary, needs_sync)
     return {
         "material_request": material_request,
         "summary": summary,
         "packages": packages,
         "package": selected_package,
         "selected_package": selected_package,
+        "events": get_package_events(selected_package.get("name")) if selected_package else [],
         "package_count": len(packages),
-        "needs_sync": 1 if not packages else 0,
+        "needs_sync": 1 if needs_sync else 0,
+        "fulfillment": overall,
     }
 
 
-def publish_package_ready_event(material_request: str, package_row: dict[str, Any], summary: dict[str, Any]) -> None:
+def publish_package_changed_event(material_request: str, package_row: dict[str, Any], summary: dict[str, Any]) -> None:
     try:
         frappe.publish_realtime(
             REALTIME_EVENT,
@@ -555,6 +910,7 @@ def publish_package_ready_event(material_request: str, package_row: dict[str, An
                 "package_token": package_row.get("name") or package_row.get("barcode_key") or "",
                 "loading_code": package_row.get(PACKAGE_LOADING_CODE_FIELD) or "",
                 "status": package_row.get("status") or "",
+                "tracking_status": package_row.get("tracking_status") or "",
                 "summary": summary,
             },
             doctype="Material Request",
@@ -565,9 +921,10 @@ def publish_package_ready_event(material_request: str, package_row: dict[str, An
         frappe.log_error(frappe.get_traceback(), "Delivery component realtime publish failed")
 
 
-def mark_delivery_component_package_ready(
+def mark_delivery_component_package_event(
     material_request: str | None = None,
     component_package: str | None = None,
+    action: str = TRACKING_ACTION_READY,
     mode: str = "full",
     ready_qty: float | int | str | None = None,
     source: str = "QR",
@@ -575,7 +932,8 @@ def mark_delivery_component_package_ready(
     material_request = normalize_material_request(material_request)
     package_token = (component_package or "").strip()
     mode = (mode or "full").strip()
-    source = (source or "QR").strip()
+    source = source_value(source)
+    action = (action or TRACKING_ACTION_READY).strip().lower()
 
     if not package_token:
         frappe.throw("مفتاح حزمة مكونات التوريد مطلوب")
@@ -588,56 +946,183 @@ def mark_delivery_component_package_ready(
         frappe.throw("اسم طلب المواد مطلوب")
     if not frappe.db.exists("Material Request", material_request):
         frappe.throw("طلب المواد غير موجود: " + material_request)
+    mr_doc = ensure_material_request_access(material_request)
 
     package_row = get_package(material_request, package_token)
     if not package_row:
         frappe.throw("حزمة مكونات التوريد غير موجودة. شغّل تحديث حزم المكونات أولًا.")
 
+    if packages_need_sync(mr_doc):
+        frappe.throw("تغيرت مكونات الطلب. حدّث حزم المكونات قبل تسجيل أي حركة جديدة.")
+
+    frappe.db.sql(
+        "SELECT name FROM `tab%s` WHERE name = %%s FOR UPDATE" % PACKAGE_DOCTYPE,
+        (package_row.get("name"),),
+    )
+    package_row = get_package(material_request, package_row.get("name")) or package_row
     package_qty = flt(package_row.get("package_qty") or 0)
     current_ready_qty = flt(package_row.get("ready_qty") or 0)
     requested_qty = flt(ready_qty or 0)
+    current_tracking_status = normalize_tracking_status(
+        package_row.get("tracking_status"), package_qty, current_ready_qty
+    )
+    package_tracking_route = tracking_route(package_row.get("tracking_route"))
+    if package_tracking_route == TRACKING_ROUTE_NONE:
+        frappe.throw("هذه الحزمة مستبعدة من التتبع")
+    if package_tracking_route == TRACKING_ROUTE_READY_ONLY and action in (TRACKING_ACTION_LOAD, TRACKING_ACTION_DELIVER):
+        frappe.throw("مسار هذه الحزمة تجهيز فقط ولا يتطلب تحميلًا أو توريدًا منفصلًا")
 
-    if mode == "partial":
+    if action == TRACKING_ACTION_READY and mode == "partial":
         if requested_qty <= 0:
             frappe.throw("أدخل كمية جزئية أكبر من صفر")
         new_ready_qty = current_ready_qty + requested_qty
-    else:
+    elif action == TRACKING_ACTION_READY:
         new_ready_qty = package_qty
+    elif action == TRACKING_ACTION_REOPEN:
+        new_ready_qty = 0
+    else:
+        new_ready_qty = current_ready_qty
 
     new_ready_qty = min(max(new_ready_qty, 0), package_qty)
     remaining_qty = max(package_qty - new_ready_qty, 0)
     new_status = package_status(package_qty, new_ready_qty)
+    try:
+        new_tracking_status = next_tracking_status(
+            current_tracking_status,
+            action,
+            package_is_ready=new_status == TRACKING_STATUS_READY,
+        )
+    except ValueError as exc:
+        frappe.throw(str(exc))
+
+    if new_tracking_status == current_tracking_status and abs(new_ready_qty - current_ready_qty) <= 0.000001:
+        summary = update_material_request_summary(material_request)
+        package_row["tracking_status"] = current_tracking_status
+        return {
+            "status": "already_done",
+            "material_request": material_request,
+            "package": package_row,
+            "summary": summary,
+            "fulfillment": summary.get("overall") or {},
+            "events": get_package_events(package_row.get("name")),
+            "message": "حركة الحزمة مسجلة مسبقًا",
+        }
+
     stamp = now_datetime()
     user = frappe.session.user if frappe.session.user and frappe.session.user != "Guest" else "Guest"
-
+    revision = cint(package_row.get("tracking_revision") or 0) + 1
+    package_fields = doctype_fields(PACKAGE_DOCTYPE)
+    update_values = {
+        "ready_qty": clean_count(new_ready_qty),
+        "remaining_qty": clean_count(remaining_qty),
+        "status": new_status,
+        "source": source,
+    }
+    optional_updates = {
+        "tracking_status": new_tracking_status,
+        "tracking_revision": revision,
+    }
+    if action == TRACKING_ACTION_READY:
+        optional_updates.update({"ready_at": stamp, "ready_by": user})
+    elif action == TRACKING_ACTION_LOAD:
+        optional_updates.update({"loaded_at": stamp, "loaded_by": user})
+    elif action == TRACKING_ACTION_DELIVER:
+        optional_updates.update({"delivered_at": stamp, "delivered_by": user})
+    elif action == TRACKING_ACTION_REOPEN:
+        optional_updates.update(
+            {
+                "ready_at": None,
+                "ready_by": None,
+                "loaded_at": None,
+                "loaded_by": None,
+                "delivered_at": None,
+                "delivered_by": None,
+            }
+        )
+    update_values.update({key: value for key, value in optional_updates.items() if key in package_fields})
     frappe.db.set_value(
         PACKAGE_DOCTYPE,
         package_row.get("name"),
-        {
-            "ready_qty": clean_count(new_ready_qty),
-            "remaining_qty": clean_count(remaining_qty),
-            "status": new_status,
-            "ready_at": stamp,
-            "ready_by": user,
-            "source": source if source in ("QR", "يدوي", "تزامن") else "QR",
-        },
+        update_values,
         update_modified=False,
     )
-    summary = update_material_request_summary(material_request)
-
+    event_actions = {
+        TRACKING_ACTION_READY: (
+            "تجهيز جزئي"
+            if new_status != TRACKING_STATUS_READY
+            else ("تجهيز" if package_tracking_route == TRACKING_ROUTE_READY_ONLY else "تصنيع وتجهيز")
+        ),
+        TRACKING_ACTION_LOAD: "تحميل",
+        TRACKING_ACTION_DELIVER: "توريد",
+        TRACKING_ACTION_REOPEN: "إعادة فتح",
+    }
     package_row["ready_qty"] = clean_count(new_ready_qty)
     package_row["remaining_qty"] = clean_count(remaining_qty)
     package_row["status"] = new_status
-    package_row["ready_at"] = stamp
-    package_row["ready_by"] = user
+    package_row["tracking_status"] = new_tracking_status
+    package_row["tracking_revision"] = revision
     package_row["source"] = source
-    publish_package_ready_event(material_request, package_row, summary)
+    package_row.update({key: value for key, value in optional_updates.items() if key in package_fields})
+    insert_package_event(
+        material_request=material_request,
+        package_row=package_row,
+        action=event_actions.get(action, action),
+        from_status=current_tracking_status,
+        to_status=new_tracking_status,
+        quantity=new_ready_qty,
+        source=source,
+        revision=revision,
+        event_at=stamp,
+        user=user,
+    )
+    summary = update_material_request_summary(material_request)
+    publish_package_changed_event(material_request, package_row, summary)
     frappe.db.commit()
 
+    messages = {
+        TRACKING_ACTION_READY: "تم تسجيل جاهزية الحزمة" if new_status == TRACKING_STATUS_READY else "تم تسجيل كمية جزئية من الحزمة",
+        TRACKING_ACTION_LOAD: "تم تسجيل تحميل الحزمة",
+        TRACKING_ACTION_DELIVER: "تم تسجيل توريد الحزمة",
+        TRACKING_ACTION_REOPEN: "تمت إعادة فتح الحزمة",
+    }
     return {
-        "status": "done" if new_status == "جاهز" else "partial",
+        "status": "done" if new_status == TRACKING_STATUS_READY or action != TRACKING_ACTION_READY else "partial",
         "material_request": material_request,
         "package": package_row,
         "summary": summary,
-        "message": "تم تسجيل حزمة مكونات التوريد" if new_status == "جاهز" else "تم تسجيل كمية جزئية من الحزمة",
+        "fulfillment": summary.get("overall") or {},
+        "events": get_package_events(package_row.get("name")),
+        "message": messages.get(action, "تم تسجيل حركة الحزمة"),
+    }
+
+
+def mark_delivery_component_package_ready(
+    material_request: str | None = None,
+    component_package: str | None = None,
+    mode: str = "full",
+    ready_qty: float | int | str | None = None,
+    source: str = "QR",
+) -> dict[str, Any]:
+    return mark_delivery_component_package_event(
+        material_request=material_request,
+        component_package=component_package,
+        action=TRACKING_ACTION_READY,
+        mode=mode,
+        ready_qty=ready_qty,
+        source=source,
+    )
+
+
+def get_material_request_fulfillment_readiness(material_request: str | None = None) -> dict[str, Any]:
+    data = get_delivery_component_packages(material_request=material_request)
+    persisted = update_material_request_summary(
+        data.get("material_request"),
+        data.get("packages") or [],
+    )
+    frappe.db.commit()
+    return {
+        "material_request": data.get("material_request"),
+        "fulfillment": persisted.get("overall") or data.get("fulfillment") or {},
+        "summary": persisted,
+        "needs_sync": persisted.get("needs_sync") or 0,
     }

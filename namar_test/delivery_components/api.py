@@ -36,3 +36,29 @@ def mark_delivery_component_package_ready(
         ready_qty=ready_qty or qty,
         source=source,
     )
+
+
+@frappe.whitelist()
+def mark_delivery_component_package_event(
+    mr: str | None = None,
+    component_package: str | None = None,
+    package: str | None = None,  # noqa: A002 - API compatibility with barcode query param
+    action: str = "ready",
+    mode: str = "full",
+    ready_qty=None,
+    qty=None,
+    source: str = "QR",
+):
+    return service.mark_delivery_component_package_event(
+        material_request=mr,
+        component_package=component_package or package,
+        action=action,
+        mode=mode,
+        ready_qty=ready_qty or qty,
+        source=source,
+    )
+
+
+@frappe.whitelist()
+def get_material_request_fulfillment_readiness(mr: str | None = None):
+    return service.get_material_request_fulfillment_readiness(mr)
