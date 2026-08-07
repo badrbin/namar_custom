@@ -16,8 +16,9 @@ from namar_test.delivery_components.package_logic import (
     TRACKING_STATUS_LOADED,
     TRACKING_STATUS_PENDING,
     TRACKING_STATUS_READY,
+    assign_stable_loading_codes,
     build_fulfillment_readiness,
-    build_package_specs,
+    build_reconciled_package_specs,
     clean_count,
     is_valid_loading_prefix,
     loading_prefix_from_index,
@@ -355,9 +356,7 @@ def get_or_make_loading_prefix(mr_doc: Any, dry_run: bool) -> str:
 def assign_loading_codes(package_rows: list[dict[str, Any]], loading_prefix: str) -> list[dict[str, Any]]:
     if not loading_prefix or not frappe.get_meta(PACKAGE_DOCTYPE).has_field(PACKAGE_LOADING_CODE_FIELD):
         return package_rows
-    for index, row in enumerate(package_rows, start=1):
-        row[PACKAGE_LOADING_CODE_FIELD] = "%s-%s" % (loading_prefix, str(index).zfill(2))
-    return package_rows
+    return assign_stable_loading_codes(package_rows, loading_prefix, PACKAGE_LOADING_CODE_FIELD)
 
 
 def build_package_rows(mr_doc: Any) -> list[dict[str, Any]]:
@@ -383,22 +382,32 @@ def build_package_rows(mr_doc: Any) -> list[dict[str, Any]]:
         if cint(rule.get("exclude_from_delivery") or 0) or rule_tracking_route == TRACKING_ROUTE_NONE:
             continue
 
-        package_specs = build_package_specs(
-            required_qty=required_qty,
-            full_pack_qty=rule.get("full_pack_qty") or 0,
-            full_label=(rule.get("full_pack_label") or "حزمة").strip(),
-            remainder_one_label=(rule.get("remainder_pack_label") or "مغلف منفرد").strip(),
-            remainder_multi_label=(rule.get("remainder_multi_pack_label") or "كرتون ناقص").strip(),
+        package_base = "%s||%s" % (
+            component_row.get("component") or "",
+            component_row.get("item_code") or "",
         )
+        existing_group = [
+            row
+            for key, row in existing.items()
+            if (key or "").rsplit("||", 1)[0] == package_base
+        ]
+        try:
+            package_specs = build_reconciled_package_specs(
+                required_qty=required_qty,
+                full_pack_qty=rule.get("full_pack_qty") or 0,
+                full_label=(rule.get("full_pack_label") or "حزمة").strip(),
+                remainder_one_label=(rule.get("remainder_pack_label") or "مغلف منفرد").strip(),
+                remainder_multi_label=(rule.get("remainder_multi_pack_label") or "كرتون ناقص").strip(),
+                existing_rows=existing_group,
+            )
+        except ValueError as exc:
+            frappe.throw("تعذر تحديث حزم %s: %s" % (component_row.get("component") or "المكون", exc))
         required_for_delivery = 1 if cint(rule.get("required_for_delivery", 1)) else 0
 
         package_count = len(package_specs)
-        for index, package_spec in enumerate(package_specs, start=1):
-            package_key = "%s||%s||%s" % (
-                component_row.get("component") or "",
-                component_row.get("item_code") or "",
-                index,
-            )
+        for package_spec in package_specs:
+            index = cint(package_spec.get("package_no") or 0)
+            package_key = package_spec.get("package_key") or "%s||%s" % (package_base, index)
             existing_row = existing.get(package_key) or {}
             package_qty = flt(package_spec.get("package_qty") or 0)
             ready_qty = min(flt(existing_row.get("ready_qty") or 0), package_qty)
@@ -428,7 +437,10 @@ def build_package_rows(mr_doc: Any) -> list[dict[str, Any]]:
             optional_values = {
                 "packaging_rule": rule.get("name") or "",
                 "tracking_route": rule_tracking_route,
-                "pack_size_snapshot": clean_count(rule.get("full_pack_qty") or 0),
+                "pack_size_snapshot": clean_count(
+                    existing_row.get("pack_size_snapshot")
+                    or (package_qty if package_spec.get("legacy_started") else rule.get("full_pack_qty") or 0)
+                ),
                 "tracking_status": package_tracking_status,
                 "tracking_revision": cint(existing_row.get("tracking_revision") or 0),
                 "active": 1,

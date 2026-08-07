@@ -194,6 +194,113 @@ def build_package_specs(
     return specs
 
 
+def package_key_number(value: str | None) -> int:
+    try:
+        return max(int((value or "").rsplit("||", 1)[1]), 1)
+    except (IndexError, TypeError, ValueError):
+        return 1
+
+
+def package_row_started(row: dict | None) -> bool:
+    row = row or {}
+    package_qty = float(row.get("package_qty") or 0)
+    ready_qty = float(row.get("ready_qty") or 0)
+    status = normalize_tracking_status(row.get("tracking_status"), package_qty, ready_qty)
+    return (
+        ready_qty > 0.000001
+        or status != TRACKING_STATUS_PENDING
+        or int(row.get("tracking_revision") or 0) > 0
+    )
+
+
+def build_reconciled_package_specs(
+    *,
+    required_qty: float | int | str | None,
+    full_pack_qty: float | int | str | None,
+    full_label: str,
+    remainder_one_label: str,
+    remainder_multi_label: str,
+    existing_rows: list[dict] | None = None,
+) -> list[dict[str, int | float | str | bool]]:
+    required = max(float(required_qty or 0), 0)
+    started_rows = [dict(row) for row in (existing_rows or []) if package_row_started(row)]
+    started_rows.sort(
+        key=lambda row: (
+            package_key_number(row.get("package_key")),
+            row.get("package_key") or "",
+        )
+    )
+    started_qty = sum(max(float(row.get("package_qty") or 0), 0) for row in started_rows)
+    if started_qty > required + 0.000001:
+        raise ValueError(
+            "الكمية الحالية أقل من كمية حزم بدأ تتبعها: %s مقابل %s"
+            % (clean_count(required), clean_count(started_qty))
+        )
+
+    specs: list[dict[str, int | float | str | bool]] = []
+    used_numbers: set[int] = set()
+    for row in started_rows:
+        package_no = package_key_number(row.get("package_key"))
+        while package_no in used_numbers:
+            package_no += 1
+        used_numbers.add(package_no)
+        specs.append(
+            {
+                "package_key": row.get("package_key") or "",
+                "package_no": package_no,
+                "package_label": row.get("package_label") or full_label or "حزمة",
+                "package_qty": clean_count(row.get("package_qty") or 0),
+                "legacy_started": True,
+            }
+        )
+
+    remaining_specs = build_package_specs(
+        required_qty=max(required - started_qty, 0),
+        full_pack_qty=full_pack_qty,
+        full_label=full_label,
+        remainder_one_label=remainder_one_label,
+        remainder_multi_label=remainder_multi_label,
+    )
+    next_number = 1
+    for row in remaining_specs:
+        while next_number in used_numbers:
+            next_number += 1
+        used_numbers.add(next_number)
+        specs.append({**row, "package_no": next_number, "legacy_started": False})
+        next_number += 1
+
+    return sorted(specs, key=lambda row: int(row.get("package_no") or 0))
+
+
+def assign_stable_loading_codes(
+    package_rows: list[dict],
+    loading_prefix: str | None,
+    fieldname: str = "loading_code",
+) -> list[dict]:
+    prefix = (loading_prefix or "").strip().upper()
+    if not prefix:
+        return package_rows
+
+    used = {
+        (row.get(fieldname) or "").strip().upper()
+        for row in package_rows
+        if (row.get(fieldname) or "").strip()
+    }
+    next_number = 1
+    for row in package_rows:
+        existing = (row.get(fieldname) or "").strip().upper()
+        if existing:
+            row[fieldname] = existing
+            continue
+        while "%s-%s" % (prefix, str(next_number).zfill(2)) in used:
+            next_number += 1
+        code = "%s-%s" % (prefix, str(next_number).zfill(2))
+        row[fieldname] = code
+        used.add(code)
+        next_number += 1
+    return package_rows
+
+
 def is_valid_loading_prefix(value: str | None) -> bool:
     text = (value or "").strip().upper()
     return len(text) == 2 and "A" <= text[0] <= "Z" and "A" <= text[1] <= "Z"

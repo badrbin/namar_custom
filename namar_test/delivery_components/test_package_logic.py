@@ -7,8 +7,10 @@ from namar_test.delivery_components.package_logic import (
     TRACKING_STATUS_LOADED,
     TRACKING_STATUS_PENDING,
     TRACKING_STATUS_READY,
+    assign_stable_loading_codes,
     build_fulfillment_readiness,
     build_package_specs,
+    build_reconciled_package_specs,
     next_tracking_status,
     normalize_tracking_status,
 )
@@ -77,6 +79,91 @@ class DeliveryComponentPackageLogicTestCase(unittest.TestCase):
 
     def test_legacy_ready_package_is_not_reset_by_new_default(self):
         self.assertEqual(normalize_tracking_status("غير جاهز", 4, 4), TRACKING_STATUS_READY)
+
+    def test_started_legacy_package_is_frozen_when_new_rule_would_split_it(self):
+        specs = build_reconciled_package_specs(
+            required_qty=4,
+            full_pack_qty=1,
+            full_label="باب",
+            remainder_one_label="باب",
+            remainder_multi_label="حزمة ناقصة",
+            existing_rows=[
+                {
+                    "package_key": "بانل 92X4.5||||1",
+                    "package_qty": 4,
+                    "package_label": "حزمة",
+                    "ready_qty": 4,
+                    "tracking_status": "جاهز",
+                }
+            ],
+        )
+
+        self.assertEqual(len(specs), 1)
+        self.assertEqual(specs[0]["package_qty"], 4)
+        self.assertEqual(specs[0]["package_label"], "حزمة")
+        self.assertTrue(specs[0]["legacy_started"])
+
+    def test_only_remaining_quantity_uses_current_packaging_rule(self):
+        specs = build_reconciled_package_specs(
+            required_qty=15,
+            full_pack_qty=6,
+            full_label="كرتون",
+            remainder_one_label="قطعة",
+            remainder_multi_label="كرتون ناقص",
+            existing_rows=[
+                {
+                    "package_key": "برواز 8X2.6||||1",
+                    "package_qty": 6,
+                    "package_label": "كرتون",
+                    "ready_qty": 6,
+                    "tracking_status": "جاهز",
+                },
+                {
+                    "package_key": "برواز 8X2.6||||2",
+                    "package_qty": 6,
+                    "package_label": "كرتون",
+                    "ready_qty": 0,
+                    "tracking_status": "غير جاهز",
+                },
+            ],
+        )
+
+        self.assertEqual([row["package_qty"] for row in specs], [6, 6, 3])
+        self.assertEqual([row["package_no"] for row in specs], [1, 2, 3])
+        self.assertEqual([row["legacy_started"] for row in specs], [True, False, False])
+
+    def test_sync_is_blocked_if_source_drops_below_started_packages(self):
+        with self.assertRaisesRegex(ValueError, "أقل من كمية حزم بدأ تتبعها"):
+            build_reconciled_package_specs(
+                required_qty=3,
+                full_pack_qty=1,
+                full_label="باب",
+                remainder_one_label="باب",
+                remainder_multi_label="حزمة ناقصة",
+                existing_rows=[
+                    {
+                        "package_key": "بانل 92X4.5||||1",
+                        "package_qty": 4,
+                        "ready_qty": 4,
+                        "tracking_status": "جاهز",
+                    }
+                ],
+            )
+
+    def test_loading_codes_preserve_existing_and_fill_gaps(self):
+        rows = [
+            {"loading_code": "AC-03"},
+            {},
+            {"loading_code": "AC-01"},
+            {},
+        ]
+
+        assigned = assign_stable_loading_codes(rows, "AC")
+
+        self.assertEqual(
+            [row["loading_code"] for row in assigned],
+            ["AC-03", "AC-02", "AC-01", "AC-04"],
+        )
 
 
 if __name__ == "__main__":
