@@ -9,6 +9,7 @@
   var realtimeBound = false;
   var focusBound = false;
   var lastFocusReloadAt = 0;
+  var preparingPrint = false;
 
   function flt(value) {
     return frappe.utils && frappe.utils.flt ? frappe.utils.flt(value || 0) : Number(value || 0);
@@ -97,8 +98,8 @@
     wrapper.off(".namarDeliveryComponents");
     wrapper.on(
       "click.namarDeliveryComponents",
-      ".delivery-component-sync-btn",
-      function() { syncPackages(frm); }
+      ".delivery-component-print-btn",
+      function() { prepareAndPrintPackages(frm); }
     );
     wrapper.on(
       "click.namarDeliveryComponents",
@@ -134,6 +135,96 @@
           indicator: "green"
         }, 7);
         frm.reload_doc();
+      }
+    });
+  }
+
+  function closePreparingWindow(printWindow) {
+    if (!printWindow || printWindow.closed) return;
+    try {
+      printWindow.close();
+    } catch (error) {
+      // The browser may revoke access after navigation; there is nothing else to clean up.
+    }
+  }
+
+  function showPrintFallback(frm) {
+    var url = printUrl(frm);
+    frappe.msgprint({
+      title: "ملصقات مكونات التوريد جاهزة",
+      indicator: "green",
+      message: '<div dir="rtl" style="text-align:right;">منع المتصفح فتح نافذة الطباعة تلقائيًا. '
+        + '<a class="btn btn-primary btn-sm" target="_blank" rel="noopener" href="' + escapeHtml(url) + '">فتح الملصقات</a></div>'
+    });
+  }
+
+  function prepareAndPrintPackages(frm) {
+    if (preparingPrint) return;
+    if (frm.is_new()) {
+      frappe.msgprint("احفظ طلب المواد قبل طباعة باركود مكونات التوريد.");
+      return;
+    }
+    if (formHasUnsavedDeliveryChanges(frm)) {
+      frappe.msgprint("احفظ طلب المواد أولًا حتى يتم تجهيز الحزم من آخر نتائج تخصيم محفوظة.");
+      return;
+    }
+
+    preparingPrint = true;
+
+    var printWindow = window.open("about:blank", "_blank");
+    if (printWindow) {
+      try {
+        printWindow.document.open();
+        printWindow.document.write(
+          '<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">'
+          + '<title>جاري تجهيز ملصقات المكونات</title></head>'
+          + '<body style="font-family:sans-serif; padding:40px; text-align:center;">'
+          + '<h2>جاري تجهيز حزم مكونات التوريد...</h2>'
+          + '<p>ستفتح الملصقات تلقائيًا بعد اكتمال التجهيز.</p></body></html>'
+        );
+        printWindow.document.close();
+      } catch (error) {
+        // Continue with the sync; a fallback link is shown if navigation is unavailable.
+      }
+    }
+
+    frappe.call({
+      method: api.sync,
+      args: { mr: frm.doc.name },
+      freeze: true,
+      freeze_message: "جاري تجهيز حزم المكونات للطباعة...",
+      callback: function(r) {
+        var msg = r.message || {};
+        var packageCount = Number(msg.package_count || 0);
+        if (!packageCount) {
+          preparingPrint = false;
+          closePreparingWindow(printWindow);
+          frappe.msgprint("لا توجد مكونات قابلة للتغليف والطباعة في طلب المواد الحالي.");
+          frm.reload_doc();
+          return;
+        }
+
+        if (printWindow && !printWindow.closed) {
+          try {
+            printWindow.location.replace(printUrl(frm));
+          } catch (error) {
+            closePreparingWindow(printWindow);
+            showPrintFallback(frm);
+          }
+        } else {
+          showPrintFallback(frm);
+        }
+
+        frappe.show_alert({
+          message: "تم تجهيز " + packageCount + " حزمة وفتح ملصقاتها للطباعة.",
+          indicator: "green"
+        }, 7);
+        preparingPrint = false;
+        frm.reload_doc();
+      },
+      error: function() {
+        preparingPrint = false;
+        closePreparingWindow(printWindow);
       }
     });
   }
@@ -393,12 +484,12 @@
       + '<th style="padding:9px 8px; text-align:center; direction:rtl; color:var(--text-muted); font-size:12px; white-space:nowrap;">التغليف</th>'
       + '<th style="padding:9px 8px; text-align:center; direction:rtl; color:var(--text-muted); font-size:12px; white-space:nowrap;">عدد القطع</th>'
       + '<th style="padding:9px 8px; text-align:center; direction:rtl; color:var(--text-muted); font-size:12px; white-space:nowrap;">الحالة</th>'
-      + '</tr></thead><tbody>' + packageRowsHtml + '</tbody></table></div></div>' : '<div style="margin-top:12px; color:var(--text-muted);">لا توجد حزم مكونات للتوريد بعد. استخدم زر التحديث بعد ظهور نتائج التخصيم.</div>';
+      + '</tr></thead><tbody>' + packageRowsHtml + '</tbody></table></div></div>' : '<div style="margin-top:12px; color:var(--text-muted);">لا توجد حزم مكونات للتوريد بعد. اضغط طباعة باركود المكونات لتجهيزها وفتح الملصقات تلقائيًا.</div>';
     var html = ''
       + '<div class="delivery-component-wrap" data-delivery-tracking-source="custom-app" style="padding:16px; border:1px solid var(--border-color); border-radius:12px; background:var(--card-bg); margin-bottom:12px;">'
       + '<div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; padding:12px 14px; margin-bottom:14px; border-radius:10px; background:' + overallBg + '; color:' + overallColor + ';">'
       + '<div><div style="font-size:13px; font-weight:800; margin-bottom:3px;">جاهزية الطلب الشاملة</div><div style="font-size:19px; font-weight:900;">' + escapeHtml(overallStatus) + '</div></div>'
-      + '<div style="font-size:13px; font-weight:800; direction:rtl; text-align:right;">' + escapeHtml(overallSummary || "حدّث الحزم لاحتساب جاهزية الأبواب والمكونات معًا") + '</div>'
+      + '<div style="font-size:13px; font-weight:800; direction:rtl; text-align:right;">' + escapeHtml(overallSummary || "اطبع باركود المكونات لتجهيز الحزم واحتساب جاهزية الطلب") + '</div>'
       + '</div>'
       + '<div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap;">'
       + '<div><div style="font-size:18px; font-weight:900; margin-bottom:4px;">جاهزية مكونات التوريد</div>'
@@ -413,9 +504,8 @@
       + statCard("رمز التحميل", escapeHtml(loadingCode), "default")
       + '</div>'
       + '<div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:14px;">'
-      + '<button type="button" class="btn btn-primary btn-sm delivery-component-sync-btn">تحديث حزم المكونات</button>'
+      + '<button type="button" class="btn btn-primary btn-sm delivery-component-print-btn">طباعة باركود المكونات</button>'
       + (pendingRows(frm).length ? '<button type="button" class="btn btn-default btn-sm manual-delivery-component-package-btn">تسجيل حزمة يدويًا</button>' : '')
-      + (packageRows.length ? '<a class="btn btn-default btn-sm" target="_blank" href="' + printUrl(frm) + '">طباعة باركود المكونات</a>' : '')
       + '</div>'
       + tableHtml
       + '</div>';
@@ -488,10 +578,14 @@
   window.namar_delivery_tracking.delivery_components = {
     render_material_request: renderDashboard,
     sync_packages: syncPackages,
+    prepare_and_print: prepareAndPrintPackages,
     open_manual_dialog: openManualDialog
   };
   window.sync_delivery_component_packages_for_current_form = function() {
     if (window.cur_frm) syncPackages(window.cur_frm);
+  };
+  window.prepare_delivery_component_packages_for_print_for_current_form = function() {
+    if (window.cur_frm) prepareAndPrintPackages(window.cur_frm);
   };
   window.open_manual_delivery_component_package_dialog_for_current_form = function() {
     if (window.cur_frm) openManualDialog(window.cur_frm);
