@@ -11,7 +11,12 @@ from namar_test.delivery_components.package_logic import (
     build_fulfillment_readiness,
     build_package_specs,
     build_reconciled_package_specs,
+    component_color_from_item_code,
+    component_package_key,
+    legacy_component_package_key,
+    legacy_color_split_has_started_rows,
     next_tracking_status,
+    normalize_component_color,
     normalize_tracking_status,
 )
 
@@ -163,6 +168,40 @@ class DeliveryComponentPackageLogicTestCase(unittest.TestCase):
         self.assertEqual(
             [row["loading_code"] for row in assigned],
             ["AC-03", "AC-02", "AC-01", "AC-04"],
+        )
+
+    def test_component_color_matches_cutting_report_prefixes(self):
+        self.assertEqual(component_color_from_item_code("T5D1"), "تك")
+        self.assertEqual(component_color_from_item_code("WS5D1"), "قشر الجوز")
+        self.assertEqual(component_color_from_item_code("011-H1"), "بني 011")
+        self.assertEqual(component_color_from_item_code("UNKNOWN"), "")
+
+    def test_explicit_color_can_be_code_or_label(self):
+        self.assertEqual(normalize_component_color("T"), "تك")
+        self.assertEqual(normalize_component_color("قشر الجوز"), "قشر الجوز")
+
+    def test_color_is_part_of_package_identity(self):
+        self.assertEqual(
+            component_package_key("حلق 20", "تك", "", 2),
+            "حلق 20||تك||||2",
+        )
+        self.assertEqual(
+            legacy_component_package_key("حلق 20", "", 2),
+            "حلق 20||||2",
+        )
+
+    def test_scanned_legacy_package_blocks_ambiguous_color_split(self):
+        self.assertTrue(
+            legacy_color_split_has_started_rows(
+                {"تك", "قشر الجوز"},
+                [{"package_qty": 4, "ready_qty": 4, "tracking_status": "جاهز"}],
+            )
+        )
+        self.assertFalse(
+            legacy_color_split_has_started_rows(
+                {"تك", "قشر الجوز"},
+                [{"package_qty": 4, "ready_qty": 0, "tracking_status": "غير جاهز"}],
+            )
         )
 
 

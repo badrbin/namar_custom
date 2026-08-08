@@ -20,9 +20,14 @@ from namar_test.delivery_components.package_logic import (
     build_fulfillment_readiness,
     build_reconciled_package_specs,
     clean_count,
+    component_color_from_item_code,
+    component_package_key,
     is_valid_loading_prefix,
+    legacy_color_split_has_started_rows,
+    legacy_component_package_key,
     loading_prefix_from_index,
     next_tracking_status,
+    normalize_component_color,
     normalize_tracking_status,
     package_status,
 )
@@ -34,6 +39,7 @@ RULE_DOCTYPE = "Delivery Component Packaging Rule"
 EVENT_DOCTYPE = "Material Request Component Package Event"
 MR_LOADING_CODE_FIELD = "custom_delivery_loading_code"
 PACKAGE_LOADING_CODE_FIELD = "loading_code"
+PACKAGE_COLOR_FIELD = "color"
 MR_SOURCE_HASH_FIELD = "custom_delivery_component_source_hash"
 REALTIME_EVENT = "delivery_component_package_changed"
 
@@ -42,6 +48,7 @@ TRACKING_ROUTE_READY_ONLY = "تجهيز فقط"
 TRACKING_ROUTE_NONE = "لا يتتبع"
 
 PACKAGE_OPTIONAL_FIELDS = (
+    PACKAGE_COLOR_FIELD,
     "packaging_rule",
     "tracking_route",
     "pack_size_snapshot",
@@ -53,6 +60,10 @@ PACKAGE_OPTIONAL_FIELDS = (
     "delivered_at",
     "delivered_by",
 )
+
+
+def is_legacy_package_key(value: str | None) -> bool:
+    return (value or "").count("||") == 2
 
 
 def normalize_material_request(value: str | None) -> str:
@@ -195,12 +206,35 @@ def load_component_sort_order() -> dict[str, int]:
     return sort_map
 
 
-def component_sort_key(component_row: dict[str, Any], sort_map: dict[str, int]) -> tuple[int, str, str]:
+def load_component_color_flags() -> dict[str, int]:
+    if not frappe.db.exists("DocType", "Store Component"):
+        return {}
+
+    meta = frappe.get_meta("Store Component")
+    if not meta.has_field("custom_has_color"):
+        return {}
+    fields = ["name", "custom_has_color"]
+    for fieldname in ("component_name", "label_ar"):
+        if meta.has_field(fieldname):
+            fields.append(fieldname)
+
+    color_flags: dict[str, int] = {}
+    for row in frappe.get_all("Store Component", fields=fields, limit_page_length=0):
+        uses_color = 1 if cint(row.get("custom_has_color") or 0) else 0
+        for key in (row.get("name"), row.get("component_name"), row.get("label_ar")):
+            text = (key or "").strip()
+            if text:
+                color_flags[text] = uses_color
+    return color_flags
+
+
+def component_sort_key(component_row: dict[str, Any], sort_map: dict[str, int]) -> tuple[int, str, str, str]:
     component = (component_row.get("component") or "").strip()
     component_label = (component_row.get("component_label") or "").strip()
+    color = (component_row.get(PACKAGE_COLOR_FIELD) or "").strip()
     item_code = (component_row.get("item_code") or "").strip()
     sort_value = sort_map.get(component) or sort_map.get(component_label) or 999999
-    return (sort_value, component_label or component, item_code)
+    return (sort_value, component_label or component, color, item_code)
 
 
 def missing_rule_label(component_row: dict[str, Any]) -> str:
@@ -229,6 +263,9 @@ def get_existing_packages(material_request: str) -> dict[str, dict[str, Any]]:
     fields = selected_fields(PACKAGE_DOCTYPE, [
         "name",
         "package_key",
+        "component",
+        "item_code",
+        "package_no",
         "package_qty",
         "package_label",
         "ready_qty",
@@ -261,9 +298,38 @@ def get_packages_for_summary(material_request: str) -> list[dict[str, Any]]:
     )
 
 
-def aggregate_components(mr_doc: Any) -> list[dict[str, Any]]:
+def missing_color_label(row: dict[str, Any]) -> str:
+    component = (row.get("component_label") or row.get("component") or "مكون").strip()
+    row_idx = cint(row.get("row_idx") or 0)
+    item_code = (row.get("source_item_code") or "").strip()
+    details = []
+    if row_idx:
+        details.append("السطر %s" % row_idx)
+    if item_code:
+        details.append(item_code)
+    return "%s (%s)" % (component, "، ".join(details)) if details else component
+
+
+def throw_missing_component_colors(rows: list[dict[str, Any]]) -> None:
+    labels: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        label = missing_color_label(row)
+        if label and label not in seen:
+            seen.add(label)
+            labels.append(label)
+    frappe.throw(
+        "تعذر تحديث وطباعة حزم المكونات لأن اللون غير محدد للمكونات التي تعتمد على اللون:<br>"
+        + "<br>".join("- " + label for label in labels)
+        + "<br>حدد لون الصنف في سطر طلب المواد ثم أعد الطباعة."
+    )
+
+
+def aggregate_components(mr_doc: Any, *, validate_colors: bool = False) -> list[dict[str, Any]]:
     grouped: dict[str, dict[str, Any]] = {}
     order: list[str] = []
+    missing_colors: list[dict[str, Any]] = []
+    color_flags = load_component_color_flags()
     for item_row in mr_doc.items:
         row_qty = flt(item_row.qty or 0)
         if row_qty <= 0:
@@ -277,27 +343,53 @@ def aggregate_components(mr_doc: Any) -> list[dict[str, Any]]:
             per_row_qty = flt(store.get("qty") or 0)
             if not component or per_row_qty <= 0:
                 continue
-            key = component + "||" + item_code
+            uses_color = 1 if cint(color_flags.get(component) or color_flags.get(component_label) or 0) else 0
+            explicit_color = normalize_component_color(
+                store.get("color")
+                or store.get("component_color")
+                or store.get("custom_color")
+                or store.get("لون")
+            )
+            color = explicit_color or (component_color_from_item_code(item_row.item_code) if uses_color else "")
+            if uses_color and not color:
+                missing_colors.append(
+                    {
+                        "component": component,
+                        "component_label": component_label,
+                        "row_idx": item_row.idx,
+                        "source_item_code": item_row.item_code,
+                    }
+                )
+            key = component + "||" + color + "||" + item_code
             if key not in grouped:
                 grouped[key] = {
                     "component": component,
                     "component_label": component_label,
+                    PACKAGE_COLOR_FIELD: color,
+                    "uses_color": uses_color,
                     "item_code": item_code,
                     "item_name": item_name,
                     "required_qty": 0,
                 }
                 order.append(key)
             grouped[key]["required_qty"] = flt(grouped[key].get("required_qty") or 0) + (per_row_qty * row_qty)
+    if validate_colors and missing_colors:
+        throw_missing_component_colors(missing_colors)
     return [grouped[key] for key in order]
 
 
-def build_source_hash(mr_doc: Any, rules: list[dict[str, Any]] | None = None) -> str:
+def build_source_hash(
+    mr_doc: Any,
+    rules: list[dict[str, Any]] | None = None,
+    component_rows: list[dict[str, Any]] | None = None,
+) -> str:
     rules = rules if rules is not None else load_rules()
     payload: list[dict[str, Any]] = []
     component_rows = sorted(
-        aggregate_components(mr_doc),
+        component_rows if component_rows is not None else aggregate_components(mr_doc),
         key=lambda row: (
             row.get("component") or "",
+            row.get(PACKAGE_COLOR_FIELD) or "",
             row.get("item_code") or "",
         ),
     )
@@ -307,6 +399,7 @@ def build_source_hash(mr_doc: Any, rules: list[dict[str, Any]] | None = None) ->
             {
                 "component": row.get("component") or "",
                 "component_label": row.get("component_label") or "",
+                PACKAGE_COLOR_FIELD: row.get(PACKAGE_COLOR_FIELD) or "",
                 "item_code": row.get("item_code") or "",
                 "required_qty": clean_count(row.get("required_qty") or 0),
                 "rule": rule.get("name") or "",
@@ -361,9 +454,12 @@ def assign_loading_codes(package_rows: list[dict[str, Any]], loading_prefix: str
     return assign_stable_loading_codes(package_rows, loading_prefix, PACKAGE_LOADING_CODE_FIELD)
 
 
-def build_package_rows(mr_doc: Any) -> list[dict[str, Any]]:
+def build_package_rows(
+    mr_doc: Any,
+    component_rows: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     rules = load_rules()
-    component_rows = aggregate_components(mr_doc)
+    component_rows = component_rows if component_rows is not None else aggregate_components(mr_doc, validate_colors=True)
     sort_map = load_component_sort_order()
     component_rows = sorted(component_rows, key=lambda row: component_sort_key(row, sort_map))
     existing = get_existing_packages(mr_doc.name)
@@ -371,6 +467,42 @@ def build_package_rows(mr_doc: Any) -> list[dict[str, Any]]:
     has_loading_code_field = PACKAGE_LOADING_CODE_FIELD in package_fields
     package_rows: list[dict[str, Any]] = []
     missing_rule_rows: list[dict[str, Any]] = []
+
+    colors_by_legacy_base: dict[str, set[str]] = {}
+    for row in component_rows:
+        legacy_base = legacy_component_package_key(
+            row.get("component"), row.get("item_code"), 1
+        ).rsplit("||", 1)[0]
+        colors_by_legacy_base.setdefault(legacy_base, set()).add(
+            (row.get(PACKAGE_COLOR_FIELD) or "").strip()
+        )
+
+    ambiguous_started: list[str] = []
+    for legacy_base, colors in colors_by_legacy_base.items():
+        if len(colors) <= 1:
+            continue
+        legacy_rows = [
+            row
+            for key, row in existing.items()
+            if is_legacy_package_key(key) and (key or "").rsplit("||", 1)[0] == legacy_base
+        ]
+        if legacy_color_split_has_started_rows(colors, legacy_rows):
+            for row in legacy_rows:
+                if not package_started(row):
+                    continue
+                ambiguous_started.append(
+                    "%s: الحزمة %s مسجلة سابقًا وأصبحت موزعة على أكثر من لون"
+                    % (
+                        row.get("component") or legacy_base.split("||", 1)[0] or "المكون",
+                        row.get("package_key") or row.get("name"),
+                    )
+                )
+    if ambiguous_started:
+        frappe.throw(
+            "تعذر تحديث حزم المكونات حفاظًا على سجل المسح:<br>"
+            + "<br>".join("- " + row for row in ambiguous_started)
+            + "<br>راجع ألوان الحزم القديمة قبل إعادة المزامنة."
+        )
 
     for component_row in component_rows:
         required_qty = flt(component_row.get("required_qty") or 0)
@@ -384,15 +516,25 @@ def build_package_rows(mr_doc: Any) -> list[dict[str, Any]]:
         if cint(rule.get("exclude_from_delivery") or 0) or rule_tracking_route == TRACKING_ROUTE_NONE:
             continue
 
-        package_base = "%s||%s" % (
-            component_row.get("component") or "",
-            component_row.get("item_code") or "",
-        )
-        existing_group = [
+        component = component_row.get("component") or ""
+        color = component_row.get(PACKAGE_COLOR_FIELD) or ""
+        item_code = component_row.get("item_code") or ""
+        package_base = component_package_key(component, color, item_code, 1).rsplit("||", 1)[0]
+        legacy_base = legacy_component_package_key(component, item_code, 1).rsplit("||", 1)[0]
+        exact_group = [
             row
             for key, row in existing.items()
-            if (key or "").rsplit("||", 1)[0] == package_base
+            if not is_legacy_package_key(key) and (key or "").rsplit("||", 1)[0] == package_base
         ]
+        can_reuse_legacy = len(colors_by_legacy_base.get(legacy_base) or set()) <= 1
+        legacy_group = [
+            row
+            for key, row in existing.items()
+            if can_reuse_legacy
+            and is_legacy_package_key(key)
+            and (key or "").rsplit("||", 1)[0] == legacy_base
+        ]
+        existing_group = exact_group + legacy_group
         try:
             package_specs = build_reconciled_package_specs(
                 required_qty=required_qty,
@@ -409,8 +551,11 @@ def build_package_rows(mr_doc: Any) -> list[dict[str, Any]]:
         package_count = len(package_specs)
         for package_spec in package_specs:
             index = cint(package_spec.get("package_no") or 0)
-            package_key = package_spec.get("package_key") or "%s||%s" % (package_base, index)
-            existing_row = existing.get(package_key) or {}
+            package_key = component_package_key(component, color, item_code, index)
+            source_package_key = package_spec.get("package_key") if package_spec.get("legacy_started") else ""
+            existing_row = existing.get(source_package_key) or existing.get(package_key) or {}
+            if not existing_row and can_reuse_legacy:
+                existing_row = existing.get(legacy_component_package_key(component, item_code, index)) or {}
             package_qty = flt(package_spec.get("package_qty") or 0)
             ready_qty = min(flt(existing_row.get("ready_qty") or 0), package_qty)
             remaining = max(package_qty - ready_qty, 0)
@@ -419,9 +564,10 @@ def build_package_rows(mr_doc: Any) -> list[dict[str, Any]]:
             )
             package_row = {
                 "package_key": package_key,
-                "component": component_row.get("component") or "",
+                "component": component,
                 "component_label": component_row.get("component_label") or component_row.get("component") or "",
-                "item_code": component_row.get("item_code") or "",
+                PACKAGE_COLOR_FIELD: color,
+                "item_code": item_code,
                 "item_name": component_row.get("item_name") or component_row.get("item_code") or "",
                 "package_no": index,
                 "package_count": package_count,
@@ -436,6 +582,8 @@ def build_package_rows(mr_doc: Any) -> list[dict[str, Any]]:
                 "source": existing_row.get("source") or "",
                 "barcode_key": existing_row.get("barcode_key") or "",
             }
+            if existing_row.get("name"):
+                package_row["_existing_name"] = existing_row.get("name")
             optional_values = {
                 "packaging_rule": rule.get("name") or "",
                 "tracking_route": rule_tracking_route,
@@ -675,17 +823,37 @@ def upsert_package_rows(material_request: str, package_rows: list[dict[str, Any]
         filters={"parent": material_request, "parentfield": PACKAGE_PARENTFIELD},
         fields=selected_fields(
             PACKAGE_DOCTYPE,
-            ["name", "package_key", "package_qty", "package_label", "ready_qty", "ready_at", "ready_by", "barcode_key"],
+            [
+                "name",
+                "package_key",
+                "component",
+                "item_code",
+                "package_no",
+                "package_qty",
+                "package_label",
+                "ready_qty",
+                "ready_at",
+                "ready_by",
+                "barcode_key",
+            ],
             (PACKAGE_LOADING_CODE_FIELD,) + PACKAGE_OPTIONAL_FIELDS,
         ),
         limit_page_length=0,
     )
     existing_by_key = {row.get("package_key"): row for row in existing_rows if row.get("package_key")}
-    desired_by_key = {row.get("package_key"): row for row in package_rows if row.get("package_key")}
+    existing_by_name = {row.get("name"): row for row in existing_rows if row.get("name")}
+    desired_matches: dict[str, dict[str, Any]] = {}
+    matched_existing_names: set[str] = set()
+    for desired in package_rows:
+        existing = existing_by_name.get(desired.get("_existing_name")) or existing_by_key.get(desired.get("package_key"))
+        if existing:
+            desired_matches[desired.get("package_key")] = existing
+            matched_existing_names.add(existing.get("name"))
     blockers: list[str] = []
 
-    for package_key, desired in desired_by_key.items():
-        existing = existing_by_key.get(package_key)
+    for desired in package_rows:
+        package_key = desired.get("package_key")
+        existing = desired_matches.get(package_key)
         if not existing or not package_started(existing):
             continue
         if abs(flt(existing.get("package_qty") or 0) - flt(desired.get("package_qty") or 0)) > 0.000001:
@@ -706,23 +874,23 @@ def upsert_package_rows(material_request: str, package_rows: list[dict[str, Any]
         if old_loading_code and new_loading_code and old_loading_code != new_loading_code:
             blockers.append("تغير تكويد التحميل للحزمة %s بعد بدء تتبعها" % package_key)
 
-    for package_key, existing in existing_by_key.items():
-        if package_key not in desired_by_key and package_started(existing):
-            blockers.append("الحزمة %s مسجلة ولا يمكن حذفها تلقائيًا" % package_key)
+    for existing in existing_rows:
+        if existing.get("name") not in matched_existing_names and package_started(existing):
+            blockers.append("الحزمة %s مسجلة ولا يمكن حذفها تلقائيًا" % (existing.get("package_key") or existing.get("name")))
 
     if blockers:
         frappe.throw(
             "تعذر تحديث حزم المكونات حفاظًا على سجل المسح:<br>" + "<br>".join("- " + row for row in blockers)
         )
 
-    for package_key, existing in existing_by_key.items():
-        if package_key not in desired_by_key:
+    for existing in existing_rows:
+        if existing.get("name") not in matched_existing_names:
             frappe.delete_doc(PACKAGE_DOCTYPE, existing.get("name"), ignore_permissions=True, force=True)
 
     result: list[dict[str, Any]] = []
     for index, desired in enumerate(package_rows, start=1):
         package_key = desired.get("package_key")
-        existing = existing_by_key.get(package_key)
+        existing = desired_matches.get(package_key)
         row = dict(desired)
         if existing:
             row["name"] = existing.get("name")
@@ -842,8 +1010,9 @@ def sync_delivery_component_packages(material_request: str | None, dry_run: int 
         frappe.throw("جدول حزم مكونات التوريد غير مثبت على الموقع")
 
     mr_doc = ensure_material_request_access(material_request)
-    source_hash = build_source_hash(mr_doc)
-    package_rows = build_package_rows(mr_doc)
+    component_rows = aggregate_components(mr_doc, validate_colors=True)
+    source_hash = build_source_hash(mr_doc, component_rows=component_rows)
+    package_rows = build_package_rows(mr_doc, component_rows=component_rows)
     loading_prefix = get_or_make_loading_prefix(mr_doc, dry_run_bool)
     package_rows = assign_loading_codes(package_rows, loading_prefix)
     summary = summarize_packages(package_rows)

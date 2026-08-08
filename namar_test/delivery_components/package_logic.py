@@ -13,6 +13,84 @@ TRACKING_ACTION_DELIVER = "deliver"
 TRACKING_ACTION_REOPEN = "reopen"
 
 
+COMPONENT_COLOR_NAMES = {
+    "B": "أسود",
+    "C": "بني",
+    "CG": "بني محروق",
+    "DG": "فيراني",
+    "DGZ": "دارك جراي",
+    "F": "فلاور",
+    "G": "رصاصي",
+    "H": "عسلي",
+    "N": "بدون لون",
+    "NS": "نيو سيلفر",
+    "P": "خشبي",
+    "S": "سيلفر",
+    "T": "تك",
+    "W": "أبيض",
+    "WS": "قشر الجوز",
+    "WT": "وايت تك",
+    "Z": "بيج",
+    "011-": "بني 011",
+    "022-": "وايت تك 022",
+}
+
+
+def component_color_from_item_code(item_code: str | None) -> str:
+    code = (item_code or "").strip()
+    if not code:
+        return ""
+    if "-" in code:
+        color_code = code.split("-", 1)[0].strip()
+        if color_code in ("011", "022"):
+            color_code += "-"
+    else:
+        prefix_chars: list[str] = []
+        for char in code:
+            if char.isdigit():
+                break
+            prefix_chars.append(char)
+        color_code = "".join(prefix_chars).strip()
+    if color_code in COMPONENT_COLOR_NAMES:
+        return COMPONENT_COLOR_NAMES[color_code]
+    return color_code if color_code and len(color_code) <= 3 else ""
+
+
+def normalize_component_color(value: str | None) -> str:
+    color = (value or "").strip()
+    return COMPONENT_COLOR_NAMES.get(color, color)
+
+
+def component_package_key(
+    component: str | None,
+    color: str | None,
+    item_code: str | None,
+    package_no: int | str | None,
+) -> str:
+    return "||".join(
+        [
+            (component or "").strip(),
+            (color or "").strip(),
+            (item_code or "").strip(),
+            str(max(int(package_no or 0), 1)),
+        ]
+    )
+
+
+def legacy_component_package_key(
+    component: str | None,
+    item_code: str | None,
+    package_no: int | str | None,
+) -> str:
+    return "||".join(
+        [
+            (component or "").strip(),
+            (item_code or "").strip(),
+            str(max(int(package_no or 0), 1)),
+        ]
+    )
+
+
 def clean_count(value: float | int | str | None) -> int | float:
     number = float(value or 0)
     if abs(number - int(number)) < 0.000001:
@@ -211,6 +289,14 @@ def package_row_started(row: dict | None) -> bool:
         or status != TRACKING_STATUS_PENDING
         or int(row.get("tracking_revision") or 0) > 0
     )
+
+
+def legacy_color_split_has_started_rows(
+    colors: set[str] | list[str] | tuple[str, ...],
+    rows: list[dict] | tuple[dict, ...],
+) -> bool:
+    distinct_colors = {(color or "").strip() for color in colors}
+    return len(distinct_colors) > 1 and any(package_row_started(row) for row in rows)
 
 
 def build_reconciled_package_specs(
