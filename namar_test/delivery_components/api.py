@@ -6,9 +6,17 @@ from namar_test.delivery_components import service
 from namar_test.delivery_components import tracking_codes
 
 
+def _material_request_name(mr: str | None, material_request: str | None) -> str | None:
+    return mr or material_request
+
+
 @frappe.whitelist()
-def sync_delivery_component_packages(mr: str | None = None, dry_run: int | str | bool = 0):
-    return service.sync_delivery_component_packages(mr, dry_run)
+def sync_delivery_component_packages(
+    mr: str | None = None,
+    dry_run: int | str | bool = 0,
+    material_request: str | None = None,
+):
+    return service.sync_delivery_component_packages(_material_request_name(mr, material_request), dry_run)
 
 
 @frappe.whitelist(allow_guest=True)
@@ -16,8 +24,12 @@ def get_delivery_component_packages(
     mr: str | None = None,
     component_package: str | None = None,
     package: str | None = None,  # noqa: A002 - API compatibility with old query param
+    material_request: str | None = None,
 ):
-    return service.get_delivery_component_packages(mr, component_package or package)
+    return service.get_delivery_component_packages(
+        _material_request_name(mr, material_request),
+        component_package or package,
+    )
 
 
 @frappe.whitelist(allow_guest=True)
@@ -29,9 +41,10 @@ def mark_delivery_component_package_ready(
     ready_qty=None,
     qty=None,
     source: str = "QR",
+    material_request: str | None = None,
 ):
     return service.mark_delivery_component_package_ready(
-        material_request=mr,
+        material_request=_material_request_name(mr, material_request),
         component_package=component_package or package,
         mode=mode,
         ready_qty=ready_qty or qty,
@@ -49,9 +62,10 @@ def mark_delivery_component_package_event(
     ready_qty=None,
     qty=None,
     source: str = "QR",
+    material_request: str | None = None,
 ):
     return service.mark_delivery_component_package_event(
-        material_request=mr,
+        material_request=_material_request_name(mr, material_request),
         component_package=component_package or package,
         action=action,
         mode=mode,
@@ -61,8 +75,13 @@ def mark_delivery_component_package_event(
 
 
 @frappe.whitelist(allow_guest=True)
-def get_material_request_fulfillment_readiness(mr: str | None = None):
-    return service.get_material_request_fulfillment_readiness(mr)
+def get_material_request_fulfillment_readiness(
+    mr: str | None = None,
+    material_request: str | None = None,
+):
+    return service.get_material_request_fulfillment_readiness(
+        _material_request_name(mr, material_request)
+    )
 
 
 @frappe.whitelist(allow_guest=True)
