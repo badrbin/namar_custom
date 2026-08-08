@@ -279,9 +279,15 @@ def get_existing_packages(material_request: str) -> dict[str, dict[str, Any]]:
         "status",
         "barcode_key",
     ], (PACKAGE_LOADING_CODE_FIELD,) + PACKAGE_OPTIONAL_FIELDS)
+    filters: dict[str, Any] = {
+        "parent": material_request,
+        "parentfield": PACKAGE_PARENTFIELD,
+    }
+    if frappe.get_meta(PACKAGE_DOCTYPE).has_field("active"):
+        filters["active"] = 1
     rows = frappe.get_all(
         PACKAGE_DOCTYPE,
-        filters={"parent": material_request, "parentfield": PACKAGE_PARENTFIELD},
+        filters=filters,
         fields=fields,
         limit_page_length=0,
     )
@@ -294,9 +300,15 @@ def get_packages_for_summary(material_request: str) -> list[dict[str, Any]]:
         ["name", "package_qty", "ready_qty", "required_for_delivery", "status"],
         ("tracking_route", "tracking_status", "active"),
     )
+    filters: dict[str, Any] = {
+        "parent": material_request,
+        "parentfield": PACKAGE_PARENTFIELD,
+    }
+    if frappe.get_meta(PACKAGE_DOCTYPE).has_field("active"):
+        filters["active"] = 1
     return frappe.get_all(
         PACKAGE_DOCTYPE,
-        filters={"parent": material_request, "parentfield": PACKAGE_PARENTFIELD},
+        filters=filters,
         fields=fields,
         limit_page_length=0,
     )
@@ -619,6 +631,9 @@ def summarize_packages(package_rows: list[dict[str, Any]]) -> dict[str, Any]:
     delivered_packages = 0
     full_route_packages = 0
     for row in package_rows:
+        active_value = row.get("active")
+        if active_value not in (None, "") and not cint(active_value):
+            continue
         if not cint(row.get("required_for_delivery")):
             continue
         route = tracking_route(row.get("tracking_route"))
@@ -747,6 +762,21 @@ def package_started(row: dict[str, Any]) -> bool:
     return ready_qty > 0.000001 or status != TRACKING_STATUS_PENDING or cint(row.get("tracking_revision") or 0) > 0
 
 
+def package_is_active(row: dict[str, Any]) -> bool:
+    active_value = row.get("active")
+    return active_value in (None, "") or bool(cint(active_value))
+
+
+def package_is_excluded(row: dict[str, Any], rules: list[dict[str, Any]]) -> bool:
+    rule = find_rule(row.get("component"), row.get("component_label"), rules)
+    if not rule:
+        return False
+    return bool(
+        cint(rule.get("exclude_from_delivery") or 0)
+        or tracking_route(rule.get("tracking_route")) == TRACKING_ROUTE_NONE
+    )
+
+
 def insert_package_event(
     *,
     material_request: str,
@@ -830,6 +860,7 @@ def upsert_package_rows(
                 "name",
                 "package_key",
                 "component",
+                "component_label",
                 "item_code",
                 "package_no",
                 "package_qty",
@@ -853,6 +884,7 @@ def upsert_package_rows(
             desired_matches[desired.get("package_key")] = existing
             matched_existing_names.add(existing.get("name"))
     blockers: list[str] = []
+    rules = load_rules()
 
     for desired in package_rows:
         package_key = desired.get("package_key")
@@ -878,7 +910,9 @@ def upsert_package_rows(
             blockers.append("تغير تكويد التحميل للحزمة %s بعد بدء تتبعها" % package_key)
 
     for existing in existing_rows:
-        if existing.get("name") not in matched_existing_names and package_started(existing):
+        if existing.get("name") in matched_existing_names or not package_is_active(existing):
+            continue
+        if package_started(existing) and not package_is_excluded(existing, rules):
             blockers.append("الحزمة %s مسجلة ولا يمكن حذفها تلقائيًا" % (existing.get("package_key") or existing.get("name")))
 
     if blockers:
@@ -887,8 +921,23 @@ def upsert_package_rows(
         )
 
     for existing in existing_rows:
-        if existing.get("name") not in matched_existing_names:
-            frappe.delete_doc(PACKAGE_DOCTYPE, existing.get("name"), ignore_permissions=True, force=True)
+        if existing.get("name") in matched_existing_names or not package_is_active(existing):
+            continue
+        if package_started(existing) and package_is_excluded(existing, rules):
+            archive_values = {
+                "required_for_delivery": 0,
+                "tracking_route": TRACKING_ROUTE_NONE,
+            }
+            if "active" in package_fields:
+                archive_values["active"] = 0
+            frappe.db.set_value(
+                PACKAGE_DOCTYPE,
+                existing.get("name"),
+                {key: value for key, value in archive_values.items() if key in package_fields},
+                update_modified=False,
+            )
+            continue
+        frappe.delete_doc(PACKAGE_DOCTYPE, existing.get("name"), ignore_permissions=True, force=True)
 
     result: list[dict[str, Any]] = []
     for index, desired in enumerate(package_rows, start=1):
@@ -956,9 +1005,15 @@ def get_packages(material_request: str) -> list[dict[str, Any]]:
         "source",
         "barcode_key",
     ], (PACKAGE_LOADING_CODE_FIELD,) + PACKAGE_OPTIONAL_FIELDS)
+    filters: dict[str, Any] = {
+        "parent": material_request,
+        "parentfield": PACKAGE_PARENTFIELD,
+    }
+    if frappe.get_meta(PACKAGE_DOCTYPE).has_field("active"):
+        filters["active"] = 1
     rows = frappe.get_all(
         PACKAGE_DOCTYPE,
-        filters={"parent": material_request, "parentfield": PACKAGE_PARENTFIELD},
+        filters=filters,
         fields=fields,
         order_by="idx asc",
         limit_page_length=0,

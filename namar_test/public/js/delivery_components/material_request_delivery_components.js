@@ -41,7 +41,11 @@
   }
 
   function rows(frm) {
-    return (frm && frm.doc && frm.doc.custom_delivery_component_packages) || [];
+    return ((frm && frm.doc && frm.doc.custom_delivery_component_packages) || []).filter(function(row) {
+      var active = row.active;
+      var isActive = active === undefined || active === null || active === "" || Number(active) === 1;
+      return isActive && (row.tracking_route || "تصنيع وتغليف") !== "لا يتتبع";
+    });
   }
 
   function pendingRows(frm) {
