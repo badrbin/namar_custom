@@ -98,6 +98,18 @@ def clean_count(value: float | int | str | None) -> int | float:
     return round(number, 3)
 
 
+def should_rotate_unregistered_barcodes(
+    previous_source_hash: str | None,
+    current_source_hash: str | None,
+    *,
+    has_existing_packages: bool,
+) -> bool:
+    return bool(
+        has_existing_packages
+        and (previous_source_hash or "").strip() != (current_source_hash or "").strip()
+    )
+
+
 def package_status(package_qty: float | int | str | None, ready_qty: float | int | str | None) -> str:
     package_qty = float(package_qty or 0)
     ready_qty = float(ready_qty or 0)

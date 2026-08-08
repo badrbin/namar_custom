@@ -28,6 +28,7 @@ from namar_test.delivery_components.package_logic import (
     normalize_component_color,
     normalize_tracking_status,
     package_status,
+    should_rotate_unregistered_barcodes,
 )
 from namar_test.delivery_components.tracking_code_logic import (
     is_valid_request_tracking_code,
@@ -1047,6 +1048,7 @@ def sync_delivery_component_packages(material_request: str | None, dry_run: int 
     component_rows = aggregate_components(mr_doc, validate_colors=True)
     source_hash = build_source_hash(mr_doc, component_rows=component_rows)
     previous_source_hash = (mr_doc.get(MR_SOURCE_HASH_FIELD) or "").strip()
+    has_existing_packages = bool(get_packages(material_request))
     package_rows = build_package_rows(mr_doc, component_rows=component_rows)
     loading_prefix = get_or_make_loading_prefix(mr_doc, dry_run_bool)
     package_rows = assign_loading_codes(package_rows, loading_prefix)
@@ -1056,7 +1058,11 @@ def sync_delivery_component_packages(material_request: str | None, dry_run: int 
         package_rows = upsert_package_rows(
             material_request,
             package_rows,
-            rotate_unregistered_barcodes=bool(previous_source_hash and previous_source_hash != source_hash),
+            rotate_unregistered_barcodes=should_rotate_unregistered_barcodes(
+                previous_source_hash,
+                source_hash,
+                has_existing_packages=has_existing_packages,
+            ),
         )
         summary = update_material_request_summary(material_request, package_rows, source_hash=source_hash)
         frappe.db.commit()

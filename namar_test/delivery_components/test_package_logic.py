@@ -18,6 +18,7 @@ from namar_test.delivery_components.package_logic import (
     next_tracking_status,
     normalize_component_color,
     normalize_tracking_status,
+    should_rotate_unregistered_barcodes,
 )
 from namar_test.delivery_components.tracking_code_logic import (
     is_valid_request_tracking_code,
@@ -227,6 +228,31 @@ class DeliveryComponentPackageLogicTestCase(unittest.TestCase):
             legacy_color_split_has_started_rows(
                 {"تك", "قشر الجوز"},
                 [{"package_qty": 4, "ready_qty": 0, "tracking_status": "غير جاهز"}],
+            )
+        )
+
+    def test_existing_legacy_packages_rotate_when_source_hash_is_missing(self):
+        self.assertTrue(
+            should_rotate_unregistered_barcodes(
+                "",
+                "new-source-hash",
+                has_existing_packages=True,
+            )
+        )
+
+    def test_new_or_unchanged_packages_do_not_rotate(self):
+        self.assertFalse(
+            should_rotate_unregistered_barcodes(
+                "",
+                "new-source-hash",
+                has_existing_packages=False,
+            )
+        )
+        self.assertFalse(
+            should_rotate_unregistered_barcodes(
+                "same-source-hash",
+                "same-source-hash",
+                has_existing_packages=True,
             )
         )
 
