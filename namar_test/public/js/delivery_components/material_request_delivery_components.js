@@ -4,7 +4,8 @@
     get: "namar_test.delivery_components.api.get_delivery_component_packages",
     markReady: "namar_test.delivery_components.api.mark_delivery_component_package_ready",
     markEvent: "namar_test.delivery_components.api.mark_delivery_component_package_event",
-    fulfillment: "namar_test.delivery_components.api.get_material_request_fulfillment_readiness"
+    fulfillment: "namar_test.delivery_components.api.get_material_request_fulfillment_readiness",
+    resolve: "namar_test.delivery_components.api.resolve_delivery_tracking_code"
   };
   var realtimeBound = false;
   var focusBound = false;
@@ -519,6 +520,126 @@
     return true;
   }
 
+  function renderUnifiedDashboard(frm) {
+    var field = frm.fields_dict.custom_delivery_component_dashboard;
+    if (!field) return true;
+    if (frm.is_new()) {
+      frm.set_df_property("custom_delivery_component_dashboard", "options", "");
+      frm.refresh_field("custom_delivery_component_dashboard");
+      return true;
+    }
+
+    var packageRows = rows(frm);
+    var totalPackages = flt(frm.doc.custom_delivery_component_total_packages || 0) || packageRows.filter(function(row) {
+      return parseInt(row.required_for_delivery || 0, 10);
+    }).length;
+    var registeredPackages = packageRows.filter(function(row) {
+      if (!parseInt(row.required_for_delivery || 0, 10)) return false;
+      var packageQty = flt(row.package_qty || 0);
+      var readyQty = flt(row.ready_qty || 0);
+      var trackingStatus = row.tracking_status || row.status || "غير جاهز";
+      return readyQty >= packageQty - 0.000001
+        || ["جاهز", "محمل", "تم التوريد"].indexOf(trackingStatus) !== -1;
+    }).length;
+    var remainingPackages = Math.max(totalPackages - registeredPackages, 0);
+    var statusText = totalPackages <= 0
+      ? "لا توجد مكونات"
+      : remainingPackages <= 0
+        ? "مكتمل"
+        : registeredPackages > 0 ? "جزئي" : "غير جاهز";
+    var requestCode = frm.doc.custom_delivery_loading_code || "-";
+    var overallStatus = frm.doc.custom_fulfillment_readiness_status || "غير جاهز";
+    var overallSummary = frm.doc.custom_fulfillment_readiness_summary || "";
+    var overallComplete = ["جاهز بالكامل", "تم التحميل بالكامل", "تم التوريد بالكامل"].indexOf(overallStatus) !== -1;
+    var overallBg = overallComplete ? "rgba(34,197,94,0.14)" : overallStatus === "جاهزية جزئية" ? "rgba(245,158,11,0.14)" : "rgba(239,68,68,0.10)";
+    var overallColor = overallComplete ? "#16a34a" : overallStatus === "جاهزية جزئية" ? "#b45309" : "#dc2626";
+    var statusBg = statusText === "مكتمل" ? "rgba(34,197,94,0.14)" : statusText === "جزئي" ? "rgba(245,158,11,0.14)" : "rgba(148,163,184,0.16)";
+    var statusColor = statusText === "مكتمل" ? "#16a34a" : statusText === "جزئي" ? "#b45309" : "#475569";
+    var hasColor = packageRows.some(function(row) { return !!String(row.color || "").trim(); });
+    var hasRegistrationInfo = packageRows.some(function(row) { return !!(row.ready_at || row.ready_by); });
+
+    var packageRowsHtml = packageRows.map(function(row) {
+      var packageQty = flt(row.package_qty || 0);
+      var readyQty = flt(row.ready_qty || 0);
+      var trackingStatus = row.tracking_status || row.status || "غير جاهز";
+      var registered = readyQty >= packageQty - 0.000001
+        || ["جاهز", "محمل", "تم التوريد"].indexOf(trackingStatus) !== -1;
+      var displayStatus = registered ? "مسجلة" : "غير مسجلة";
+      var rowStatusBg = registered ? "rgba(34,197,94,0.14)" : "rgba(245,158,11,0.14)";
+      var rowStatusColor = registered ? "#16a34a" : "#b45309";
+      var searchText = [
+        row.loading_code || "",
+        row.component_label || row.component || "",
+        row.color || "",
+        row.item_code || "",
+        formatCount(packageQty),
+        displayStatus,
+        row.ready_at || "",
+        row.ready_by || ""
+      ].join(" ").toLowerCase();
+      return ''
+        + '<tr class="delivery-component-dashboard-row" data-search="' + escapeHtml(searchText) + '">'
+        + '<td style="padding:9px 8px; border-bottom:1px solid var(--border-color); text-align:center; direction:ltr; vertical-align:middle; font-weight:900; white-space:nowrap;">' + escapeHtml(row.loading_code || "-") + '</td>'
+        + '<td style="padding:9px 8px; border-bottom:1px solid var(--border-color); text-align:right; direction:rtl; vertical-align:middle; font-weight:800;">' + escapeHtml(row.component_label || row.component || "-") + '</td>'
+        + (hasColor ? '<td style="padding:9px 8px; border-bottom:1px solid var(--border-color); text-align:right; direction:rtl; vertical-align:middle;">' + escapeHtml(row.color || "-") + '</td>' : '')
+        + '<td style="padding:9px 8px; border-bottom:1px solid var(--border-color); text-align:center; direction:ltr; vertical-align:middle; font-weight:800; white-space:nowrap;">' + formatCount(packageQty) + '</td>'
+        + '<td style="padding:9px 8px; border-bottom:1px solid var(--border-color); text-align:center; direction:rtl; vertical-align:middle;"><span style="display:inline-flex; justify-content:center; min-width:82px; padding:3px 9px; border-radius:999px; background:' + rowStatusBg + '; color:' + rowStatusColor + '; font-size:12px; font-weight:800; white-space:nowrap;">' + displayStatus + '</span></td>'
+        + (hasRegistrationInfo ? '<td style="padding:9px 8px; border-bottom:1px solid var(--border-color); text-align:center; direction:ltr; vertical-align:middle; white-space:nowrap;">' + escapeHtml(row.ready_at || "-") + '</td>' : '')
+        + (hasRegistrationInfo ? '<td style="padding:9px 8px; border-bottom:1px solid var(--border-color); text-align:right; direction:ltr; vertical-align:middle;">' + escapeHtml(row.ready_by || "-") + '</td>' : '')
+        + '</tr>';
+    }).join("");
+
+    var optionalHeaders = '';
+    if (hasColor) optionalHeaders += '<th style="padding:9px 8px; text-align:right; direction:rtl; color:var(--text-muted); font-size:12px;">اللون</th>';
+    var trailingHeaders = '';
+    if (hasRegistrationInfo) {
+      trailingHeaders += '<th style="padding:9px 8px; text-align:center; direction:rtl; color:var(--text-muted); font-size:12px;">وقت التسجيل</th>';
+      trailingHeaders += '<th style="padding:9px 8px; text-align:right; direction:rtl; color:var(--text-muted); font-size:12px;">المستخدم</th>';
+    }
+    var tableHtml = packageRows.length ? ''
+      + '<div style="margin-top:14px;">'
+      + '<div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:8px;">'
+      + '<input type="search" class="delivery-component-dashboard-search form-control" placeholder="بحث بالرمز أو المكون أو اللون..." style="max-width:360px; height:34px; direction:rtl; text-align:right;">'
+      + '<span class="delivery-component-dashboard-search-count" style="color:var(--text-muted); font-size:12px;"></span>'
+      + '</div>'
+      + '<div style="max-height:420px; overflow:auto; border:1px solid var(--border-color); border-radius:10px;">'
+      + '<table style="width:100%; min-width:' + (hasRegistrationInfo ? '940' : '620') + 'px; border-collapse:collapse; table-layout:auto; direction:ltr;">'
+      + '<thead style="position:sticky; top:0; background:var(--control-bg); z-index:1;"><tr>'
+      + '<th style="padding:9px 8px; text-align:center; direction:rtl; color:var(--text-muted); font-size:12px; white-space:nowrap;">رمز الحزمة</th>'
+      + '<th style="padding:9px 8px; text-align:right; direction:rtl; color:var(--text-muted); font-size:12px;">المكون</th>'
+      + optionalHeaders
+      + '<th style="padding:9px 8px; text-align:center; direction:rtl; color:var(--text-muted); font-size:12px; white-space:nowrap;">الكمية</th>'
+      + '<th style="padding:9px 8px; text-align:center; direction:rtl; color:var(--text-muted); font-size:12px; white-space:nowrap;">الحالة</th>'
+      + trailingHeaders
+      + '</tr></thead><tbody>' + packageRowsHtml + '</tbody></table></div></div>'
+      : '<div style="margin-top:12px; color:var(--text-muted);">لا توجد حزم بعد. استخدم زر طباعة باركود المكونات أعلى لوحة التصنيع لتجهيزها تلقائيًا.</div>';
+
+    var html = ''
+      + '<div class="delivery-component-wrap" data-delivery-tracking-source="custom-app" style="padding:16px; border:1px solid var(--border-color); border-radius:12px; background:var(--card-bg); margin-bottom:12px;">'
+      + '<div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; padding:12px 14px; margin-bottom:14px; border-radius:10px; background:' + overallBg + '; color:' + overallColor + ';">'
+      + '<div><div style="font-size:13px; font-weight:800; margin-bottom:3px;">جاهزية الطلب الشاملة</div><div style="font-size:19px; font-weight:900;">' + escapeHtml(overallStatus) + '</div></div>'
+      + '<div style="font-size:13px; font-weight:800; direction:rtl; text-align:right;">' + escapeHtml(overallSummary || "تكتمل الجاهزية بعد تصنيع الأبواب وتسجيل جميع الحزم") + '</div>'
+      + '</div>'
+      + '<div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap;">'
+      + '<div><div style="font-size:18px; font-weight:900; margin-bottom:4px;">تسجيل حزم المكونات</div>'
+      + '<div style="color:var(--text-muted);">بعد إغلاق الكرتون، امسح الملصق مرة واحدة لتسجيل الحزمة كاملة.</div></div>'
+      + '<span style="display:inline-flex; padding:5px 11px; border-radius:999px; background:' + statusBg + '; color:' + statusColor + '; font-size:12px; font-weight:900;">' + escapeHtml(statusText) + '</span>'
+      + '</div>'
+      + '<div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:14px;">'
+      + statCard("الحزم المسجلة", formatCount(registeredPackages) + " / " + formatCount(totalPackages), remainingPackages > 0 ? "amber" : "green")
+      + statCard("المتبقي", formatCount(remainingPackages), remainingPackages > 0 ? "amber" : "green")
+      + statCard("رمز الطلب", escapeHtml(requestCode), "default")
+      + '</div>'
+      + tableHtml
+      + '</div>';
+    frm.set_df_property("custom_delivery_component_dashboard", "options", html);
+    frm.refresh_field("custom_delivery_component_dashboard");
+    if (field.$wrapper) bindDashboardInteractions(field, frm);
+    setupRealtime();
+    setupFocusFallback();
+    return true;
+  }
+
   function refreshFulfillment(frm) {
     if (!frm || frm.is_new() || formHasUnsavedDeliveryChanges(frm)) return;
     frappe.call({
@@ -530,7 +651,7 @@
         frm.doc.custom_fulfillment_readiness_status = fulfillment.status || "غير جاهز";
         frm.doc.custom_fulfillment_readiness_summary = fulfillment.summary || "";
         frm.doc.custom_fulfillment_ready = fulfillment.is_ready ? 1 : 0;
-        renderDashboard(frm);
+        renderUnifiedDashboard(frm);
       }
     });
   }
@@ -576,10 +697,9 @@
 
   window.namar_delivery_tracking = window.namar_delivery_tracking || {};
   window.namar_delivery_tracking.delivery_components = {
-    render_material_request: renderDashboard,
+    render_material_request: renderUnifiedDashboard,
     sync_packages: syncPackages,
-    prepare_and_print: prepareAndPrintPackages,
-    open_manual_dialog: openManualDialog
+    prepare_and_print: prepareAndPrintPackages
   };
   window.sync_delivery_component_packages_for_current_form = function() {
     if (window.cur_frm) syncPackages(window.cur_frm);
@@ -587,13 +707,9 @@
   window.prepare_delivery_component_packages_for_print_for_current_form = function() {
     if (window.cur_frm) prepareAndPrintPackages(window.cur_frm);
   };
-  window.open_manual_delivery_component_package_dialog_for_current_form = function() {
-    if (window.cur_frm) openManualDialog(window.cur_frm);
-  };
-
   frappe.ui.form.on("Material Request", {
     refresh: function(frm) {
-      renderDashboard(frm);
+      renderUnifiedDashboard(frm);
       refreshFulfillment(frm);
     }
   });

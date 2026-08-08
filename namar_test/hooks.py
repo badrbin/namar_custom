@@ -110,6 +110,7 @@ doc_events = {
         "on_update": ["namar_test.events.sync_customer_vip_to_material_requests"],
     },
     "Material Request": {
+        "before_insert": ["namar_test.delivery_components.tracking_codes.ensure_material_request_tracking_code"],
         "on_update": ["namar_test.events.sync_material_request_branch_shares"],
         "before_update_after_submit": [
             "namar_test.events.sync_material_request_branch_shares_submitted",

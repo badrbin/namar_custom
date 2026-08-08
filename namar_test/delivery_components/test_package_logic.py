@@ -19,6 +19,12 @@ from namar_test.delivery_components.package_logic import (
     normalize_component_color,
     normalize_tracking_status,
 )
+from namar_test.delivery_components.tracking_code_logic import (
+    is_valid_request_tracking_code,
+    package_tracking_code,
+    split_package_tracking_code,
+    tracking_code_from_sequence,
+)
 
 
 class DeliveryComponentPackageLogicTestCase(unittest.TestCase):
@@ -169,6 +175,26 @@ class DeliveryComponentPackageLogicTestCase(unittest.TestCase):
             [row["loading_code"] for row in assigned],
             ["AC-03", "AC-02", "AC-01", "AC-04"],
         )
+
+    def test_tracking_codes_use_unambiguous_three_character_alphabet(self):
+        self.assertEqual(tracking_code_from_sequence(1), "AAA")
+        self.assertNotIn("I", tracking_code_from_sequence(999))
+        self.assertNotIn("O", tracking_code_from_sequence(999))
+        self.assertTrue(is_valid_request_tracking_code("A7K"))
+        self.assertTrue(is_valid_request_tracking_code("AD"))
+        self.assertFalse(is_valid_request_tracking_code("A1O"))
+
+    def test_tracking_code_expands_after_three_character_capacity(self):
+        from namar_test.delivery_components.tracking_code_logic import TRACKING_ALPHABET
+
+        self.assertEqual(len(tracking_code_from_sequence(len(TRACKING_ALPHABET) ** 3)), 3)
+        self.assertEqual(len(tracking_code_from_sequence(len(TRACKING_ALPHABET) ** 3 + 1)), 4)
+
+    def test_package_tracking_code_supports_more_than_ninety_nine_packages(self):
+        self.assertEqual(package_tracking_code("A7K", 1), "A7K-01")
+        self.assertEqual(package_tracking_code("A7K", 100), "A7K-100")
+        self.assertEqual(split_package_tracking_code("A7K-100"), ("A7K", 100))
+        self.assertEqual(split_package_tracking_code("AD-01"), ("AD", 1))
 
     def test_component_color_matches_cutting_report_prefixes(self):
         self.assertEqual(component_color_from_item_code("T5D1"), "تك")

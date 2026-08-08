@@ -22,15 +22,18 @@ from namar_test.delivery_components.package_logic import (
     clean_count,
     component_color_from_item_code,
     component_package_key,
-    is_valid_loading_prefix,
     legacy_color_split_has_started_rows,
     legacy_component_package_key,
-    loading_prefix_from_index,
     next_tracking_status,
     normalize_component_color,
     normalize_tracking_status,
     package_status,
 )
+from namar_test.delivery_components.tracking_code_logic import (
+    is_valid_request_tracking_code,
+    normalize_tracking_code,
+)
+from namar_test.delivery_components.tracking_codes import ensure_material_request_tracking_code
 
 
 PACKAGE_DOCTYPE = "Material Request Delivery Component Package"
@@ -431,20 +434,14 @@ def get_or_make_loading_prefix(mr_doc: Any, dry_run: bool) -> str:
     if not mr_meta.has_field(MR_LOADING_CODE_FIELD):
         return ""
 
-    existing_prefix = (mr_doc.get(MR_LOADING_CODE_FIELD) or "").strip().upper()
-    if is_valid_loading_prefix(existing_prefix):
+    existing_prefix = normalize_tracking_code(mr_doc.get(MR_LOADING_CODE_FIELD))
+    if is_valid_request_tracking_code(existing_prefix):
         return existing_prefix
+    if dry_run:
+        return ""
 
-    used_requests = frappe.get_all(
-        "Material Request",
-        filters={MR_LOADING_CODE_FIELD: ["!=", ""]},
-        pluck="name",
-        limit_page_length=0,
-    )
-    prefix = loading_prefix_from_index(len(used_requests))
-    if not dry_run:
-        frappe.db.set_value("Material Request", mr_doc.name, MR_LOADING_CODE_FIELD, prefix, update_modified=False)
-        mr_doc.set(MR_LOADING_CODE_FIELD, prefix)
+    prefix = ensure_material_request_tracking_code(mr_doc)
+    frappe.db.set_value("Material Request", mr_doc.name, MR_LOADING_CODE_FIELD, prefix, update_modified=False)
     return prefix
 
 
@@ -816,7 +813,12 @@ def ensure_package_event_baseline(material_request: str, package_row: dict[str, 
     )
 
 
-def upsert_package_rows(material_request: str, package_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def upsert_package_rows(
+    material_request: str,
+    package_rows: list[dict[str, Any]],
+    *,
+    rotate_unregistered_barcodes: bool = False,
+) -> list[dict[str, Any]]:
     package_fields = doctype_fields(PACKAGE_DOCTYPE)
     existing_rows = frappe.get_all(
         PACKAGE_DOCTYPE,
@@ -894,7 +896,10 @@ def upsert_package_rows(material_request: str, package_rows: list[dict[str, Any]
         row = dict(desired)
         if existing:
             row["name"] = existing.get("name")
-            row["barcode_key"] = existing.get("barcode_key") or existing.get("name")
+            if rotate_unregistered_barcodes and not package_started(existing):
+                row["barcode_key"] = frappe.generate_hash(length=20)
+            else:
+                row["barcode_key"] = existing.get("barcode_key") or existing.get("name")
             update_values = {
                 fieldname: value
                 for fieldname, value in row.items()
@@ -920,7 +925,7 @@ def upsert_package_rows(material_request: str, package_rows: list[dict[str, Any]
             doc = frappe.get_doc(child)
             doc.db_insert()
             row["name"] = doc.name
-            row["barcode_key"] = row.get("barcode_key") or doc.name
+            row["barcode_key"] = row.get("barcode_key") or frappe.generate_hash(length=20)
             frappe.db.set_value(PACKAGE_DOCTYPE, doc.name, "barcode_key", row["barcode_key"], update_modified=False)
         ensure_package_event_baseline(material_request, row)
         result.append(row)
@@ -975,16 +980,45 @@ def get_packages(material_request: str) -> list[dict[str, Any]]:
     return result
 
 
+def package_matches_token(row: dict[str, Any], package_token: str) -> bool:
+    barcode_key = (row.get("barcode_key") or "").strip()
+    package_name = (row.get("name") or "").strip()
+    accepted = {
+        barcode_key,
+        (row.get("package_key") or "").strip(),
+        (row.get(PACKAGE_LOADING_CODE_FIELD) or "").strip(),
+    }
+    # Old labels used the child-row name as their barcode token. Once a token
+    # rotates after source changes, that old row name must no longer be valid.
+    if not barcode_key or barcode_key == package_name:
+        accepted.add(package_name)
+    return package_token in accepted
+
+
 def get_package(material_request: str, package_token: str) -> dict[str, Any] | None:
     for row in get_packages(material_request):
-        if package_token in (
-            row.get("name"),
-            row.get("barcode_key"),
-            row.get("package_key"),
-            row.get(PACKAGE_LOADING_CODE_FIELD),
-        ):
+        if package_matches_token(row, package_token):
             return row
     return None
+
+
+def find_package_parent(package_token: str | None) -> str:
+    token = (package_token or "").strip()
+    if not token or not frappe.db.exists("DocType", PACKAGE_DOCTYPE):
+        return ""
+    for fieldname in ("barcode_key", PACKAGE_LOADING_CODE_FIELD, "package_key"):
+        parent = frappe.db.get_value(
+            PACKAGE_DOCTYPE,
+            {fieldname: token, "parentfield": PACKAGE_PARENTFIELD},
+            "parent",
+        )
+        if parent:
+            return parent
+    legacy_parent = frappe.db.get_value(PACKAGE_DOCTYPE, token, "parent")
+    if not legacy_parent:
+        return ""
+    barcode_key = frappe.db.get_value(PACKAGE_DOCTYPE, token, "barcode_key") or ""
+    return legacy_parent if not barcode_key or barcode_key == token else ""
 
 
 def get_package_events(package_id: str | None, limit: int = 50) -> list[dict[str, Any]]:
@@ -1012,13 +1046,18 @@ def sync_delivery_component_packages(material_request: str | None, dry_run: int 
     mr_doc = ensure_material_request_access(material_request)
     component_rows = aggregate_components(mr_doc, validate_colors=True)
     source_hash = build_source_hash(mr_doc, component_rows=component_rows)
+    previous_source_hash = (mr_doc.get(MR_SOURCE_HASH_FIELD) or "").strip()
     package_rows = build_package_rows(mr_doc, component_rows=component_rows)
     loading_prefix = get_or_make_loading_prefix(mr_doc, dry_run_bool)
     package_rows = assign_loading_codes(package_rows, loading_prefix)
     summary = summarize_packages(package_rows)
 
     if not dry_run_bool:
-        package_rows = upsert_package_rows(material_request, package_rows)
+        package_rows = upsert_package_rows(
+            material_request,
+            package_rows,
+            rotate_unregistered_barcodes=bool(previous_source_hash and previous_source_hash != source_hash),
+        )
         summary = update_material_request_summary(material_request, package_rows, source_hash=source_hash)
         frappe.db.commit()
 
@@ -1040,11 +1079,7 @@ def get_delivery_component_packages(
     material_request = normalize_material_request(material_request)
     component_package = (component_package or "").strip()
     if not material_request and component_package:
-        package_parent = (
-            frappe.db.get_value(PACKAGE_DOCTYPE, component_package, "parent")
-            if frappe.db.exists("DocType", PACKAGE_DOCTYPE)
-            else ""
-        )
+        package_parent = find_package_parent(component_package)
         material_request = normalize_material_request(package_parent)
 
     if not material_request:
@@ -1057,12 +1092,7 @@ def get_delivery_component_packages(
     selected_package = None
     if component_package:
         for row in packages:
-            if component_package in (
-                row.get("name"),
-                row.get("barcode_key"),
-                row.get("package_key"),
-                row.get(PACKAGE_LOADING_CODE_FIELD),
-            ):
+            if package_matches_token(row, component_package):
                 selected_package = row
                 break
         if not selected_package:
@@ -1123,7 +1153,7 @@ def mark_delivery_component_package_event(
     if not frappe.db.exists("DocType", PACKAGE_DOCTYPE):
         frappe.throw("جدول حزم مكونات التوريد غير مثبت على الموقع")
     if not material_request:
-        package_parent = frappe.db.get_value(PACKAGE_DOCTYPE, package_token, "parent")
+        package_parent = find_package_parent(package_token)
         material_request = normalize_material_request(package_parent)
     if not material_request:
         frappe.throw("اسم طلب المواد مطلوب")
@@ -1133,16 +1163,16 @@ def mark_delivery_component_package_event(
 
     package_row = get_package(material_request, package_token)
     if not package_row:
-        frappe.throw("حزمة مكونات التوريد غير موجودة. شغّل تحديث حزم المكونات أولًا.")
+        frappe.throw("حزمة المكونات غير موجودة أو أن الملصق قديم. أعد طباعة الملصقات.")
 
     if packages_need_sync(mr_doc):
-        frappe.throw("تغيرت مكونات الطلب. حدّث حزم المكونات قبل تسجيل أي حركة جديدة.")
+        frappe.throw("تغيرت مكونات الطلب بعد طباعة الملصق. أعد طباعة ملصقات المكونات.")
 
     frappe.db.sql(
         "SELECT name FROM `tab%s` WHERE name = %%s FOR UPDATE" % PACKAGE_DOCTYPE,
         (package_row.get("name"),),
     )
-    package_row = get_package(material_request, package_row.get("name")) or package_row
+    package_row = get_package(material_request, package_token) or package_row
     package_qty = flt(package_row.get("package_qty") or 0)
     current_ready_qty = flt(package_row.get("ready_qty") or 0)
     requested_qty = flt(ready_qty or 0)
@@ -1188,7 +1218,7 @@ def mark_delivery_component_package_event(
             "summary": summary,
             "fulfillment": summary.get("overall") or {},
             "events": get_package_events(package_row.get("name")),
-            "message": "حركة الحزمة مسجلة مسبقًا",
+            "message": "تم تسجيل الحزمة مسبقًا",
         }
 
     stamp = now_datetime()
@@ -1230,11 +1260,7 @@ def mark_delivery_component_package_event(
         update_modified=False,
     )
     event_actions = {
-        TRACKING_ACTION_READY: (
-            "تجهيز جزئي"
-            if new_status != TRACKING_STATUS_READY
-            else ("تجهيز" if package_tracking_route == TRACKING_ROUTE_READY_ONLY else "تصنيع وتجهيز")
-        ),
+        TRACKING_ACTION_READY: "تجهيز جزئي" if new_status != TRACKING_STATUS_READY else "تسجيل",
         TRACKING_ACTION_LOAD: "تحميل",
         TRACKING_ACTION_DELIVER: "توريد",
         TRACKING_ACTION_REOPEN: "إعادة فتح",
@@ -1263,7 +1289,7 @@ def mark_delivery_component_package_event(
     frappe.db.commit()
 
     messages = {
-        TRACKING_ACTION_READY: "تم تسجيل جاهزية الحزمة" if new_status == TRACKING_STATUS_READY else "تم تسجيل كمية جزئية من الحزمة",
+        TRACKING_ACTION_READY: "تم تسجيل الحزمة" if new_status == TRACKING_STATUS_READY else "تم تسجيل كمية جزئية من الحزمة",
         TRACKING_ACTION_LOAD: "تم تسجيل تحميل الحزمة",
         TRACKING_ACTION_DELIVER: "تم تسجيل توريد الحزمة",
         TRACKING_ACTION_REOPEN: "تمت إعادة فتح الحزمة",
@@ -1309,3 +1335,53 @@ def get_material_request_fulfillment_readiness(material_request: str | None = No
         "summary": persisted,
         "needs_sync": persisted.get("needs_sync") or 0,
     }
+
+
+def resolve_delivery_tracking_code(code: str | None = None) -> dict[str, Any]:
+    raw_code = normalize_tracking_code(code)
+    if not raw_code:
+        frappe.throw("أدخل رمز الطلب أو الحزمة")
+
+    direct_request = raw_code if raw_code.startswith("MREQ-") else ""
+    if not direct_request and raw_code and raw_code[0].isdigit():
+        direct_request = "MREQ-" + raw_code
+    if direct_request and frappe.db.exists("Material Request", direct_request):
+        ensure_material_request_access(direct_request, allow_guest=True)
+        return {
+            "type": "material_request",
+            "material_request": direct_request,
+            "tracking_code": frappe.db.get_value(
+                "Material Request", direct_request, MR_LOADING_CODE_FIELD
+            )
+            or "",
+        }
+
+    request_name = frappe.db.get_value(
+        "Material Request", {MR_LOADING_CODE_FIELD: raw_code}, "name"
+    )
+    if request_name:
+        ensure_material_request_access(request_name, allow_guest=True)
+        return {
+            "type": "material_request",
+            "material_request": request_name,
+            "tracking_code": raw_code,
+        }
+
+    package_parent = find_package_parent(raw_code)
+    if package_parent:
+        ensure_material_request_access(package_parent, allow_guest=True)
+        package_row = get_package(package_parent, raw_code)
+        if package_row:
+            return {
+                "type": "component_package",
+                "material_request": package_parent,
+                "tracking_code": frappe.db.get_value(
+                    "Material Request", package_parent, MR_LOADING_CODE_FIELD
+                )
+                or "",
+                "component_package": package_row.get("barcode_key") or package_row.get("name"),
+                "loading_code": package_row.get(PACKAGE_LOADING_CODE_FIELD) or "",
+            }
+
+    frappe.throw("لم يتم العثور على طلب أو حزمة بهذا الرمز: " + raw_code)
+    return {}

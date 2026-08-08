@@ -191,19 +191,8 @@ def build_fulfillment_readiness(
         not packages_need_sync
         and (package_total_number <= 0 or package_ready_number >= package_total_number)
     )
-    packages_loaded = packages_complete and (
-        package_load_total_number <= 0 or package_loaded_number >= package_load_total_number
-    )
-    packages_delivered = packages_loaded and (
-        package_load_total_number <= 0 or package_delivered_number >= package_load_total_number
-    )
-
     if packages_need_sync:
         status = "غير جاهز"
-    elif has_trackable_rows and doors_complete and packages_delivered and package_load_total_number > 0:
-        status = "تم التوريد بالكامل"
-    elif has_trackable_rows and doors_complete and packages_loaded and package_load_total_number > 0:
-        status = "تم التحميل بالكامل"
     elif has_trackable_rows and doors_complete and packages_complete:
         status = "جاهز بالكامل"
     elif door_ready_number > 0 or package_ready_number > 0:
@@ -211,22 +200,18 @@ def build_fulfillment_readiness(
     else:
         status = "غير جاهز"
 
-    summary = "الأبواب %s/%s | الحزم %s/%s | محمل %s/%s | مورد %s/%s" % (
+    summary = "الأبواب %s/%s | الحزم %s/%s" % (
         clean_count(door_ready_number),
         clean_count(door_total_number),
         clean_count(package_ready_number),
         clean_count(package_total_number),
-        clean_count(package_loaded_number),
-        clean_count(package_load_total_number),
-        clean_count(package_delivered_number),
-        clean_count(package_load_total_number),
     )
     if packages_need_sync:
         summary += " | الحزم تحتاج تحديث"
 
     return {
         "status": status,
-        "is_ready": status in ("جاهز بالكامل", "تم التحميل بالكامل", "تم التوريد بالكامل"),
+        "is_ready": status == "جاهز بالكامل",
         "door_total": clean_count(door_total_number),
         "door_ready": clean_count(door_ready_number),
         "door_remaining": clean_count(door_remaining_number),
