@@ -1160,6 +1160,8 @@ def mark_delivery_component_package_event(
     if not frappe.db.exists("Material Request", material_request):
         frappe.throw("طلب المواد غير موجود: " + material_request)
     mr_doc = ensure_material_request_access(material_request, allow_guest=True)
+    if cint(mr_doc.docstatus) == 2:
+        frappe.throw("طلب المواد ملغي ولا يمكن تسجيل الحزمة")
 
     package_row = get_package(material_request, package_token)
     if not package_row:
