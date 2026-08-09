@@ -8,6 +8,7 @@ import frappe
 from frappe.utils import cint, flt, now_datetime
 
 from namar_test.delivery_components.package_logic import (
+    PACKAGE_EVENT_ACTION_REGISTERED,
     TRACKING_ACTION_DELIVER,
     TRACKING_ACTION_LOAD,
     TRACKING_ACTION_READY,
@@ -1397,7 +1398,9 @@ def mark_delivery_component_package_event(
         update_modified=False,
     )
     event_actions = {
-        TRACKING_ACTION_READY: "تجهيز جزئي" if new_status != TRACKING_STATUS_READY else "تسجيل الحزمة",
+        TRACKING_ACTION_READY: (
+            "تجهيز جزئي" if new_status != TRACKING_STATUS_READY else PACKAGE_EVENT_ACTION_REGISTERED
+        ),
         TRACKING_ACTION_LOAD: "تحميل",
         TRACKING_ACTION_DELIVER: "توريد",
         TRACKING_ACTION_REOPEN: "إعادة فتح",

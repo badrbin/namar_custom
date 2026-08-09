@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from namar_test.delivery_components.package_logic import (
+    PACKAGE_EVENT_ACTION_REGISTERED,
     TRACKING_STATUS_DELIVERED,
     TRACKING_STATUS_LOADED,
     TRACKING_STATUS_PENDING,
@@ -34,6 +35,9 @@ from namar_test.delivery_components.tracking_code_logic import (
 
 
 class DeliveryComponentPackageLogicTestCase(unittest.TestCase):
+    def test_completed_package_uses_supported_event_action(self):
+        self.assertEqual(PACKAGE_EVENT_ACTION_REGISTERED, "تسجيل")
+
     def test_tracking_routes_keep_legacy_values_compatible(self):
         self.assertEqual(normalize_tracking_route("تصنيع وتغليف"), TRACKING_ROUTE_BARCODE)
         self.assertEqual(normalize_tracking_route("تجهيز فقط"), TRACKING_ROUTE_DELIVERY_ONLY)
