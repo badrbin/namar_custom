@@ -7,6 +7,10 @@ from namar_test.delivery_components.package_logic import (
     TRACKING_STATUS_LOADED,
     TRACKING_STATUS_PENDING,
     TRACKING_STATUS_READY,
+    TRACKING_ROUTE_BARCODE,
+    TRACKING_ROUTE_DELIVERY_ONLY,
+    TRACKING_ROUTE_EXCLUDED,
+    TRACKING_ROUTE_WITH_DOOR,
     assign_stable_loading_codes,
     build_fulfillment_readiness,
     build_package_specs,
@@ -17,6 +21,7 @@ from namar_test.delivery_components.package_logic import (
     legacy_color_split_has_started_rows,
     next_tracking_status,
     normalize_component_color,
+    normalize_tracking_route,
     normalize_tracking_status,
     should_rotate_unregistered_barcodes,
 )
@@ -29,6 +34,24 @@ from namar_test.delivery_components.tracking_code_logic import (
 
 
 class DeliveryComponentPackageLogicTestCase(unittest.TestCase):
+    def test_tracking_routes_keep_legacy_values_compatible(self):
+        self.assertEqual(normalize_tracking_route("تصنيع وتغليف"), TRACKING_ROUTE_BARCODE)
+        self.assertEqual(normalize_tracking_route("تجهيز فقط"), TRACKING_ROUTE_DELIVERY_ONLY)
+        self.assertEqual(normalize_tracking_route("لا يتتبع"), TRACKING_ROUTE_EXCLUDED)
+
+    def test_tracking_routes_accept_new_data_driven_values(self):
+        self.assertEqual(normalize_tracking_route(TRACKING_ROUTE_BARCODE), TRACKING_ROUTE_BARCODE)
+        self.assertEqual(normalize_tracking_route(TRACKING_ROUTE_WITH_DOOR), TRACKING_ROUTE_WITH_DOOR)
+        self.assertEqual(
+            normalize_tracking_route(TRACKING_ROUTE_DELIVERY_ONLY),
+            TRACKING_ROUTE_DELIVERY_ONLY,
+        )
+        self.assertEqual(normalize_tracking_route(TRACKING_ROUTE_EXCLUDED), TRACKING_ROUTE_EXCLUDED)
+
+    def test_unknown_tracking_route_is_delivery_only_by_default(self):
+        self.assertEqual(normalize_tracking_route(""), TRACKING_ROUTE_DELIVERY_ONLY)
+        self.assertEqual(normalize_tracking_route("غير معروف"), TRACKING_ROUTE_DELIVERY_ONLY)
+
     def test_twenty_frames_make_five_full_cartons(self):
         specs = build_package_specs(20, 4, "كرتون")
         self.assertEqual(len(specs), 5)

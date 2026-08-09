@@ -13,6 +13,37 @@ TRACKING_ACTION_DELIVER = "deliver"
 TRACKING_ACTION_REOPEN = "reopen"
 
 
+TRACKING_ROUTE_BARCODE = "تصنيع مستقل - باركود"
+TRACKING_ROUTE_WITH_DOOR = "مع الباب"
+TRACKING_ROUTE_DELIVERY_ONLY = "توريد فقط - بدون باركود"
+TRACKING_ROUTE_EXCLUDED = "مستبعد"
+
+TRACKING_ROUTE_ALIASES = {
+    "تصنيع وتغليف": TRACKING_ROUTE_BARCODE,
+    "تجهيز فقط": TRACKING_ROUTE_DELIVERY_ONLY,
+    "لا يتتبع": TRACKING_ROUTE_EXCLUDED,
+}
+
+
+def normalize_tracking_route(
+    value: str | None,
+    default: str = TRACKING_ROUTE_DELIVERY_ONLY,
+) -> str:
+    route = (value or "").strip()
+    route = TRACKING_ROUTE_ALIASES.get(route, route)
+    allowed = {
+        TRACKING_ROUTE_BARCODE,
+        TRACKING_ROUTE_WITH_DOOR,
+        TRACKING_ROUTE_DELIVERY_ONLY,
+        TRACKING_ROUTE_EXCLUDED,
+    }
+    return route if route in allowed else default
+
+
+def is_barcode_tracking_route(value: str | None) -> bool:
+    return normalize_tracking_route(value) == TRACKING_ROUTE_BARCODE
+
+
 COMPONENT_COLOR_NAMES = {
     "B": "أسود",
     "C": "بني",

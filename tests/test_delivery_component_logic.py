@@ -1,15 +1,22 @@
 import unittest
 
 from namar_test.delivery_components.package_logic import (
+    TRACKING_ROUTE_BARCODE,
+    TRACKING_ROUTE_DELIVERY_ONLY,
     build_package_specs,
     clean_count,
     is_valid_loading_prefix,
     loading_prefix_from_index,
+    normalize_tracking_route,
     package_status,
 )
 
 
 class DeliveryComponentLogicTest(unittest.TestCase):
+    def test_legacy_routes_are_normalized_without_breaking_old_packages(self):
+        self.assertEqual(normalize_tracking_route("تصنيع وتغليف"), TRACKING_ROUTE_BARCODE)
+        self.assertEqual(normalize_tracking_route("تجهيز فقط"), TRACKING_ROUTE_DELIVERY_ONLY)
+
     def test_full_pack_exact(self):
         self.assertEqual(
             build_package_specs(4, 4, "كرتون", "مغلف منفرد", "كرتون ناقص"),

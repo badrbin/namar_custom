@@ -12,6 +12,10 @@ from namar_test.delivery_components.package_logic import (
     TRACKING_ACTION_LOAD,
     TRACKING_ACTION_READY,
     TRACKING_ACTION_REOPEN,
+    TRACKING_ROUTE_BARCODE,
+    TRACKING_ROUTE_DELIVERY_ONLY,
+    TRACKING_ROUTE_EXCLUDED,
+    TRACKING_ROUTE_WITH_DOOR,
     TRACKING_STATUS_DELIVERED,
     TRACKING_STATUS_LOADED,
     TRACKING_STATUS_PENDING,
@@ -22,10 +26,12 @@ from namar_test.delivery_components.package_logic import (
     clean_count,
     component_color_from_item_code,
     component_package_key,
+    is_barcode_tracking_route,
     legacy_color_split_has_started_rows,
     legacy_component_package_key,
     next_tracking_status,
     normalize_component_color,
+    normalize_tracking_route,
     normalize_tracking_status,
     package_status,
     should_rotate_unregistered_barcodes,
@@ -46,10 +52,6 @@ PACKAGE_LOADING_CODE_FIELD = "loading_code"
 PACKAGE_COLOR_FIELD = "color"
 MR_SOURCE_HASH_FIELD = "custom_delivery_component_source_hash"
 REALTIME_EVENT = "delivery_component_package_changed"
-
-TRACKING_ROUTE_FULL = "تصنيع وتغليف"
-TRACKING_ROUTE_READY_ONLY = "تجهيز فقط"
-TRACKING_ROUTE_NONE = "لا يتتبع"
 
 PACKAGE_OPTIONAL_FIELDS = (
     PACKAGE_COLOR_FIELD,
@@ -98,10 +100,7 @@ def selected_fields(doctype: str, required: list[str], optional: tuple[str, ...]
 
 
 def tracking_route(value: str | None) -> str:
-    route = (value or TRACKING_ROUTE_FULL).strip()
-    if route not in (TRACKING_ROUTE_FULL, TRACKING_ROUTE_READY_ONLY, TRACKING_ROUTE_NONE):
-        return TRACKING_ROUTE_FULL
-    return route
+    return normalize_tracking_route(value)
 
 
 def source_value(value: str | None) -> str:
@@ -175,9 +174,11 @@ def find_rule(component: str | None, component_label: str | None, rules: list[di
         rules,
         key=lambda rule: (rule_priority(rule), cint(rule.get("sort_order") or 0), rule.get("name") or ""),
     )
+    default_rule = None
     for rule in sorted_rules:
         mode = rule.get("match_mode") or ""
         if mode == "افتراضي":
+            default_rule = default_rule or rule
             continue
         if mode == "مطابقة مكون" and rule.get("component") and rule.get("component") in (component, component_label):
             return rule
@@ -185,7 +186,7 @@ def find_rule(component: str | None, component_label: str | None, rules: list[di
             needle = (rule.get("component_contains") or "").strip()
             if needle and (needle in component or needle in component_label):
                 return rule
-    return None
+    return default_rule
 
 
 def load_component_sort_order() -> dict[str, int]:
@@ -383,6 +384,8 @@ def aggregate_components(mr_doc: Any, *, validate_colors: bool = False) -> list[
                     "component_label": component_label,
                     PACKAGE_COLOR_FIELD: color,
                     "uses_color": uses_color,
+                    "row_idx": item_row.idx,
+                    "source_item_code": item_row.item_code,
                     "item_code": item_code,
                     "item_name": item_name,
                     "required_qty": 0,
@@ -423,7 +426,9 @@ def build_source_hash(
                 "full_pack_label": rule.get("full_pack_label") or "",
                 "remainder_pack_label": rule.get("remainder_pack_label") or "",
                 "remainder_multi_pack_label": rule.get("remainder_multi_pack_label") or "",
-                "required_for_delivery": cint(rule.get("required_for_delivery", 1)),
+                "required_for_delivery": 1
+                if tracking_route(rule.get("tracking_route")) == TRACKING_ROUTE_BARCODE
+                else 0,
                 "exclude_from_delivery": cint(rule.get("exclude_from_delivery") or 0),
                 "tracking_route": tracking_route(rule.get("tracking_route")),
             }
@@ -461,7 +466,21 @@ def get_or_make_loading_prefix(mr_doc: Any, dry_run: bool) -> str:
 def assign_loading_codes(package_rows: list[dict[str, Any]], loading_prefix: str) -> list[dict[str, Any]]:
     if not loading_prefix or not frappe.get_meta(PACKAGE_DOCTYPE).has_field(PACKAGE_LOADING_CODE_FIELD):
         return package_rows
-    return assign_stable_loading_codes(package_rows, loading_prefix, PACKAGE_LOADING_CODE_FIELD)
+    barcode_rows = [
+        row for row in package_rows if is_barcode_tracking_route(row.get("tracking_route"))
+    ]
+    reserved_rows = [
+        {PACKAGE_LOADING_CODE_FIELD: row.get(PACKAGE_LOADING_CODE_FIELD)}
+        for row in package_rows
+        if not is_barcode_tracking_route(row.get("tracking_route"))
+        and (row.get(PACKAGE_LOADING_CODE_FIELD) or "").strip()
+    ]
+    assign_stable_loading_codes(
+        reserved_rows + barcode_rows,
+        loading_prefix,
+        PACKAGE_LOADING_CODE_FIELD,
+    )
+    return package_rows
 
 
 def build_package_rows(
@@ -477,6 +496,7 @@ def build_package_rows(
     has_loading_code_field = PACKAGE_LOADING_CODE_FIELD in package_fields
     package_rows: list[dict[str, Any]] = []
     missing_rule_rows: list[dict[str, Any]] = []
+    missing_color_rows: list[dict[str, Any]] = []
 
     colors_by_legacy_base: dict[str, set[str]] = {}
     for row in component_rows:
@@ -523,7 +543,14 @@ def build_package_rows(
             missing_rule_rows.append(component_row)
             continue
         rule_tracking_route = tracking_route(rule.get("tracking_route"))
-        if cint(rule.get("exclude_from_delivery") or 0) or rule_tracking_route == TRACKING_ROUTE_NONE:
+        if cint(rule.get("exclude_from_delivery") or 0) or rule_tracking_route == TRACKING_ROUTE_EXCLUDED:
+            continue
+        if (
+            rule_tracking_route == TRACKING_ROUTE_BARCODE
+            and cint(component_row.get("uses_color") or 0)
+            and not (component_row.get(PACKAGE_COLOR_FIELD) or "").strip()
+        ):
+            missing_color_rows.append(component_row)
             continue
 
         component = component_row.get("component") or ""
@@ -548,7 +575,9 @@ def build_package_rows(
         try:
             package_specs = build_reconciled_package_specs(
                 required_qty=required_qty,
-                full_pack_qty=rule.get("full_pack_qty") or 0,
+                full_pack_qty=(rule.get("full_pack_qty") or 0)
+                if rule_tracking_route == TRACKING_ROUTE_BARCODE
+                else 0,
                 full_label=(rule.get("full_pack_label") or "حزمة").strip(),
                 remainder_one_label=(rule.get("remainder_pack_label") or "مغلف منفرد").strip(),
                 remainder_multi_label=(rule.get("remainder_multi_pack_label") or "كرتون ناقص").strip(),
@@ -556,7 +585,7 @@ def build_package_rows(
             )
         except ValueError as exc:
             frappe.throw("تعذر تحديث حزم %s: %s" % (component_row.get("component") or "المكون", exc))
-        required_for_delivery = 1 if cint(rule.get("required_for_delivery", 1)) else 0
+        required_for_delivery = 1 if rule_tracking_route == TRACKING_ROUTE_BARCODE else 0
 
         package_count = len(package_specs)
         for package_spec in package_specs:
@@ -618,6 +647,8 @@ def build_package_rows(
 
     if missing_rule_rows:
         throw_missing_delivery_rules(missing_rule_rows)
+    if missing_color_rows:
+        throw_missing_component_colors(missing_color_rows)
     return package_rows
 
 
@@ -629,15 +660,24 @@ def summarize_packages(package_rows: list[dict[str, Any]]) -> dict[str, Any]:
     ready_packages = 0
     loaded_packages = 0
     delivered_packages = 0
-    full_route_packages = 0
+    delivery_only_components = 0
+    with_door_components = 0
+    visible_components = 0
     for row in package_rows:
         active_value = row.get("active")
         if active_value not in (None, "") and not cint(active_value):
             continue
-        if not cint(row.get("required_for_delivery")):
-            continue
         route = tracking_route(row.get("tracking_route"))
-        if route == TRACKING_ROUTE_NONE:
+        if route == TRACKING_ROUTE_EXCLUDED:
+            continue
+        visible_components += 1
+        if route == TRACKING_ROUTE_DELIVERY_ONLY:
+            delivery_only_components += 1
+            continue
+        if route == TRACKING_ROUTE_WITH_DOOR:
+            with_door_components += 1
+            continue
+        if route != TRACKING_ROUTE_BARCODE:
             continue
         total_packages += 1
         package_qty = flt(row.get("package_qty") or 0)
@@ -649,16 +689,13 @@ def summarize_packages(package_rows: list[dict[str, Any]]) -> dict[str, Any]:
             ready_packages += 1
         else:
             remaining_packages += 1
-        if route == TRACKING_ROUTE_READY_ONLY:
-            continue
-        full_route_packages += 1
         if package_tracking_status in (TRACKING_STATUS_LOADED, TRACKING_STATUS_DELIVERED):
             loaded_packages += 1
         if package_tracking_status == TRACKING_STATUS_DELIVERED:
             delivered_packages += 1
 
     if total_packages <= 0:
-        status = "لا توجد مكونات"
+        status = "لا تتطلب باركود" if visible_components else "لا توجد مكونات"
     elif remaining_packages <= 0:
         status = "مكتمل"
     elif ready_required > 0:
@@ -679,7 +716,11 @@ def summarize_packages(package_rows: list[dict[str, Any]]) -> dict[str, Any]:
         "ready_packages": clean_count(ready_packages),
         "loaded_packages": clean_count(loaded_packages),
         "delivered_packages": clean_count(delivered_packages),
-        "full_route_packages": clean_count(full_route_packages),
+        "full_route_packages": 0,
+        "barcode_package_count": clean_count(total_packages),
+        "delivery_only_component_count": clean_count(delivery_only_components),
+        "with_door_component_count": clean_count(with_door_components),
+        "visible_component_count": clean_count(visible_components),
         "total_required_qty": clean_count(total_required),
         "ready_required_qty": clean_count(ready_required),
         "summary": summary,
@@ -773,7 +814,15 @@ def package_is_excluded(row: dict[str, Any], rules: list[dict[str, Any]]) -> boo
         return False
     return bool(
         cint(rule.get("exclude_from_delivery") or 0)
-        or tracking_route(rule.get("tracking_route")) == TRACKING_ROUTE_NONE
+        or tracking_route(rule.get("tracking_route")) == TRACKING_ROUTE_EXCLUDED
+    )
+
+
+def package_identity(row: dict[str, Any]) -> tuple[str, str, str]:
+    return (
+        (row.get("component") or "").strip(),
+        (row.get(PACKAGE_COLOR_FIELD) or "").strip(),
+        (row.get("item_code") or "").strip(),
     )
 
 
@@ -883,6 +932,9 @@ def upsert_package_rows(
         if existing:
             desired_matches[desired.get("package_key")] = existing
             matched_existing_names.add(existing.get("name"))
+    desired_route_by_identity = {
+        package_identity(row): tracking_route(row.get("tracking_route")) for row in package_rows
+    }
     blockers: list[str] = []
     rules = load_rules()
 
@@ -900,10 +952,13 @@ def upsert_package_rows(
         old_pack_size = flt(existing.get("pack_size_snapshot") or 0)
         if old_pack_size > 0 and abs(old_pack_size - flt(desired.get("pack_size_snapshot") or 0)) > 0.000001:
             blockers.append("تغير حجم التغليف للحزمة %s بعد بدء تتبعها" % package_key)
-        old_route = (existing.get("tracking_route") or "").strip()
-        new_route = (desired.get("tracking_route") or "").strip()
-        if old_route and new_route and old_route != new_route:
-            blockers.append("تغير مسار تتبع الحزمة %s بعد بدء تتبعها" % package_key)
+        old_route = normalize_tracking_route(
+            existing.get("tracking_route"),
+            default=TRACKING_ROUTE_BARCODE,
+        )
+        new_route = tracking_route(desired.get("tracking_route"))
+        if old_route != new_route and new_route == TRACKING_ROUTE_BARCODE:
+            blockers.append("أصبحت الحزمة %s تتطلب باركود بعد بدء تتبعها" % package_key)
         old_loading_code = (existing.get(PACKAGE_LOADING_CODE_FIELD) or "").strip()
         new_loading_code = (desired.get(PACKAGE_LOADING_CODE_FIELD) or "").strip()
         if old_loading_code and new_loading_code and old_loading_code != new_loading_code:
@@ -912,7 +967,11 @@ def upsert_package_rows(
     for existing in existing_rows:
         if existing.get("name") in matched_existing_names or not package_is_active(existing):
             continue
-        if package_started(existing) and not package_is_excluded(existing, rules):
+        desired_route = desired_route_by_identity.get(package_identity(existing))
+        can_archive = package_is_excluded(existing, rules) or (
+            desired_route is not None and desired_route != TRACKING_ROUTE_BARCODE
+        )
+        if package_started(existing) and not can_archive:
             blockers.append("الحزمة %s مسجلة ولا يمكن حذفها تلقائيًا" % (existing.get("package_key") or existing.get("name")))
 
     if blockers:
@@ -923,10 +982,14 @@ def upsert_package_rows(
     for existing in existing_rows:
         if existing.get("name") in matched_existing_names or not package_is_active(existing):
             continue
-        if package_started(existing) and package_is_excluded(existing, rules):
+        desired_route = desired_route_by_identity.get(package_identity(existing))
+        can_archive = package_is_excluded(existing, rules) or (
+            desired_route is not None and desired_route != TRACKING_ROUTE_BARCODE
+        )
+        if package_started(existing) and can_archive:
             archive_values = {
                 "required_for_delivery": 0,
-                "tracking_route": TRACKING_ROUTE_NONE,
+                "tracking_route": desired_route or TRACKING_ROUTE_EXCLUDED,
             }
             if "active" in package_fields:
                 archive_values["active"] = 0
@@ -1028,7 +1091,10 @@ def get_packages(material_request: str) -> list[dict[str, Any]]:
         row["remaining_qty"] = clean_count(remaining)
         row["status"] = package_status(package_qty, ready_qty)
         row["tracking_status"] = normalize_tracking_status(row.get("tracking_status"), package_qty, ready_qty)
-        row["tracking_route"] = tracking_route(row.get("tracking_route"))
+        row["tracking_route"] = normalize_tracking_route(
+            row.get("tracking_route"),
+            default=TRACKING_ROUTE_BARCODE,
+        )
         if "active" not in row:
             row["active"] = 1
         row["barcode_key"] = row.get("barcode_key") or row.get("name")
@@ -1100,7 +1166,7 @@ def sync_delivery_component_packages(material_request: str | None, dry_run: int 
         frappe.throw("جدول حزم مكونات التوريد غير مثبت على الموقع")
 
     mr_doc = ensure_material_request_access(material_request)
-    component_rows = aggregate_components(mr_doc, validate_colors=True)
+    component_rows = aggregate_components(mr_doc, validate_colors=False)
     source_hash = build_source_hash(mr_doc, component_rows=component_rows)
     previous_source_hash = (mr_doc.get(MR_SOURCE_HASH_FIELD) or "").strip()
     has_existing_packages = bool(get_packages(material_request))
@@ -1129,6 +1195,9 @@ def sync_delivery_component_packages(material_request: str | None, dry_run: int 
         "loading_code": loading_prefix,
         "packages": package_rows,
         "package_count": len(package_rows),
+        "printable_package_count": len(
+            [row for row in package_rows if is_barcode_tracking_route(row.get("tracking_route"))]
+        ),
         "source_hash": source_hash,
     }
 
@@ -1160,16 +1229,21 @@ def get_delivery_component_packages(
             frappe.throw("حزمة مكونات التوريد غير موجودة أو لم يتم توليدها بعد")
 
     summary = summarize_packages(packages)
+    barcode_packages = [
+        row for row in packages if is_barcode_tracking_route(row.get("tracking_route"))
+    ]
     needs_sync = packages_need_sync(mr_doc, packages)
     overall = fulfillment_readiness(mr_doc, summary, needs_sync)
     return {
         "material_request": material_request,
         "summary": summary,
         "packages": packages,
+        "barcode_packages": barcode_packages,
         "package": selected_package,
         "selected_package": selected_package,
         "events": get_package_events(selected_package.get("name")) if selected_package else [],
         "package_count": len(packages),
+        "printable_package_count": len(barcode_packages),
         "needs_sync": 1 if needs_sync else 0,
         "fulfillment": overall,
     }
@@ -1243,10 +1317,10 @@ def mark_delivery_component_package_event(
         package_row.get("tracking_status"), package_qty, current_ready_qty
     )
     package_tracking_route = tracking_route(package_row.get("tracking_route"))
-    if package_tracking_route == TRACKING_ROUTE_NONE:
-        frappe.throw("هذه الحزمة مستبعدة من التتبع")
-    if package_tracking_route == TRACKING_ROUTE_READY_ONLY and action in (TRACKING_ACTION_LOAD, TRACKING_ACTION_DELIVER):
-        frappe.throw("مسار هذه الحزمة تجهيز فقط ولا يتطلب تحميلًا أو توريدًا منفصلًا")
+    if package_tracking_route != TRACKING_ROUTE_BARCODE:
+        frappe.throw("هذا المكون لا يتطلب باركود تصنيع مستقل")
+    if action in (TRACKING_ACTION_LOAD, TRACKING_ACTION_DELIVER):
+        frappe.throw("تتبع حزم المكونات يكتفي بتسجيل الحزمة بعد إغلاق الكرتون")
 
     if action == TRACKING_ACTION_READY and mode == "partial":
         if requested_qty <= 0:
@@ -1323,7 +1397,7 @@ def mark_delivery_component_package_event(
         update_modified=False,
     )
     event_actions = {
-        TRACKING_ACTION_READY: "تجهيز جزئي" if new_status != TRACKING_STATUS_READY else "تسجيل",
+        TRACKING_ACTION_READY: "تجهيز جزئي" if new_status != TRACKING_STATUS_READY else "تسجيل الحزمة",
         TRACKING_ACTION_LOAD: "تحميل",
         TRACKING_ACTION_DELIVER: "توريد",
         TRACKING_ACTION_REOPEN: "إعادة فتح",

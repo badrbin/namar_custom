@@ -40,16 +40,31 @@
     return !!(frm.doc && frm.doc.__unsaved);
   }
 
+  function trackingRoute(value) {
+    var route = String(value || "").trim();
+    var aliases = {
+      "تصنيع وتغليف": "تصنيع مستقل - باركود",
+      "تجهيز فقط": "توريد فقط - بدون باركود",
+      "لا يتتبع": "مستبعد"
+    };
+    return aliases[route] || route || "تصنيع مستقل - باركود";
+  }
+
+  function isBarcodeRoute(row) {
+    return trackingRoute(row && row.tracking_route) === "تصنيع مستقل - باركود";
+  }
+
   function rows(frm) {
     return ((frm && frm.doc && frm.doc.custom_delivery_component_packages) || []).filter(function(row) {
       var active = row.active;
       var isActive = active === undefined || active === null || active === "" || Number(active) === 1;
-      return isActive && (row.tracking_route || "تصنيع وتغليف") !== "لا يتتبع";
+      return isActive && trackingRoute(row.tracking_route) !== "مستبعد";
     });
   }
 
   function pendingRows(frm) {
     return rows(frm).filter(function(row) {
+      if (!isBarcodeRoute(row)) return false;
       return (row.tracking_status || row.status || "غير جاهز") === "غير جاهز";
     });
   }
@@ -136,7 +151,7 @@
       callback: function(r) {
         var msg = r.message || {};
         frappe.show_alert({
-          message: "تم تحديث " + (msg.package_count || 0) + " حزمة مكونات للتوريد.",
+          message: "تم تحديث المكونات، وحزم الباركود: " + (msg.printable_package_count || 0) + ".",
           indicator: "green"
         }, 7);
         frm.reload_doc();
@@ -200,7 +215,7 @@
       freeze_message: "جاري تجهيز حزم المكونات للطباعة...",
       callback: function(r) {
         var msg = r.message || {};
-        var packageCount = Number(msg.package_count || 0);
+        var packageCount = Number(msg.printable_package_count || 0);
         if (!packageCount) {
           preparingPrint = false;
           closePreparingWindow(printWindow);
@@ -535,10 +550,10 @@
 
     var packageRows = rows(frm);
     var totalPackages = flt(frm.doc.custom_delivery_component_total_packages || 0) || packageRows.filter(function(row) {
-      return parseInt(row.required_for_delivery || 0, 10);
+      return isBarcodeRoute(row);
     }).length;
     var registeredPackages = packageRows.filter(function(row) {
-      if (!parseInt(row.required_for_delivery || 0, 10)) return false;
+      if (!isBarcodeRoute(row)) return false;
       var packageQty = flt(row.package_qty || 0);
       var readyQty = flt(row.ready_qty || 0);
       var trackingStatus = row.tracking_status || row.status || "غير جاهز";
@@ -546,8 +561,14 @@
         || ["جاهز", "محمل", "تم التوريد"].indexOf(trackingStatus) !== -1;
     }).length;
     var remainingPackages = Math.max(totalPackages - registeredPackages, 0);
+    var deliveryOnlyComponents = packageRows.filter(function(row) {
+      return trackingRoute(row.tracking_route) === "توريد فقط - بدون باركود";
+    }).length;
+    var withDoorComponents = packageRows.filter(function(row) {
+      return trackingRoute(row.tracking_route) === "مع الباب";
+    }).length;
     var statusText = totalPackages <= 0
-      ? "لا توجد مكونات"
+      ? (packageRows.length ? "لا تتطلب باركود" : "لا توجد مكونات")
       : remainingPackages <= 0
         ? "مكتمل"
         : registeredPackages > 0 ? "جزئي" : "غير جاهز";
@@ -563,16 +584,19 @@
     var hasRegistrationInfo = packageRows.some(function(row) { return !!(row.ready_at || row.ready_by); });
 
     var packageRowsHtml = packageRows.map(function(row) {
+      var route = trackingRoute(row.tracking_route);
+      var barcodeRoute = isBarcodeRoute(row);
       var packageQty = flt(row.package_qty || 0);
       var readyQty = flt(row.ready_qty || 0);
       var trackingStatus = row.tracking_status || row.status || "غير جاهز";
-      var registered = readyQty >= packageQty - 0.000001
-        || ["جاهز", "محمل", "تم التوريد"].indexOf(trackingStatus) !== -1;
-      var displayStatus = registered ? "مسجلة" : "غير مسجلة";
-      var rowStatusBg = registered ? "rgba(34,197,94,0.14)" : "rgba(245,158,11,0.14)";
-      var rowStatusColor = registered ? "#16a34a" : "#b45309";
+      var registered = barcodeRoute && (readyQty >= packageQty - 0.000001
+        || ["جاهز", "محمل", "تم التوريد"].indexOf(trackingStatus) !== -1);
+      var displayStatus = barcodeRoute ? (registered ? "مسجلة" : "غير مسجلة") : route;
+      var rowDone = !barcodeRoute || registered;
+      var rowStatusBg = rowDone ? "rgba(34,197,94,0.14)" : "rgba(245,158,11,0.14)";
+      var rowStatusColor = rowDone ? "#16a34a" : "#b45309";
       var searchText = [
-        row.loading_code || "",
+        barcodeRoute ? (row.loading_code || "") : "",
         row.component_label || row.component || "",
         row.color || "",
         row.item_code || "",
@@ -583,7 +607,7 @@
       ].join(" ").toLowerCase();
       return ''
         + '<tr class="delivery-component-dashboard-row" data-search="' + escapeHtml(searchText) + '">'
-        + '<td style="padding:9px 8px; border-bottom:1px solid var(--border-color); text-align:center; direction:ltr; vertical-align:middle; font-weight:900; white-space:nowrap;">' + escapeHtml(row.loading_code || "-") + '</td>'
+        + '<td style="padding:9px 8px; border-bottom:1px solid var(--border-color); text-align:center; direction:ltr; vertical-align:middle; font-weight:900; white-space:nowrap;">' + escapeHtml(barcodeRoute ? (row.loading_code || "-") : "") + '</td>'
         + '<td style="padding:9px 8px; border-bottom:1px solid var(--border-color); text-align:right; direction:rtl; vertical-align:middle; font-weight:800;">' + escapeHtml(row.component_label || row.component || "-") + '</td>'
         + (hasColor ? '<td style="padding:9px 8px; border-bottom:1px solid var(--border-color); text-align:right; direction:rtl; vertical-align:middle;">' + escapeHtml(row.color || "-") + '</td>' : '')
         + '<td style="padding:9px 8px; border-bottom:1px solid var(--border-color); text-align:center; direction:ltr; vertical-align:middle; font-weight:800; white-space:nowrap;">' + formatCount(packageQty) + '</td>'
@@ -632,6 +656,8 @@
       + '<div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:14px;">'
       + statCard("الحزم المسجلة", formatCount(registeredPackages) + " / " + formatCount(totalPackages), remainingPackages > 0 ? "amber" : "green")
       + statCard("المتبقي", formatCount(remainingPackages), remainingPackages > 0 ? "amber" : "green")
+      + (deliveryOnlyComponents ? statCard("مكونات توريد فقط", formatCount(deliveryOnlyComponents), "default") : "")
+      + (withDoorComponents ? statCard("مكونات مع الباب", formatCount(withDoorComponents), "default") : "")
       + statCard("رمز الطلب", escapeHtml(requestCode), "default")
       + '</div>'
       + tableHtml
