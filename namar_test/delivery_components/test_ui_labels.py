@@ -15,6 +15,7 @@ class DeliveryComponentUiLabelsTestCase(unittest.TestCase):
         self.assertIn('registered ? "تم التصنيع" : "غير مصنع"', source)
         self.assertIn("حزم المكونات المصنعة", source)
         self.assertIn("تصنيع حزم المكونات", source)
+        self.assertIn("interface_version: 2", source)
 
 
 if __name__ == "__main__":
