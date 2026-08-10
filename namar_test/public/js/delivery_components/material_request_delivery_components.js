@@ -591,7 +591,7 @@
       var trackingStatus = row.tracking_status || row.status || "غير جاهز";
       var registered = barcodeRoute && (readyQty >= packageQty - 0.000001
         || ["جاهز", "محمل", "تم التوريد"].indexOf(trackingStatus) !== -1);
-      var displayStatus = barcodeRoute ? (registered ? "مسجلة" : "غير مسجلة") : route;
+      var displayStatus = barcodeRoute ? (registered ? "تم التصنيع" : "غير مصنع") : route;
       var rowDone = !barcodeRoute || registered;
       var rowStatusBg = rowDone ? "rgba(34,197,94,0.14)" : "rgba(245,158,11,0.14)";
       var rowStatusColor = rowDone ? "#16a34a" : "#b45309";
@@ -649,12 +649,12 @@
       + '<div style="font-size:13px; font-weight:800; direction:rtl; text-align:right;">' + escapeHtml(overallSummary || "تكتمل الجاهزية بعد تصنيع الأبواب وتسجيل جميع الحزم") + '</div>'
       + '</div>'
       + '<div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap;">'
-      + '<div><div style="font-size:18px; font-weight:900; margin-bottom:4px;">تسجيل حزم المكونات</div>'
+      + '<div><div style="font-size:18px; font-weight:900; margin-bottom:4px;">تصنيع حزم المكونات</div>'
       + '<div style="color:var(--text-muted);">بعد إغلاق الكرتون، امسح الملصق مرة واحدة لتسجيل الحزمة كاملة.</div></div>'
       + '<span style="display:inline-flex; padding:5px 11px; border-radius:999px; background:' + statusBg + '; color:' + statusColor + '; font-size:12px; font-weight:900;">' + escapeHtml(statusText) + '</span>'
       + '</div>'
       + '<div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:14px;">'
-      + statCard("الحزم المسجلة", formatCount(registeredPackages) + " / " + formatCount(totalPackages), remainingPackages > 0 ? "amber" : "green")
+      + statCard("حزم المكونات المصنعة", formatCount(registeredPackages) + " / " + formatCount(totalPackages), remainingPackages > 0 ? "amber" : "green")
       + statCard("المتبقي", formatCount(remainingPackages), remainingPackages > 0 ? "amber" : "green")
       + (deliveryOnlyComponents ? statCard("مكونات توريد فقط", formatCount(deliveryOnlyComponents), "default") : "")
       + (withDoorComponents ? statCard("مكونات مع الباب", formatCount(withDoorComponents), "default") : "")

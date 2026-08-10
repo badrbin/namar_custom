@@ -66,6 +66,24 @@ class DeliveryComponentPackageLogicTestCase(unittest.TestCase):
         self.assertEqual(len(specs), 6)
         self.assertEqual(specs[-1], {"package_label": "كرتون ناقص", "package_qty": 2})
 
+    def test_one_hundred_frames_make_twenty_five_cartons(self):
+        specs = build_package_specs(100, 4, "كرتون")
+        self.assertEqual(len(specs), 25)
+        self.assertEqual({row["package_qty"] for row in specs}, {4})
+
+    def test_five_hundred_frames_make_eighty_four_cartons(self):
+        specs = build_package_specs(500, 6, "كرتون", "قطعة", "كرتون ناقص")
+        self.assertEqual(len(specs), 84)
+        self.assertEqual([row["package_qty"] for row in specs[:83]], [6] * 83)
+        self.assertEqual(specs[-1], {"package_label": "كرتون ناقص", "package_qty": 2})
+
+    def test_decimal_quantity_makes_one_partial_carton(self):
+        specs = build_package_specs(2.5, 4, "كرتون", "قطعة", "كرتون ناقص")
+        self.assertEqual(
+            specs,
+            [{"package_label": "كرتون ناقص", "package_qty": 2.5}],
+        )
+
     def test_package_stages_are_ordered(self):
         ready = next_tracking_status(TRACKING_STATUS_PENDING, "ready", package_is_ready=True)
         loaded = next_tracking_status(ready, "load", package_is_ready=True)
