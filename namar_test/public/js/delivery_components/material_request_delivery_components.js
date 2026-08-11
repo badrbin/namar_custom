@@ -727,7 +727,7 @@
 
   window.namar_delivery_tracking = window.namar_delivery_tracking || {};
   window.namar_delivery_tracking.delivery_components = {
-    interface_version: 2,
+    interface_version: 3,
     render_material_request: renderUnifiedDashboard,
     sync_packages: syncPackages,
     prepare_and_print: prepareAndPrintPackages

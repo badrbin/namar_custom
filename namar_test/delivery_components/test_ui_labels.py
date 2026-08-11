@@ -15,7 +15,7 @@ class DeliveryComponentUiLabelsTestCase(unittest.TestCase):
         self.assertIn('registered ? "تم التصنيع" : "غير مصنع"', source)
         self.assertIn("حزم المكونات المصنعة", source)
         self.assertIn("تصنيع حزم المكونات", source)
-        self.assertIn("interface_version: 2", source)
+        self.assertIn("interface_version: 3", source)
 
     def test_sector_print_uses_the_dedicated_format(self):
         source = (
