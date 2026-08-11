@@ -2,8 +2,56 @@ from __future__ import annotations
 
 import frappe
 
+from .delivery_components import service as delivery_component_service
 from .material_requests import get_related_items as get_related_material_request_items
 from .server_runtime import run_api_script
+
+
+def _normalize_material_request_name(value):
+    material_request = (value or "").strip()
+    if material_request and not material_request.startswith("MREQ-"):
+        material_request = "MREQ-" + material_request
+    return material_request
+
+
+def _manufacturing_material_request(kwargs, result):
+    candidates = []
+    if isinstance(result, dict):
+        candidates.append(result.get("material_request"))
+    candidates.extend((kwargs.get("mr"), kwargs.get("material_request"), kwargs.get("name")))
+
+    raw_args = kwargs.get("args")
+    if raw_args:
+        try:
+            parsed_args = frappe.parse_json(raw_args) or {}
+        except Exception:
+            parsed_args = {}
+        if isinstance(parsed_args, dict):
+            candidates.extend((parsed_args.get("mr"), parsed_args.get("material_request")))
+
+    for candidate in candidates:
+        material_request = _normalize_material_request_name(candidate)
+        if material_request and frappe.db.exists("Material Request", material_request):
+            return material_request
+    return ""
+
+
+def _run_manufacturing_script(script_name, kwargs):
+    result = run_api_script(script_name, kwargs)
+    material_request = _manufacturing_material_request(kwargs, result)
+    if not material_request:
+        return result
+
+    summary = delivery_component_service.update_material_request_summary(material_request)
+    if summary.get("changed"):
+        frappe.db.commit()
+    if isinstance(result, dict):
+        result["manufacturing_status"] = summary.get("manufacturing_status")
+        result["manufacturing_completed_at"] = summary.get("manufacturing_completed_at")
+        result["manufacturing_completed_by"] = summary.get("manufacturing_completed_by")
+        result["fulfillment_readiness_status"] = (summary.get("overall") or {}).get("status")
+        result["fulfillment_readiness_summary"] = (summary.get("overall") or {}).get("summary")
+    return result
 
 @frappe.whitelist()
 def apply_material_request_scenario_bypass(**kwargs):
@@ -35,7 +83,7 @@ def get_lead_visit_logs(**kwargs):
 
 @frappe.whitelist(allow_guest=True)
 def get_manufactured_items(**kwargs):
-    return run_api_script("get_manufactured_items", kwargs)
+    return _run_manufacturing_script("get_manufactured_items", kwargs)
 
 @frappe.whitelist()
 def get_map_locations(**kwargs):
@@ -75,19 +123,19 @@ def map_update_field(**kwargs):
 
 @frappe.whitelist(allow_guest=True)
 def mark_label_manufactured(**kwargs):
-    return run_api_script("mark_label_manufactured", kwargs)
+    return _run_manufacturing_script("mark_label_manufactured", kwargs)
 
 @frappe.whitelist(allow_guest=True)
 def mark_label_manufactured_v2(**kwargs):
-    return run_api_script("mark_label_manufactured_v2", kwargs)
+    return _run_manufacturing_script("mark_label_manufactured_v2", kwargs)
 
 @frappe.whitelist()
 def mark_manufactured_rows(**kwargs):
-    return run_api_script("mark_manufactured_rows", kwargs)
+    return _run_manufacturing_script("mark_manufactured_rows", kwargs)
 
 @frappe.whitelist()
 def mark_manufactured_rows_v2(**kwargs):
-    return run_api_script("mark_manufactured_rows_v2", kwargs)
+    return _run_manufacturing_script("mark_manufactured_rows_v2", kwargs)
 
 @frappe.whitelist(allow_guest=True)
 def namar_capture_lead(**kwargs):

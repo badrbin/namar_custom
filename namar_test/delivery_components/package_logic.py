@@ -270,6 +270,21 @@ def build_fulfillment_readiness(
     }
 
 
+def combined_manufacturing_status(readiness: dict[str, object]) -> str:
+    door_total = max(float(readiness.get("door_total") or 0), 0)
+    door_ready = max(float(readiness.get("door_ready") or 0), 0)
+    package_total = max(float(readiness.get("package_total") or 0), 0)
+    package_ready = max(float(readiness.get("package_ready") or 0), 0)
+
+    if door_total <= 0 and package_total <= 0:
+        return "غير مصنع"
+    if readiness.get("is_ready"):
+        return "مصنع بالكامل"
+    if door_ready > 0 or package_ready > 0:
+        return "قيد التصنيع"
+    return "غير مصنع"
+
+
 def build_package_specs(
     required_qty: float | int | str | None,
     full_pack_qty: float | int | str | None,

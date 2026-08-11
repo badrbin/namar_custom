@@ -18,6 +18,7 @@ from namar_test.delivery_components.package_logic import (
     build_reconciled_package_specs,
     component_color_from_item_code,
     component_package_key,
+    combined_manufacturing_status,
     legacy_component_package_key,
     legacy_color_split_has_started_rows,
     next_tracking_status,
@@ -133,6 +134,50 @@ class DeliveryComponentPackageLogicTestCase(unittest.TestCase):
         )
         self.assertEqual(result["status"], "جاهز بالكامل")
         self.assertTrue(result["is_ready"])
+
+    def test_combined_manufacturing_waits_for_tracked_packages(self):
+        readiness = build_fulfillment_readiness(
+            door_total=4,
+            door_remaining=0,
+            package_total=2,
+            package_ready=1,
+            package_loaded=0,
+            package_delivered=0,
+        )
+        self.assertEqual(combined_manufacturing_status(readiness), "قيد التصنيع")
+
+    def test_combined_manufacturing_completes_after_doors_and_packages(self):
+        readiness = build_fulfillment_readiness(
+            door_total=4,
+            door_remaining=0,
+            package_total=2,
+            package_ready=2,
+            package_loaded=0,
+            package_delivered=0,
+        )
+        self.assertEqual(combined_manufacturing_status(readiness), "مصنع بالكامل")
+
+    def test_combined_manufacturing_supports_package_only_requests(self):
+        readiness = build_fulfillment_readiness(
+            door_total=0,
+            door_remaining=0,
+            package_total=3,
+            package_ready=3,
+            package_loaded=0,
+            package_delivered=0,
+        )
+        self.assertEqual(combined_manufacturing_status(readiness), "مصنع بالكامل")
+
+    def test_combined_manufacturing_without_trackable_units_is_not_manufactured(self):
+        readiness = build_fulfillment_readiness(
+            door_total=0,
+            door_remaining=0,
+            package_total=0,
+            package_ready=0,
+            package_loaded=0,
+            package_delivered=0,
+        )
+        self.assertEqual(combined_manufacturing_status(readiness), "غير مصنع")
 
     def test_legacy_ready_package_is_not_reset_by_new_default(self):
         self.assertEqual(normalize_tracking_status("غير جاهز", 4, 4), TRACKING_STATUS_READY)

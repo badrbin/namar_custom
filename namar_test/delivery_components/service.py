@@ -25,6 +25,7 @@ from namar_test.delivery_components.package_logic import (
     build_fulfillment_readiness,
     build_reconciled_package_specs,
     clean_count,
+    combined_manufacturing_status,
     component_color_from_item_code,
     component_package_key,
     is_barcode_tracking_route,
@@ -767,6 +768,17 @@ def update_material_request_summary(
     if source_hash is not None:
         needs_sync = source_hash != build_source_hash(mr_doc)
     overall = fulfillment_readiness(mr_doc, summary, needs_sync)
+    manufacturing_status = combined_manufacturing_status(overall)
+    manufacturing_completed_at = mr_doc.get("custom_manufacturing_completed_at")
+    manufacturing_completed_by = mr_doc.get("custom_manufacturing_completed_by") or ""
+    if manufacturing_status == "مصنع بالكامل":
+        if not manufacturing_completed_at:
+            manufacturing_completed_at = now_datetime()
+        if not manufacturing_completed_by:
+            manufacturing_completed_by = frappe.session.user or "Guest"
+    else:
+        manufacturing_completed_at = None
+        manufacturing_completed_by = ""
     mr_meta = frappe.get_meta("Material Request")
     field_map = {
         "custom_delivery_component_status": summary.get("status"),
@@ -778,6 +790,9 @@ def update_material_request_summary(
         "custom_fulfillment_readiness_status": overall.get("status"),
         "custom_fulfillment_readiness_summary": overall.get("summary"),
         "custom_fulfillment_ready": 1 if overall.get("is_ready") else 0,
+        "custom_manufacturing_status": manufacturing_status,
+        "custom_manufacturing_completed_at": manufacturing_completed_at,
+        "custom_manufacturing_completed_by": manufacturing_completed_by,
     }
     if source_hash is not None:
         field_map[MR_SOURCE_HASH_FIELD] = source_hash
@@ -794,7 +809,15 @@ def update_material_request_summary(
     }
     if update_values:
         frappe.db.set_value("Material Request", material_request, update_values, update_modified=False)
-    return {**summary, "overall": overall, "needs_sync": 1 if needs_sync else 0}
+    return {
+        **summary,
+        "overall": overall,
+        "needs_sync": 1 if needs_sync else 0,
+        "manufacturing_status": manufacturing_status,
+        "manufacturing_completed_at": manufacturing_completed_at,
+        "manufacturing_completed_by": manufacturing_completed_by,
+        "changed": 1 if update_values else 0,
+    }
 
 
 def package_started(row: dict[str, Any]) -> bool:
