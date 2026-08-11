@@ -17,6 +17,14 @@ class DeliveryComponentUiLabelsTestCase(unittest.TestCase):
         self.assertIn("تصنيع حزم المكونات", source)
         self.assertIn("interface_version: 2", source)
 
+    def test_sector_print_uses_the_dedicated_format(self):
+        source = (
+            APP_ROOT / "public/js/delivery_components/material_request_delivery_components.js"
+        ).read_text(encoding="utf-8")
+        self.assertIn("ملصق قطاعات التصنيع 4x3", source)
+        self.assertIn("طباعة باركود القطاعات", source)
+        self.assertNotIn("طباعة باركود المكونات", source)
+
 
 if __name__ == "__main__":
     unittest.main()

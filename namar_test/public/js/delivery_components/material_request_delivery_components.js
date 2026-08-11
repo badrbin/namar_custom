@@ -73,7 +73,7 @@
     return "/printview?doctype=Material%20Request&name="
       + encodeURIComponent(frm.doc.name || "")
       + "&format="
-      + encodeURIComponent("ملصق مكونات التوريد 4x3")
+      + encodeURIComponent("ملصق قطاعات التصنيع 4x3")
       + "&no_letterhead=1";
   }
 
@@ -171,7 +171,7 @@
   function showPrintFallback(frm) {
     var url = printUrl(frm);
     frappe.msgprint({
-      title: "ملصقات مكونات التوريد جاهزة",
+      title: "ملصقات القطاعات جاهزة",
       indicator: "green",
       message: '<div dir="rtl" style="text-align:right;">منع المتصفح فتح نافذة الطباعة تلقائيًا. '
         + '<a class="btn btn-primary btn-sm" target="_blank" rel="noopener" href="' + escapeHtml(url) + '">فتح الملصقات</a></div>'
@@ -181,7 +181,7 @@
   function prepareAndPrintPackages(frm) {
     if (preparingPrint) return;
     if (frm.is_new()) {
-      frappe.msgprint("احفظ طلب المواد قبل طباعة باركود مكونات التوريد.");
+      frappe.msgprint("احفظ طلب المواد قبل طباعة باركود القطاعات.");
       return;
     }
     if (formHasUnsavedDeliveryChanges(frm)) {
@@ -197,9 +197,9 @@
         printWindow.document.open();
         printWindow.document.write(
           '<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">'
-          + '<title>جاري تجهيز ملصقات المكونات</title></head>'
+          + '<title>جاري تجهيز ملصقات القطاعات</title></head>'
           + '<body style="font-family:sans-serif; padding:40px; text-align:center;">'
-          + '<h2>جاري تجهيز حزم مكونات التوريد...</h2>'
+          + '<h2>جاري تجهيز حزم القطاعات...</h2>'
           + '<p>ستفتح الملصقات تلقائيًا بعد اكتمال التجهيز.</p></body></html>'
         );
         printWindow.document.close();
@@ -212,14 +212,14 @@
       method: api.sync,
       args: { mr: frm.doc.name },
       freeze: true,
-      freeze_message: "جاري تجهيز حزم المكونات للطباعة...",
+      freeze_message: "جاري تجهيز حزم القطاعات للطباعة...",
       callback: function(r) {
         var msg = r.message || {};
         var packageCount = Number(msg.printable_package_count || 0);
         if (!packageCount) {
           preparingPrint = false;
           closePreparingWindow(printWindow);
-          frappe.msgprint("لا توجد مكونات قابلة للتغليف والطباعة في طلب المواد الحالي.");
+          frappe.msgprint("لا توجد قطاعات قابلة للتغليف والطباعة في طلب المواد الحالي.");
           frm.reload_doc();
           return;
         }
@@ -236,7 +236,7 @@
         }
 
         frappe.show_alert({
-          message: "تم تجهيز " + packageCount + " حزمة وفتح ملصقاتها للطباعة.",
+          message: "تم تجهيز " + packageCount + " حزمة قطاعات وفتح ملصقاتها للطباعة.",
           indicator: "green"
         }, 7);
         preparingPrint = false;
@@ -504,7 +504,7 @@
       + '<th style="padding:9px 8px; text-align:center; direction:rtl; color:var(--text-muted); font-size:12px; white-space:nowrap;">التغليف</th>'
       + '<th style="padding:9px 8px; text-align:center; direction:rtl; color:var(--text-muted); font-size:12px; white-space:nowrap;">عدد القطع</th>'
       + '<th style="padding:9px 8px; text-align:center; direction:rtl; color:var(--text-muted); font-size:12px; white-space:nowrap;">الحالة</th>'
-      + '</tr></thead><tbody>' + packageRowsHtml + '</tbody></table></div></div>' : '<div style="margin-top:12px; color:var(--text-muted);">لا توجد حزم مكونات للتوريد بعد. اضغط طباعة باركود المكونات لتجهيزها وفتح الملصقات تلقائيًا.</div>';
+      + '</tr></thead><tbody>' + packageRowsHtml + '</tbody></table></div></div>' : '<div style="margin-top:12px; color:var(--text-muted);">لا توجد حزم قطاعات بعد. اضغط طباعة باركود القطاعات لتجهيزها وفتح الملصقات تلقائيًا.</div>';
     var html = ''
       + '<div class="delivery-component-wrap" data-delivery-tracking-source="custom-app" style="padding:16px; border:1px solid var(--border-color); border-radius:12px; background:var(--card-bg); margin-bottom:12px;">'
       + '<div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; padding:12px 14px; margin-bottom:14px; border-radius:10px; background:' + overallBg + '; color:' + overallColor + ';">'
@@ -524,7 +524,7 @@
       + statCard("رمز التحميل", escapeHtml(loadingCode), "default")
       + '</div>'
       + '<div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:14px;">'
-      + '<button type="button" class="btn btn-primary btn-sm delivery-component-print-btn">طباعة باركود المكونات</button>'
+      + '<button type="button" class="btn btn-primary btn-sm delivery-component-print-btn">طباعة باركود القطاعات</button>'
       + (pendingRows(frm).length ? '<button type="button" class="btn btn-default btn-sm manual-delivery-component-package-btn">تسجيل حزمة يدويًا</button>' : '')
       + '</div>'
       + tableHtml
@@ -640,7 +640,7 @@
       + '<th style="padding:9px 8px; text-align:center; direction:rtl; color:var(--text-muted); font-size:12px; white-space:nowrap;">الحالة</th>'
       + trailingHeaders
       + '</tr></thead><tbody>' + packageRowsHtml + '</tbody></table></div></div>'
-      : '<div style="margin-top:12px; color:var(--text-muted);">لا توجد حزم بعد. استخدم زر طباعة باركود المكونات أعلى لوحة التصنيع لتجهيزها تلقائيًا.</div>';
+      : '<div style="margin-top:12px; color:var(--text-muted);">لا توجد حزم بعد. استخدم زر طباعة باركود القطاعات أعلى لوحة التصنيع لتجهيزها تلقائيًا.</div>';
 
     var html = ''
       + '<div class="delivery-component-wrap" data-delivery-tracking-source="custom-app" style="padding:16px; border:1px solid var(--border-color); border-radius:12px; background:var(--card-bg); margin-bottom:12px;">'

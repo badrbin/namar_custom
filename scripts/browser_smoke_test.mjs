@@ -101,7 +101,7 @@ const materialRequestState = await page.evaluate(() => {
     deliverySource: dashboard ? dashboard.getAttribute("data-delivery-tracking-source") : "",
     hasSyncButton: dashboardText.includes("تحديث حزم المكونات"),
     hasManualButton: dashboardText.includes("تسجيل حزمة يدويًا"),
-    hasPrintLink: dashboardText.includes("طباعة باركود المكونات"),
+    hasPrintLink: dashboardText.includes("طباعة باركود القطاعات"),
   };
 });
 
