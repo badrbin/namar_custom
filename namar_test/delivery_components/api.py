@@ -3,6 +3,7 @@ from __future__ import annotations
 import frappe
 
 from namar_test.delivery_components import service
+from namar_test.delivery_components import maintenance
 from namar_test.delivery_components import tracking_codes
 
 
@@ -117,3 +118,15 @@ def backfill_component_package_identifiers(
 def audit_component_package_identifiers():
     frappe.only_for("System Manager")
     return tracking_codes.audit_component_package_identifiers()
+
+
+@frappe.whitelist()
+def backfill_component_package_event_snapshots(
+    dry_run: int | str | bool = 1,
+    confirmation: str | None = None,
+):
+    frappe.only_for("System Manager")
+    return maintenance.backfill_component_package_event_snapshots(
+        dry_run=dry_run,
+        confirmation=confirmation,
+    )

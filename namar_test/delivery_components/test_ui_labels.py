@@ -50,6 +50,16 @@ class DeliveryComponentUiLabelsTestCase(unittest.TestCase):
         self.assertIn("طباعة باركود القطاعات", source)
         self.assertNotIn("طباعة باركود المكونات", source)
 
+    def test_snapshot_backfill_is_test_only_and_admin_only(self):
+        api_source = (APP_ROOT / "delivery_components/api.py").read_text(encoding="utf-8")
+        maintenance_source = (APP_ROOT / "delivery_components/maintenance.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("backfill_component_package_event_snapshots", api_source)
+        self.assertIn('frappe.only_for("System Manager")', api_source)
+        self.assertIn('TEST_APP = "namar_test"', maintenance_source)
+        self.assertIn("update_modified=False", maintenance_source)
+
 
 if __name__ == "__main__":
     unittest.main()
