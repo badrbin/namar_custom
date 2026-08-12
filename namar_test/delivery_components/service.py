@@ -869,27 +869,42 @@ def insert_package_event(
     event_key = "%s|%s|%s" % (package_name, cint(revision), action)
     if frappe.db.exists(EVENT_DOCTYPE, {"event_key": event_key}):
         return
-    event_doc = frappe.get_doc(
+    event_fields = doctype_fields(EVENT_DOCTYPE)
+    event_values = {
+        "doctype": EVENT_DOCTYPE,
+        "event_key": event_key,
+        "material_request": material_request,
+        "package_id": package_name,
+        "package_key": package_row.get("package_key") or "",
+        "barcode_key": package_row.get("barcode_key") or package_name,
+        "loading_code": package_row.get(PACKAGE_LOADING_CODE_FIELD) or "",
+        "component": package_row.get("component") or "",
+        "item_code": package_row.get("item_code") or "",
+        "action": action,
+        "from_status": from_status or "",
+        "to_status": to_status or "",
+        "quantity": clean_count(quantity),
+        "source": source_value(source),
+        "event_at": event_at or now_datetime(),
+        "event_by": user or frappe.session.user or "Guest",
+        "revision": cint(revision),
+    }
+    snapshot_values = {
+        "component_label": package_row.get("component_label") or package_row.get("component") or "",
+        "color": package_row.get(PACKAGE_COLOR_FIELD) or "",
+        "item_name": package_row.get("item_name") or "",
+        "package_label": package_row.get("package_label") or "",
+        "package_qty": clean_count(package_row.get("package_qty") or 0),
+        "tracking_route": tracking_route(package_row.get("tracking_route")),
+    }
+    event_values.update(
         {
-            "doctype": EVENT_DOCTYPE,
-            "event_key": event_key,
-            "material_request": material_request,
-            "package_id": package_name,
-            "package_key": package_row.get("package_key") or "",
-            "barcode_key": package_row.get("barcode_key") or package_name,
-            "loading_code": package_row.get(PACKAGE_LOADING_CODE_FIELD) or "",
-            "component": package_row.get("component") or "",
-            "item_code": package_row.get("item_code") or "",
-            "action": action,
-            "from_status": from_status or "",
-            "to_status": to_status or "",
-            "quantity": clean_count(quantity),
-            "source": source_value(source),
-            "event_at": event_at or now_datetime(),
-            "event_by": user or frappe.session.user or "Guest",
-            "revision": cint(revision),
+            fieldname: value
+            for fieldname, value in snapshot_values.items()
+            if fieldname in event_fields
         }
     )
+    event_doc = frappe.get_doc(event_values)
     event_doc.insert(ignore_permissions=True)
 
 
@@ -1115,10 +1130,7 @@ def get_packages(material_request: str) -> list[dict[str, Any]]:
         row["remaining_qty"] = clean_count(remaining)
         row["status"] = package_status(package_qty, ready_qty)
         row["tracking_status"] = normalize_tracking_status(row.get("tracking_status"), package_qty, ready_qty)
-        row["tracking_route"] = normalize_tracking_route(
-            row.get("tracking_route"),
-            default=TRACKING_ROUTE_BARCODE,
-        )
+        row["tracking_route"] = normalize_tracking_route(row.get("tracking_route"))
         if "active" not in row:
             row["active"] = 1
         row["barcode_key"] = row.get("barcode_key") or row.get("name")

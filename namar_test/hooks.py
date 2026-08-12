@@ -173,3 +173,9 @@ app_include_js = [
 web_include_js = [
     "/assets/namar_test/js/delivery_components/factory_delivery_components.js",
 ]
+
+jinja = {
+    "methods": [
+        "namar_test.delivery_components.printing.sector_print_status",
+    ],
+}

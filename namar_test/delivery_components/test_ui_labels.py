@@ -13,9 +13,34 @@ class DeliveryComponentUiLabelsTestCase(unittest.TestCase):
             APP_ROOT / "public/js/delivery_components/material_request_delivery_components.js"
         ).read_text(encoding="utf-8")
         self.assertIn('registered ? "تم التصنيع" : "غير مصنع"', source)
-        self.assertIn("حزم المكونات المصنعة", source)
-        self.assertIn("تصنيع حزم المكونات", source)
+        self.assertIn("حزم القطاعات المصنعة", source)
+        self.assertIn("تصنيع القطاعات", source)
         self.assertIn("interface_version: 3", source)
+
+    def test_blank_tracking_route_is_not_treated_as_barcode(self):
+        source = (
+            APP_ROOT / "public/js/delivery_components/material_request_delivery_components.js"
+        ).read_text(encoding="utf-8")
+        self.assertIn('return aliases[route] || route || "توريد فقط - بدون باركود";', source)
+
+    def test_sector_print_has_a_live_server_gate(self):
+        hooks = (APP_ROOT / "hooks.py").read_text(encoding="utf-8")
+        helper = (APP_ROOT / "delivery_components/printing.py").read_text(encoding="utf-8")
+        self.assertIn("delivery_components.printing.sector_print_status", hooks)
+        self.assertIn("packages_need_sync", helper)
+        self.assertIn("printable_package_ids", helper)
+
+    def test_package_events_keep_immutable_sector_snapshots(self):
+        source = (APP_ROOT / "delivery_components/service.py").read_text(encoding="utf-8")
+        for fieldname in (
+            "component_label",
+            "color",
+            "item_name",
+            "package_label",
+            "package_qty",
+            "tracking_route",
+        ):
+            self.assertIn('"%s"' % fieldname, source)
 
     def test_sector_print_uses_the_dedicated_format(self):
         source = (

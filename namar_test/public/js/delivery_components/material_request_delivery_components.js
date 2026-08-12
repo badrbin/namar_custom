@@ -47,7 +47,7 @@
       "تجهيز فقط": "توريد فقط - بدون باركود",
       "لا يتتبع": "مستبعد"
     };
-    return aliases[route] || route || "تصنيع مستقل - باركود";
+    return aliases[route] || route || "توريد فقط - بدون باركود";
   }
 
   function isBarcodeRoute(row) {
@@ -649,12 +649,12 @@
       + '<div style="font-size:13px; font-weight:800; direction:rtl; text-align:right;">' + escapeHtml(overallSummary || "تكتمل الجاهزية بعد تصنيع الأبواب وتسجيل جميع الحزم") + '</div>'
       + '</div>'
       + '<div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap;">'
-      + '<div><div style="font-size:18px; font-weight:900; margin-bottom:4px;">تصنيع حزم المكونات</div>'
+      + '<div><div style="font-size:18px; font-weight:900; margin-bottom:4px;">تصنيع القطاعات</div>'
       + '<div style="color:var(--text-muted);">بعد إغلاق الكرتون، امسح الملصق مرة واحدة لتسجيل الحزمة كاملة.</div></div>'
       + '<span style="display:inline-flex; padding:5px 11px; border-radius:999px; background:' + statusBg + '; color:' + statusColor + '; font-size:12px; font-weight:900;">' + escapeHtml(statusText) + '</span>'
       + '</div>'
       + '<div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:14px;">'
-      + statCard("حزم المكونات المصنعة", formatCount(registeredPackages) + " / " + formatCount(totalPackages), remainingPackages > 0 ? "amber" : "green")
+      + statCard("حزم القطاعات المصنعة", formatCount(registeredPackages) + " / " + formatCount(totalPackages), remainingPackages > 0 ? "amber" : "green")
       + statCard("المتبقي", formatCount(remainingPackages), remainingPackages > 0 ? "amber" : "green")
       + (deliveryOnlyComponents ? statCard("مكونات توريد فقط", formatCount(deliveryOnlyComponents), "default") : "")
       + (withDoorComponents ? statCard("مكونات مع الباب", formatCount(withDoorComponents), "default") : "")
@@ -691,7 +691,7 @@
     if (!frm || frm.doctype !== "Material Request" || !frm.doc || frm.doc.name !== eventData.material_request) return;
     if (formHasUnsavedDeliveryChanges(frm)) {
       frappe.show_alert({
-        message: "تم تحديث حزمة مكونات في الخلفية. احفظ أو حدّث الصفحة لرؤية آخر حالة.",
+        message: "تم تحديث حزمة قطاع في الخلفية. احفظ أو حدّث الصفحة لرؤية آخر حالة.",
         indicator: "orange"
       }, 8);
       return;
