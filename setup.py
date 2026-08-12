@@ -2,7 +2,7 @@ from setuptools import find_packages, setup
 
 setup(
     name="namar_custom",
-    version="0.0.1",
+    version="0.0.2",
     description="Production-safe Namar ERPNext customizations.",
     author="Namar",
     author_email="badrarroug@namar.net",
