@@ -285,6 +285,17 @@ def combined_manufacturing_status(readiness: dict[str, object]) -> str:
     return "غير مصنع"
 
 
+def should_block_fulfillment_for_package_sync(
+    packages_need_sync: bool,
+    package_total: float | int | str | None,
+    has_expected_barcode_components: bool,
+) -> bool:
+    return bool(
+        packages_need_sync
+        and (float(package_total or 0) > 0 or has_expected_barcode_components)
+    )
+
+
 def build_package_specs(
     required_qty: float | int | str | None,
     full_pack_qty: float | int | str | None,

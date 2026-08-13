@@ -25,6 +25,7 @@ from namar_custom.delivery_components.package_logic import (
     normalize_component_color,
     normalize_tracking_route,
     normalize_tracking_status,
+    should_block_fulfillment_for_package_sync,
     should_rotate_unregistered_barcodes,
 )
 from namar_custom.delivery_components.tracking_code_logic import (
@@ -121,6 +122,33 @@ class DeliveryComponentPackageLogicTestCase(unittest.TestCase):
         )
         self.assertEqual(result["status"], "غير جاهز")
         self.assertFalse(result["is_ready"])
+
+    def test_unsynced_delivery_only_components_do_not_block_manufacturing(self):
+        self.assertFalse(
+            should_block_fulfillment_for_package_sync(
+                packages_need_sync=True,
+                package_total=0,
+                has_expected_barcode_components=False,
+            )
+        )
+
+    def test_unsynced_expected_barcode_components_block_manufacturing(self):
+        self.assertTrue(
+            should_block_fulfillment_for_package_sync(
+                packages_need_sync=True,
+                package_total=0,
+                has_expected_barcode_components=True,
+            )
+        )
+
+    def test_existing_barcode_packages_block_when_source_needs_sync(self):
+        self.assertTrue(
+            should_block_fulfillment_for_package_sync(
+                packages_need_sync=True,
+                package_total=2,
+                has_expected_barcode_components=False,
+            )
+        )
 
     def test_ready_only_packages_do_not_require_loading(self):
         result = build_fulfillment_readiness(

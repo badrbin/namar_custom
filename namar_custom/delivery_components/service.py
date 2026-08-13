@@ -36,6 +36,7 @@ from namar_custom.delivery_components.package_logic import (
     normalize_tracking_route,
     normalize_tracking_status,
     package_status,
+    should_block_fulfillment_for_package_sync,
     should_rotate_unregistered_barcodes,
 )
 from namar_custom.delivery_components.tracking_code_logic import (
@@ -439,14 +440,47 @@ def build_source_hash(
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def packages_need_sync(mr_doc: Any, packages: list[dict[str, Any]] | None = None) -> bool:
+def has_expected_barcode_components(
+    component_rows: list[dict[str, Any]],
+    rules: list[dict[str, Any]],
+) -> bool:
+    for row in component_rows:
+        if flt(row.get("required_qty") or 0) <= 0:
+            continue
+        rule = find_rule(row.get("component"), row.get("component_label"), rules)
+        if not rule or cint(rule.get("exclude_from_delivery") or 0):
+            continue
+        if tracking_route(rule.get("tracking_route")) == TRACKING_ROUTE_BARCODE:
+            return True
+    return False
+
+
+def package_sync_context(
+    mr_doc: Any,
+    packages: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    rules = load_rules()
+    component_rows = aggregate_components(mr_doc)
+    current_hash = build_source_hash(mr_doc, rules=rules, component_rows=component_rows)
     mr_meta = frappe.get_meta("Material Request")
-    current_hash = build_source_hash(mr_doc)
     saved_hash = (mr_doc.get(MR_SOURCE_HASH_FIELD) or "").strip() if mr_meta.has_field(MR_SOURCE_HASH_FIELD) else ""
     if saved_hash:
-        return saved_hash != current_hash
-    package_rows = packages if packages is not None else get_packages_for_summary(mr_doc.name)
-    return bool(aggregate_components(mr_doc) or package_rows)
+        needs_sync = saved_hash != current_hash
+    else:
+        package_rows = packages if packages is not None else get_packages_for_summary(mr_doc.name)
+        needs_sync = bool(component_rows or package_rows)
+    return {
+        "needs_sync": needs_sync,
+        "current_hash": current_hash,
+        "has_expected_barcode_components": has_expected_barcode_components(
+            component_rows,
+            rules,
+        ),
+    }
+
+
+def packages_need_sync(mr_doc: Any, packages: list[dict[str, Any]] | None = None) -> bool:
+    return bool(package_sync_context(mr_doc, packages).get("needs_sync"))
 
 
 def get_or_make_loading_prefix(mr_doc: Any, dry_run: bool) -> str:
@@ -779,10 +813,16 @@ def update_material_request_summary(
         package_rows = get_packages_for_summary(material_request)
     summary = summarize_packages(package_rows)
     mr_doc = frappe.get_doc("Material Request", material_request)
-    needs_sync = packages_need_sync(mr_doc, package_rows)
+    sync_context = package_sync_context(mr_doc, package_rows)
+    needs_sync = bool(sync_context.get("needs_sync"))
     if source_hash is not None:
-        needs_sync = source_hash != build_source_hash(mr_doc)
-    overall = fulfillment_readiness(mr_doc, summary, needs_sync)
+        needs_sync = source_hash != sync_context.get("current_hash")
+    blocking_sync = should_block_fulfillment_for_package_sync(
+        needs_sync,
+        summary.get("total_packages"),
+        bool(sync_context.get("has_expected_barcode_components")),
+    )
+    overall = fulfillment_readiness(mr_doc, summary, blocking_sync)
     manufacturing_status = combined_manufacturing_status(overall)
     manufacturing_completed_at = mr_doc.get("custom_manufacturing_completed_at")
     manufacturing_completed_by = mr_doc.get("custom_manufacturing_completed_by") or ""
@@ -1287,8 +1327,14 @@ def get_delivery_component_packages(
     barcode_packages = [
         row for row in packages if is_barcode_tracking_route(row.get("tracking_route"))
     ]
-    needs_sync = packages_need_sync(mr_doc, packages)
-    overall = fulfillment_readiness(mr_doc, summary, needs_sync)
+    sync_context = package_sync_context(mr_doc, packages)
+    needs_sync = bool(sync_context.get("needs_sync"))
+    blocking_sync = should_block_fulfillment_for_package_sync(
+        needs_sync,
+        summary.get("total_packages"),
+        bool(sync_context.get("has_expected_barcode_components")),
+    )
+    overall = fulfillment_readiness(mr_doc, summary, blocking_sync)
     return {
         "material_request": material_request,
         "summary": summary,
