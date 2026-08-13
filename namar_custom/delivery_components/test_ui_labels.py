@@ -50,7 +50,7 @@ class DeliveryComponentUiLabelsTestCase(unittest.TestCase):
         self.assertIn("طباعة باركود القطاعات", source)
         self.assertNotIn("طباعة باركود المكونات", source)
 
-    def test_unified_dashboard_keeps_sector_print_button(self):
+    def test_unified_dashboard_does_not_duplicate_sector_print_button(self):
         source = (
             APP_ROOT / "public/js/delivery_components/material_request_delivery_components.js"
         ).read_text(encoding="utf-8")
@@ -58,8 +58,8 @@ class DeliveryComponentUiLabelsTestCase(unittest.TestCase):
             "function refreshFulfillment", 1
         )[0]
 
-        self.assertIn("delivery-component-print-btn", unified_dashboard)
-        self.assertIn("طباعة باركود القطاعات", unified_dashboard)
+        self.assertNotIn("delivery-component-print-btn", unified_dashboard)
+        self.assertNotIn("طباعة باركود القطاعات</button>", unified_dashboard)
 
     def test_snapshot_backfill_is_production_scoped_and_admin_only(self):
         api_source = (APP_ROOT / "delivery_components/api.py").read_text(encoding="utf-8")
