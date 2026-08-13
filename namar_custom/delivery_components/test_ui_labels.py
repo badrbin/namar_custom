@@ -62,6 +62,17 @@ class DeliveryComponentUiLabelsTestCase(unittest.TestCase):
         self.assertNotIn("NAMAR_TEST", maintenance_source)
         self.assertIn("update_modified=False", maintenance_source)
 
+    def test_legacy_route_adoption_is_production_scoped_and_admin_only(self):
+        api_source = (APP_ROOT / "delivery_components/api.py").read_text(encoding="utf-8")
+        maintenance_source = (APP_ROOT / "delivery_components/maintenance.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("adopt_legacy_started_barcode_route", api_source)
+        self.assertIn('frappe.only_for("System Manager")', api_source)
+        self.assertIn("NAMAR_CUSTOM_LEGACY_ROUTE_ADOPTION_20260813", maintenance_source)
+        self.assertIn("مطابقة الحزمة التاريخية غير أحادية", maintenance_source)
+        self.assertIn("frappe.db.set_value", maintenance_source)
+
 
 if __name__ == "__main__":
     unittest.main()

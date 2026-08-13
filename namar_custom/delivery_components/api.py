@@ -130,3 +130,17 @@ def backfill_component_package_event_snapshots(
         dry_run=dry_run,
         confirmation=confirmation,
     )
+
+
+@frappe.whitelist()
+def adopt_legacy_started_barcode_route(
+    material_request: str,
+    package_id: str,
+    confirmation: str | None = None,
+):
+    frappe.only_for("System Manager")
+    return maintenance.adopt_legacy_started_barcode_route(
+        material_request=material_request,
+        package_id=package_id,
+        confirmation=confirmation,
+    )
