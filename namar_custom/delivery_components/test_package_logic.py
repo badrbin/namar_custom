@@ -267,6 +267,20 @@ class DeliveryComponentPackageLogicTestCase(unittest.TestCase):
             ["AC-03", "AC-02", "AC-01", "AC-04"],
         )
 
+    def test_loading_codes_reserve_archived_package_codes(self):
+        rows = [{}, {}]
+
+        assigned = assign_stable_loading_codes(
+            rows,
+            "AF",
+            reserved_codes={"AF-01", "AF-02", "AF-03"},
+        )
+
+        self.assertEqual(
+            [row["loading_code"] for row in assigned],
+            ["AF-04", "AF-05"],
+        )
+
     def test_tracking_codes_use_unambiguous_three_character_alphabet(self):
         self.assertEqual(tracking_code_from_sequence(1), "AAA")
         self.assertNotIn("I", tracking_code_from_sequence(999))

@@ -73,6 +73,16 @@ class DeliveryComponentUiLabelsTestCase(unittest.TestCase):
         self.assertIn("مطابقة الحزمة التاريخية غير أحادية", maintenance_source)
         self.assertIn("frappe.db.set_value", maintenance_source)
 
+    def test_identifier_repair_is_production_scoped_and_admin_only(self):
+        api_source = (APP_ROOT / "delivery_components/api.py").read_text(encoding="utf-8")
+        maintenance_source = (APP_ROOT / "delivery_components/maintenance.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("repair_material_request_package_identifiers", api_source)
+        self.assertIn('frappe.only_for("System Manager")', api_source)
+        self.assertIn("NAMAR_CUSTOM_PACKAGE_IDENTIFIER_REPAIR_20260813", maintenance_source)
+        self.assertIn("تغيرت حالة الحزمة أثناء الإصلاح", maintenance_source)
+
 
 if __name__ == "__main__":
     unittest.main()

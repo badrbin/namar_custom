@@ -407,6 +407,7 @@ def assign_stable_loading_codes(
     package_rows: list[dict],
     loading_prefix: str | None,
     fieldname: str = "loading_code",
+    reserved_codes: list[str] | tuple[str, ...] | set[str] | None = None,
 ) -> list[dict]:
     prefix = (loading_prefix or "").strip().upper()
     if not prefix:
@@ -417,6 +418,11 @@ def assign_stable_loading_codes(
         for row in package_rows
         if (row.get(fieldname) or "").strip()
     }
+    used.update(
+        (code or "").strip().upper()
+        for code in (reserved_codes or [])
+        if (code or "").strip()
+    )
     next_number = 1
     for row in package_rows:
         existing = (row.get(fieldname) or "").strip().upper()

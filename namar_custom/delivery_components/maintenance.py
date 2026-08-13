@@ -12,6 +12,9 @@ from namar_custom.delivery_components.package_logic import (
     normalize_tracking_status,
 )
 from namar_custom.delivery_components import service
+from namar_custom.delivery_components.identifier_repair import (
+    plan_package_loading_code_repairs,
+)
 from namar_custom.delivery_components.snapshot_backfill import (
     SNAPSHOT_FIELDS,
     build_event_snapshot_updates,
@@ -24,6 +27,7 @@ PACKAGE_PARENTFIELD = "custom_delivery_component_packages"
 PRODUCTION_APP = "namar_custom"
 BACKFILL_CONFIRMATION = "NAMAR_CUSTOM_EVENT_SNAPSHOT_BACKFILL_20260813"
 LEGACY_ROUTE_CONFIRMATION = "NAMAR_CUSTOM_LEGACY_ROUTE_ADOPTION_20260813"
+IDENTIFIER_REPAIR_CONFIRMATION = "NAMAR_CUSTOM_PACKAGE_IDENTIFIER_REPAIR_20260813"
 
 
 def _ensure_production_app() -> None:
@@ -205,4 +209,101 @@ def adopt_legacy_started_barcode_route(
         "package_id": package_id,
         "package_key": desired.get("package_key") or "",
         **values,
+    }
+
+
+def repair_material_request_package_identifiers(
+    *,
+    material_request: str,
+    confirmation: str | None = None,
+) -> dict[str, Any]:
+    _ensure_production_app()
+    if confirmation != IDENTIFIER_REPAIR_CONFIRMATION:
+        frappe.throw("عبارة تأكيد إصلاح معرفات الحزم غير صحيحة")
+    if not frappe.db.exists("Material Request", material_request):
+        frappe.throw("طلب المواد غير موجود")
+
+    request_code = frappe.db.get_value(
+        "Material Request",
+        material_request,
+        service.MR_LOADING_CODE_FIELD,
+    )
+    rows = frappe.get_all(
+        PACKAGE_DOCTYPE,
+        filters={
+            "parent": material_request,
+            "parentfield": PACKAGE_PARENTFIELD,
+        },
+        fields=service.selected_fields(
+            PACKAGE_DOCTYPE,
+            [
+                "name",
+                "idx",
+                "loading_code",
+                "package_qty",
+                "ready_qty",
+            ],
+            ("tracking_status", "tracking_revision", "active"),
+        ),
+        order_by="idx asc, name asc",
+        limit_page_length=0,
+    )
+    planning_rows = [
+        {
+            **row,
+            "active": 1 if row.get("active") in (None, "") else cint(row.get("active")),
+            "started": service.package_started(row),
+        }
+        for row in rows
+    ]
+    try:
+        updates = plan_package_loading_code_repairs(planning_rows, request_code)
+    except ValueError as exc:
+        frappe.throw(str(exc))
+
+    rows_by_name = {row.get("name"): row for row in planning_rows}
+    for update in updates:
+        current = frappe.db.get_value(
+            PACKAGE_DOCTYPE,
+            update["name"],
+            [
+                "loading_code",
+                "package_qty",
+                "ready_qty",
+                "tracking_status",
+                "tracking_revision",
+                "active",
+            ],
+            as_dict=True,
+        )
+        expected = rows_by_name[update["name"]]
+        if (current.get("loading_code") or "").strip().upper() != update["old_loading_code"]:
+            frappe.throw("تغير رمز الحزمة أثناء الإصلاح؛ لم يتم اعتماد التعديل")
+        if service.package_started(current) != bool(expected.get("started")):
+            frappe.throw("تغيرت حالة الحزمة أثناء الإصلاح؛ لم يتم اعتماد التعديل")
+        conflict = frappe.db.exists(
+            PACKAGE_DOCTYPE,
+            {
+                "loading_code": update["loading_code"],
+                "name": ["!=", update["name"]],
+            },
+        )
+        if conflict:
+            frappe.throw("الرمز الجديد مستخدم مسبقًا: %s" % update["loading_code"])
+
+    for update in updates:
+        frappe.db.set_value(
+            PACKAGE_DOCTYPE,
+            update["name"],
+            "loading_code",
+            update["loading_code"],
+            update_modified=False,
+        )
+    frappe.db.commit()
+    return {
+        "status": "repaired" if updates else "unchanged",
+        "material_request": material_request,
+        "request_code": request_code or "",
+        "updated_count": len(updates),
+        "updates": updates,
     }

@@ -465,24 +465,39 @@ def get_or_make_loading_prefix(mr_doc: Any, dry_run: bool) -> str:
     return prefix
 
 
-def assign_loading_codes(package_rows: list[dict[str, Any]], loading_prefix: str) -> list[dict[str, Any]]:
+def assign_loading_codes(
+    package_rows: list[dict[str, Any]],
+    loading_prefix: str,
+    reserved_loading_codes: list[str] | None = None,
+) -> list[dict[str, Any]]:
     if not loading_prefix or not frappe.get_meta(PACKAGE_DOCTYPE).has_field(PACKAGE_LOADING_CODE_FIELD):
         return package_rows
-    barcode_rows = [
-        row for row in package_rows if is_barcode_tracking_route(row.get("tracking_route"))
-    ]
-    reserved_rows = [
-        {PACKAGE_LOADING_CODE_FIELD: row.get(PACKAGE_LOADING_CODE_FIELD)}
-        for row in package_rows
-        if not is_barcode_tracking_route(row.get("tracking_route"))
-        and (row.get(PACKAGE_LOADING_CODE_FIELD) or "").strip()
-    ]
     assign_stable_loading_codes(
-        reserved_rows + barcode_rows,
+        package_rows,
         loading_prefix,
         PACKAGE_LOADING_CODE_FIELD,
+        reserved_codes=reserved_loading_codes,
     )
     return package_rows
+
+
+def get_reserved_loading_codes(material_request: str) -> list[str]:
+    if not frappe.get_meta(PACKAGE_DOCTYPE).has_field(PACKAGE_LOADING_CODE_FIELD):
+        return []
+    rows = frappe.get_all(
+        PACKAGE_DOCTYPE,
+        filters={
+            "parent": material_request,
+            "parentfield": PACKAGE_PARENTFIELD,
+        },
+        fields=[PACKAGE_LOADING_CODE_FIELD],
+        limit_page_length=0,
+    )
+    return [
+        (row.get(PACKAGE_LOADING_CODE_FIELD) or "").strip()
+        for row in rows
+        if (row.get(PACKAGE_LOADING_CODE_FIELD) or "").strip()
+    ]
 
 
 def build_package_rows(
@@ -1208,7 +1223,11 @@ def sync_delivery_component_packages(material_request: str | None, dry_run: int 
     has_existing_packages = bool(get_packages(material_request))
     package_rows = build_package_rows(mr_doc, component_rows=component_rows)
     loading_prefix = get_or_make_loading_prefix(mr_doc, dry_run_bool)
-    package_rows = assign_loading_codes(package_rows, loading_prefix)
+    package_rows = assign_loading_codes(
+        package_rows,
+        loading_prefix,
+        reserved_loading_codes=get_reserved_loading_codes(material_request),
+    )
     summary = summarize_packages(package_rows)
 
     if not dry_run_bool:

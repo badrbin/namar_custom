@@ -144,3 +144,15 @@ def adopt_legacy_started_barcode_route(
         package_id=package_id,
         confirmation=confirmation,
     )
+
+
+@frappe.whitelist()
+def repair_material_request_package_identifiers(
+    material_request: str,
+    confirmation: str | None = None,
+):
+    frappe.only_for("System Manager")
+    return maintenance.repair_material_request_package_identifiers(
+        material_request=material_request,
+        confirmation=confirmation,
+    )
