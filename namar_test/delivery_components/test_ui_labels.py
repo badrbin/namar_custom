@@ -60,6 +60,17 @@ class DeliveryComponentUiLabelsTestCase(unittest.TestCase):
         self.assertIn('TEST_APP = "namar_test"', maintenance_source)
         self.assertIn("update_modified=False", maintenance_source)
 
+    def test_unified_dashboard_keeps_sector_print_button(self):
+        source = (
+            APP_ROOT / "public/js/delivery_components/material_request_delivery_components.js"
+        ).read_text(encoding="utf-8")
+        unified_dashboard = source.split("function renderUnifiedDashboard", 1)[1].split(
+            "function refreshFulfillment", 1
+        )[0]
+
+        self.assertIn("delivery-component-print-btn", unified_dashboard)
+        self.assertIn("طباعة باركود القطاعات", unified_dashboard)
+
 
 if __name__ == "__main__":
     unittest.main()

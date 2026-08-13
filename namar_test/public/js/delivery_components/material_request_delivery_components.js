@@ -660,6 +660,9 @@
       + (withDoorComponents ? statCard("مكونات مع الباب", formatCount(withDoorComponents), "default") : "")
       + statCard("رمز الطلب", escapeHtml(requestCode), "default")
       + '</div>'
+      + '<div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:14px;">'
+      + '<button type="button" class="btn btn-primary btn-sm delivery-component-print-btn">طباعة باركود القطاعات</button>'
+      + '</div>'
       + tableHtml
       + '</div>';
     frm.set_df_property("custom_delivery_component_dashboard", "options", html);
