@@ -1,3 +1,4 @@
+/*rtl:begin:ignore*/
 .namar-comment-edited-badge {
   display: inline-flex;
   align-items: center;
@@ -151,3 +152,4 @@
     grid-template-columns: minmax(0, 1fr);
   }
 }
+/*rtl:end:ignore*/
