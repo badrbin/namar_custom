@@ -19,6 +19,7 @@ class NamarMyFollowups {
 			source: "followups",
 			bucket: "all",
 			search: "",
+			priority: "",
 			items: [],
 			counts: {},
 			total: null,
@@ -80,15 +81,16 @@ class NamarMyFollowups {
 
 					<aside class="mf-queue-panel" aria-label="${this.escape(__("قائمة العمل"))}">
 						<div class="mf-queue-tools">
-							<label class="mf-search-box">
+							<div class="mf-search-box" role="search">
 								<span class="mf-search-icon">${this.icon("search", "sm")}</span>
-								<input type="search" class="mf-search-input" placeholder="${this.escape(__("ابحث في المتابعات"))}" autocomplete="off" />
+								<label class="sr-only" for="mf-followups-search">${this.escape(__("البحث في قائمة العمل"))}</label>
+								<input id="mf-followups-search" type="search" class="mf-search-input" placeholder="${this.escape(__("ابحث في المتابعات"))}" autocomplete="off" />
 								<button type="button" class="mf-clear-search" aria-label="${this.escape(__("مسح البحث"))}" hidden>
 									${this.icon("close", "xs")}
 								</button>
-							</label>
-							<button type="button" class="mf-icon-button mf-refresh-button" aria-label="${this.escape(__("تحديث القائمة"))}" title="${this.escape(__("تحديث القائمة"))}">
-								${this.icon("refresh", "sm")}
+							</div>
+							<button type="button" class="mf-icon-button mf-filter-button" aria-label="${this.escape(__("تصفية حسب الأولوية"))}" title="${this.escape(__("تصفية حسب الأولوية"))}">
+								${this.icon("filter", "sm")}
 							</button>
 						</div>
 						<div class="mf-filter-bar" role="tablist" aria-label="${this.escape(__("تصفية المتابعات"))}"></div>
@@ -120,6 +122,10 @@ class NamarMyFollowups {
 			this.change_bucket($(event.currentTarget).data("bucket"));
 		});
 
+		this.$root.on("keydown", ".mf-source-btn, .mf-filter-btn", (event) => {
+			this.handle_tab_key(event);
+		});
+
 		this.$search.on("input", (event) => {
 			const value = event.currentTarget.value.trim();
 			this.$clear_search.prop("hidden", !value);
@@ -138,9 +144,10 @@ class NamarMyFollowups {
 			this.load_list();
 		});
 
-		this.$root.on("click", ".mf-refresh-button, .mf-retry-list", () => {
+		this.$root.on("click", ".mf-retry-list", () => {
 			this.load_list({ preserve_selection: true });
 		});
+		this.$root.on("click", ".mf-filter-button", () => this.show_priority_filter());
 
 		this.$root.on("click", ".mf-queue-item", (event) => {
 			this.select_item($(event.currentTarget).data("name"), true);
@@ -173,11 +180,21 @@ class NamarMyFollowups {
 		this.state.source = source;
 		this.state.bucket = "all";
 		this.state.search = "";
+		this.state.priority = "";
 		this.state.selected_name = this.selected_by_source[source];
 		this.state.detail = null;
+		this.state.items = [];
+		this.state.counts = {};
+		this.state.total = null;
+		this.state.has_more = false;
+		this.state.next_start = null;
+		this.state.limit_start = 0;
 		this.detail_sequence += 1;
 		this.$search.val("");
 		this.$clear_search.prop("hidden", true);
+		this.$root.find(".mf-filter-button")
+			.prop("hidden", source === "approvals")
+			.removeClass("is-active");
 		this.$search.attr(
 			"placeholder",
 			source === "followups" ? __("ابحث في المتابعات") : __("ابحث في الموافقات")
@@ -190,6 +207,49 @@ class NamarMyFollowups {
 		this.render_filters();
 		this.render_detail_empty();
 		this.load_list({ preserve_selection: true });
+	}
+
+	handle_tab_key(event) {
+		if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+		const $tabs = $(event.currentTarget).closest('[role="tablist"]').find('[role="tab"]:visible');
+		if (!$tabs.length) return;
+		const current = $tabs.index(event.currentTarget);
+		let next = current;
+		if (event.key === "Home") next = 0;
+		else if (event.key === "End") next = $tabs.length - 1;
+		else if (event.key === "ArrowLeft") next = (current + 1) % $tabs.length;
+		else next = (current - 1 + $tabs.length) % $tabs.length;
+		event.preventDefault();
+		$tabs.eq(next).trigger("focus").trigger("click");
+	}
+
+	show_priority_filter() {
+		if (this.state.source !== "followups") return;
+		const dialog = new frappe.ui.Dialog({
+			title: __("تصفية المتابعات"),
+			fields: [
+				{
+					fieldname: "priority",
+					fieldtype: "Select",
+					label: __("الأولوية"),
+					options: [
+						{ label: __("كل الأولويات"), value: "" },
+						{ label: __("مرتفعة"), value: "High" },
+						{ label: __("متوسطة"), value: "Medium" },
+						{ label: __("منخفضة"), value: "Low" },
+					],
+					default: this.state.priority,
+				},
+			],
+			primary_action_label: __("تطبيق"),
+			primary_action: (values) => {
+				this.state.priority = values.priority || "";
+				this.$root.find(".mf-filter-button").toggleClass("is-active", Boolean(this.state.priority));
+				dialog.hide();
+				this.load_list();
+			},
+		});
+		dialog.show();
 	}
 
 	change_bucket(bucket) {
@@ -231,6 +291,7 @@ class NamarMyFollowups {
 			const method = this.state.source === "followups" ? "get_followups" : "get_approvals";
 			if (this.state.source === "followups") {
 				args.bucket = this.state.bucket;
+				args.priority = this.state.priority;
 			}
 
 			const response = await this.call(method, args);
@@ -319,8 +380,8 @@ class NamarMyFollowups {
 				: this.number(known_total);
 			this.$filters.addClass("is-approvals").html(`
 				<button type="button" class="mf-filter-btn is-active" data-bucket="all" role="tab" aria-selected="true">
-					<strong>${this.escape(total)}</strong>
 					<span>${this.escape(__("بانتظار مراجعتي"))}</span>
+					<strong>${this.escape(total)}</strong>
 				</button>
 			`);
 			return;
@@ -341,8 +402,8 @@ class NamarMyFollowups {
 					return `
 						<button type="button" class="mf-filter-btn mf-filter-${filter.key} ${active ? "is-active" : ""}"
 							data-bucket="${filter.key}" role="tab" aria-selected="${active}">
-							<strong>${this.escape(count)}</strong>
 							<span>${this.escape(filter.label)}</span>
+							<strong>${this.escape(count)}</strong>
 						</button>
 					`;
 				})
@@ -521,6 +582,7 @@ class NamarMyFollowups {
 			detail.description,
 			detail.summary
 		);
+		const show_requested = requested && this.plain_text(requested) !== this.plain_text(title);
 		const status = this.first(detail.work_state_label, detail.status_label, detail.status, __("مفتوحة"));
 		const timeline = this.first_array(detail.timeline, detail.activities, detail.activity);
 		const permissions = detail.permissions || {};
@@ -541,8 +603,9 @@ class NamarMyFollowups {
 					</button>
 					<div class="mf-reference-summary">
 						<span class="mf-status-pill is-${due.tone}">${this.escape(due.is_overdue ? __("متأخرة") : status)}</span>
-						${reference_name ? `<strong>${this.escape(reference_name)}</strong>` : ""}
 						${display_reference_title ? `<span>${this.escape(display_reference_title)}</span>` : ""}
+						${display_reference_title && reference_name ? `<span class="mf-reference-divider" aria-hidden="true">·</span>` : ""}
+						${reference_name ? `<strong>${this.escape(reference_name)}</strong>` : ""}
 					</div>
 					${reference_type && reference_name ? `
 						<button type="button" class="mf-link-button mf-open-reference">
@@ -557,12 +620,12 @@ class NamarMyFollowups {
 						<h2>${this.escape(title)}</h2>
 						<div class="mf-detail-meta">
 							${type ? `<span>${this.icon("clipboard", "xs")}${this.escape(type)}</span>` : ""}
-							${assigned_name || role ? `<span>${this.icon("assign", "xs")}${this.escape(assigned_name || role)}</span>` : ""}
+							${role || assigned_name ? `<span>${this.icon("assign", "xs")}${this.escape(role || assigned_name)}</span>` : ""}
 							${due.date ? `<span>${this.icon("calendar", "xs")}${this.escape(__("الاستحقاق"))} ${this.escape(this.format_date(due.date))}</span>` : ""}
 						</div>
 					</section>
 
-					${requested ? `
+					${show_requested ? `
 						<section class="mf-section">
 							<h3>${this.escape(__("المطلوب"))}</h3>
 							<div class="mf-required-box">${this.escape(this.plain_text(requested))}</div>
@@ -571,7 +634,10 @@ class NamarMyFollowups {
 
 					<section class="mf-section mf-timeline-section">
 						<h3>${this.escape(__("سجل المتابعة"))}</h3>
-						${this.render_timeline(timeline)}
+						${this.render_timeline(timeline, {
+							include_current: detail.status === "Open",
+							current_label: this.first(detail.current_step, detail.work_state_label, __("بانتظار الإجراء")),
+						})}
 					</section>
 
 					<section class="mf-section mf-result-section">
@@ -629,8 +695,9 @@ class NamarMyFollowups {
 					</button>
 					<div class="mf-reference-summary">
 						<span class="mf-status-pill is-review">${this.escape(__("بانتظار المراجعة"))}</span>
-						${reference_name ? `<strong>${this.escape(reference_name)}</strong>` : ""}
 						${display_reference_title ? `<span>${this.escape(display_reference_title)}</span>` : ""}
+						${display_reference_title && reference_name ? `<span class="mf-reference-divider" aria-hidden="true">·</span>` : ""}
+						${reference_name ? `<strong>${this.escape(reference_name)}</strong>` : ""}
 					</div>
 				</header>
 
@@ -668,21 +735,28 @@ class NamarMyFollowups {
 		`);
 	}
 
-	render_timeline(items) {
-		if (!items.length) {
+	render_timeline(items, { include_current = false, current_label = "" } = {}) {
+		const entries = [...items];
+		if (include_current) {
+			entries.push({ label: current_label || __("بانتظار الإجراء"), is_current: true });
+		}
+		if (!entries.length) {
 			return `<div class="mf-inline-empty">${this.escape(__("لا يوجد سجل متابعة بعد."))}</div>`;
 		}
 
 		return `<ol class="mf-timeline">
-			${items.map((entry, index) => {
+			${entries.map((entry) => {
 				const label = this.first(entry.label, entry.title, entry.description, entry.content, __("تحديث"));
 				const date = this.first(entry.date, entry.creation, entry.timestamp, entry.modified);
-				const is_complete = Boolean(entry.completed || entry.is_completed || entry.status === "Closed");
-				const icon = is_complete ? "tick" : index === items.length - 1 ? "primitive-dot" : "comment";
+				const is_complete = Boolean(
+					entry.completed || entry.is_completed || entry.status === "Closed" || entry.comment_type === "Assignment"
+				);
+				const is_current = Boolean(entry.is_current);
+				const icon = is_complete ? "tick" : is_current ? "primitive-dot" : "comment";
 				return `
-					<li class="mf-timeline-item ${is_complete ? "is-complete" : ""}">
+					<li class="mf-timeline-item ${is_complete ? "is-complete" : ""} ${is_current ? "is-current" : ""}">
 						<span class="mf-timeline-icon">${this.icon(icon, "xs")}</span>
-						<div>
+						<div class="mf-timeline-copy">
 							<p>${this.escape(this.plain_text(label))}</p>
 							${date ? `<time>${this.escape(this.format_datetime(date))}</time>` : ""}
 						</div>
@@ -876,7 +950,15 @@ class NamarMyFollowups {
 	}
 
 	set_action_busy(busy) {
-		this.$detail.find("button, textarea").prop("disabled", busy);
+		if (busy) {
+			this.$detail.find("button:not(:disabled), textarea:not(:disabled)")
+				.attr("data-mf-busy-disabled", "1")
+				.prop("disabled", true);
+		} else {
+			this.$detail.find('[data-mf-busy-disabled="1"]')
+				.prop("disabled", false)
+				.removeAttr("data-mf-busy-disabled");
+		}
 		this.$detail.toggleClass("is-action-busy", busy);
 	}
 

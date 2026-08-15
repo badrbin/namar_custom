@@ -20,6 +20,7 @@ from namar_test.followups.logic import (
     normalize_bucket,
     normalize_date,
     normalize_priority,
+    normalize_priority_filter,
     normalize_search,
     page_window,
     pagination,
@@ -299,9 +300,12 @@ def _approval_search_filters(search: str) -> list[list[str]]:
     ]
 
 
-def _followup_counts(user: str, current_date: str) -> dict[str, int]:
+def _followup_counts(user: str, current_date: str, priority: str = "") -> dict[str, int]:
     counts = {
-        bucket: frappe.db.count("ToDo", filters=_logic(todo_filters, bucket, user, current_date))
+        bucket: frappe.db.count(
+            "ToDo",
+            filters=_logic(todo_filters, bucket, user, current_date, priority),
+        )
         for bucket in ("all", "overdue", "today", "upcoming", "recent")
     }
     counts["open"] = counts["all"]
@@ -313,13 +317,15 @@ def get_followups(
     search: str = "",
     limit_start: int | str = 0,
     page_length: int | str = 50,
+    priority: str = "",
 ) -> dict[str, Any]:
     user = _assert_authenticated()
     normalized_bucket = _logic(normalize_bucket, bucket)
     normalized_search = normalize_search(search)
+    normalized_priority = _logic(normalize_priority_filter, priority)
     start, length, query_length = page_window(limit_start, page_length)
     current_date = nowdate()
-    filters = _logic(todo_filters, normalized_bucket, user, current_date)
+    filters = _logic(todo_filters, normalized_bucket, user, current_date, normalized_priority)
     order_by = "modified desc" if normalized_bucket == "recent" else "date asc, modified desc"
 
     rows = frappe.get_list(
@@ -341,8 +347,9 @@ def get_followups(
         {
             "bucket": normalized_bucket,
             "search": normalized_search,
+            "priority": normalized_priority,
             "today": current_date,
-            "counts": _followup_counts(user, current_date),
+            "counts": _followup_counts(user, current_date, normalized_priority),
         }
     )
     return result

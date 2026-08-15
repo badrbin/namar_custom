@@ -83,6 +83,13 @@ def normalize_priority(value: Any, default: str = "Medium") -> str:
     return priority
 
 
+def normalize_priority_filter(value: Any) -> str:
+    priority = clean_text(value, 20)
+    if not priority:
+        return ""
+    return normalize_priority(priority)
+
+
 def normalize_date(value: Any, label: str = "التاريخ") -> str:
     if isinstance(value, datetime):
         return value.date().isoformat()
@@ -108,12 +115,20 @@ def plain_text(value: Any, max_length: int | None = None) -> str:
     return text[:max_length] if max_length is not None else text
 
 
-def todo_filters(bucket: Any, user: Any, today: Any) -> dict[str, Any]:
+def todo_filters(
+    bucket: Any,
+    user: Any,
+    today: Any,
+    priority: Any = "",
+) -> dict[str, Any]:
     normalized_bucket = normalize_bucket(bucket)
     allocated_to = require_text(user, "المستخدم", MAX_REFERENCE_LENGTH)
     current_date = normalize_date(today, "تاريخ اليوم")
 
     filters: dict[str, Any] = {"allocated_to": allocated_to}
+    normalized_priority = normalize_priority_filter(priority)
+    if normalized_priority:
+        filters["priority"] = normalized_priority
     if normalized_bucket == "recent":
         filters["status"] = "Closed"
         return filters

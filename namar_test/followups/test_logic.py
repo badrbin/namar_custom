@@ -11,6 +11,7 @@ from namar_test.followups.logic import (
     normalize_bucket,
     normalize_date,
     normalize_priority,
+    normalize_priority_filter,
     page_window,
     pagination,
     plain_text,
@@ -76,8 +77,23 @@ class FollowupsLogicTestCase(unittest.TestCase):
     def test_priority_validation(self):
         self.assertEqual(normalize_priority(None), "Medium")
         self.assertEqual(normalize_priority("High"), "High")
+        self.assertEqual(normalize_priority_filter(None), "")
+        self.assertEqual(normalize_priority_filter(" Low "), "Low")
         with self.assertRaises(ValueError):
             normalize_priority("Urgent")
+        with self.assertRaises(ValueError):
+            normalize_priority_filter("Urgent")
+
+    def test_todo_filters_apply_optional_priority_without_weakening_ownership(self):
+        filters = todo_filters(
+            "today",
+            "employee@example.com",
+            "2026-08-16",
+            "High",
+        )
+        self.assertEqual(filters["allocated_to"], "employee@example.com")
+        self.assertEqual(filters["priority"], "High")
+        self.assertEqual(filters["date"], "2026-08-16")
 
     def test_owned_todo_requires_exact_assignee_and_open_status_for_mutations(self):
         todo = {"allocated_to": "employee@example.com", "status": "Open"}

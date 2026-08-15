@@ -11,10 +11,12 @@ def get_followups(
     search: str = "",
     limit_start: int | str = 0,
     page_length: int | str = 50,
+    priority: str = "",
 ):
     return service.get_followups(
         bucket=bucket,
         search=search,
+        priority=priority,
         limit_start=limit_start,
         page_length=page_length,
     )
