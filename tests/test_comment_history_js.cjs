@@ -9,7 +9,7 @@ const assetPath = path.join(
   "namar_test",
   "public",
   "js",
-  "comment_history.js"
+  "comment_history.bundle.js"
 );
 const source = fs.readFileSync(assetPath, "utf8");
 
@@ -101,4 +101,4 @@ assert.equal(callCount, 1);
 assert.equal(alwaysCount, 1);
 assert.deepEqual(warnings, []);
 
-console.log("comment_history.js supports the Frappe Deferred promise");
+console.log("comment_history.bundle.js supports the Frappe Deferred promise");
