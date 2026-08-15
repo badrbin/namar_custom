@@ -97,7 +97,7 @@
 .mf-workspace {
 	direction: ltr;
 	display: grid;
-	grid-template-columns: minmax(0, 1fr) minmax(330px, 410px);
+	grid-template-columns: minmax(0, 1fr) minmax(360px, 36%);
 	gap: 10px;
 	height: calc(100vh - 190px);
 	min-height: 640px;
@@ -279,7 +279,7 @@
 	cursor: pointer;
 	display: flex;
 	gap: 14px;
-	min-height: 142px;
+	min-height: 185px;
 	outline: 0;
 	padding: 17px 18px;
 	position: relative;
@@ -770,7 +770,7 @@
 	border-bottom: 1px solid var(--mf-border);
 	display: flex;
 	gap: 14px;
-	min-height: 142px;
+	min-height: 185px;
 	padding: 18px;
 }
 
