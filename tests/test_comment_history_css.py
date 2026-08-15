@@ -7,7 +7,7 @@ CSS_PATH = (
     / "namar_custom"
     / "public"
     / "css"
-    / "comment_history.bundle.css"
+    / "namar_custom_comment_history.bundle.css"
 )
 
 

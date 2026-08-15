@@ -9,7 +9,7 @@ const assetPath = path.join(
   "namar_custom",
   "public",
   "js",
-  "comment_history.bundle.js"
+  "namar_custom_comment_history.bundle.js"
 );
 const source = fs.readFileSync(assetPath, "utf8");
 
@@ -323,7 +323,7 @@ const nativePromiseFrm = {
   await nativePromiseHooks.load_history(nativePromiseFrm, false);
   await nativePromiseHooks.load_history(nativePromiseFrm, false);
   assert.equal(nativePromiseCallCount, 1);
-  console.log("comment_history.bundle.js supports Deferred, Promise, cache, and drawer snapshots");
+  console.log("namar_custom_comment_history.bundle.js supports Deferred, Promise, cache, and drawer snapshots");
 })().catch(function (error) {
   console.error(error);
   process.exitCode = 1;
