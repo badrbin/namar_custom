@@ -158,6 +158,7 @@ doctype_list_js = {
 }
 
 app_include_js = [
+    "/assets/namar_test/js/comment_history.js",
     "/assets/namar_test/js/doctype/cutting_template_form.js",
     "/assets/namar_test/js/doctype/delivery_note_form.js",
     "/assets/namar_test/js/doctype/installation_note_form.js",
@@ -168,6 +169,10 @@ app_include_js = [
     "/assets/namar_test/js/doctype/sales_invoice_form.js",
     "/assets/namar_test/js/doctype/sales_order_form.js",
     "/assets/namar_test/js/delivery_components/material_request_delivery_components.js",
+]
+
+app_include_css = [
+    "/assets/namar_test/css/comment_history.css",
 ]
 
 web_include_js = [
