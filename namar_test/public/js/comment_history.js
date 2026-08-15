@@ -213,33 +213,41 @@
         },
         freeze: false,
       })
-      .then(function (response) {
-        if (get_comment_signature(frm) !== comment_signature) {
-          state.pending_force = true;
-          return;
+      .then(
+        function (response) {
+          if (get_comment_signature(frm) !== comment_signature) {
+            state.pending_force = true;
+            return;
+          }
+          if (state.pending_force) return;
+          if (request_serial !== state.request_serial) return;
+          if (`${frm.doctype}::${frm.docname}` !== document_key) return;
+          const histories = (response.message && response.message.histories) || {};
+          state.cache_key = document_key;
+          state.cache_signature = comment_signature;
+          state.cached_histories = histories;
+          render_history(frm, histories);
+        },
+        function (error) {
+          console.warn("تعذر تحميل سجل تعديلات التعليقات", error);
         }
-        if (state.pending_force) return;
-        if (request_serial !== state.request_serial) return;
-        if (`${frm.doctype}::${frm.docname}` !== document_key) return;
-        const histories = (response.message && response.message.histories) || {};
-        state.cache_key = document_key;
-        state.cache_signature = comment_signature;
-        state.cached_histories = histories;
-        render_history(frm, histories);
-      })
-      .catch(function (error) {
-        console.warn("تعذر تحميل سجل تعديلات التعليقات", error);
-      })
-      .finally(function () {
-        if (state.inflight === request) state.inflight = null;
-        state.inflight_key = null;
-        state.inflight_signature = null;
-        if (state.pending_force) {
-          state.pending_force = false;
-          schedule_history_load(frm, true, true);
-        }
-      });
+      );
     state.inflight = request;
+
+    const finish_request = function () {
+      if (state.inflight === request) state.inflight = null;
+      state.inflight_key = null;
+      state.inflight_signature = null;
+      if (state.pending_force) {
+        state.pending_force = false;
+        schedule_history_load(frm, true, true);
+      }
+    };
+    if (typeof request.always === "function") {
+      request.always(finish_request);
+    } else {
+      request.then(finish_request, finish_request);
+    }
     return request;
   }
 
