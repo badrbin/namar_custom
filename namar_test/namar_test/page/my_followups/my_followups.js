@@ -489,7 +489,7 @@ class NamarMyFollowups {
 				<div class="mf-item-copy">
 					<h3>${this.escape(title)}</h3>
 					${reference_name || display_party ? `<p class="mf-reference-line">${this.join_meta([reference_name, display_party])}</p>` : ""}
-					${due.label ? `<p class="mf-due-line is-${due.tone}">${this.icon("primitive-dot", "xs")}${this.escape(due.label)}</p>` : ""}
+					${due.label ? `<p class="mf-due-line is-${due.tone}"><span class="mf-due-dot" aria-hidden="true"></span>${this.escape(due.label)}</p>` : ""}
 					${role ? `<p class="mf-role-line">${this.escape(role)}</p>` : ""}
 					${requester ? `
 						<div class="mf-requester">
@@ -611,7 +611,7 @@ class NamarMyFollowups {
 					</div>
 					${reference_type && reference_name ? `
 						<button type="button" class="mf-link-button mf-open-reference">
-							${this.icon("link-url", "sm")}
+							${this.icon("external-link", "sm")}
 							<span>${this.escape(__("فتح المستند"))}</span>
 						</button>
 					` : ""}
@@ -760,7 +760,7 @@ class NamarMyFollowups {
 						<span class="mf-timeline-icon">${this.icon(icon, "xs")}</span>
 						<div class="mf-timeline-copy">
 							<p>${this.escape(this.plain_text(label))}</p>
-							${date ? `<time>${this.escape(this.format_datetime(date))}</time>` : ""}
+							${date ? `<time>${this.escape(this.format_timeline_date(date))}</time>` : ""}
 						</div>
 					</li>
 				`;
@@ -1095,6 +1095,16 @@ class NamarMyFollowups {
 	}
 
 	reference_icon(item) {
+		const activity = String(this.first(
+			item.followup_type,
+			item.activity_type,
+			item.type,
+			item.title,
+			item.description
+		) || "").toLowerCase();
+		if (["call", "phone", "contact", "اتصال", "تواصل", "هاتف"].some((word) => activity.includes(word))) {
+			return "call";
+		}
 		const doctype = String(this.reference_type(item) || "").toLowerCase();
 		if (doctype.includes("material request")) return "clipboard";
 		if (doctype.includes("sales order")) return "tick";
@@ -1168,6 +1178,16 @@ class NamarMyFollowups {
 			year: "numeric",
 			hour: "numeric",
 			minute: "2-digit",
+		}).format(parsed);
+	}
+
+	format_timeline_date(value) {
+		if (!value) return "";
+		const parsed = this.parse_date(value);
+		if (!parsed) return String(value);
+		return new Intl.DateTimeFormat("ar-EG-u-ca-gregory-nu-latn", {
+			day: "numeric",
+			month: "long",
 		}).format(parsed);
 	}
 

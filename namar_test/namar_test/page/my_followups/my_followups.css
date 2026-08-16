@@ -304,6 +304,11 @@
 	background: var(--subtle-fg, #f2f5f8);
 }
 
+.mf-queue-item.is-active .mf-item-type-icon {
+	background: var(--mf-surface);
+	box-shadow: 0 0 0 1px var(--mf-border);
+}
+
 .mf-item-type-icon {
 	align-items: center;
 	background: var(--mf-soft);
@@ -347,6 +352,15 @@
 	font-size: 13px;
 	font-weight: 550;
 	gap: 7px;
+}
+
+.mf-due-dot {
+	background: currentColor;
+	border-radius: 50%;
+	display: inline-block;
+	flex: 0 0 7px;
+	height: 7px;
+	width: 7px;
 }
 
 .mf-due-line.is-overdue {
@@ -611,7 +625,7 @@
 
 .mf-timeline-item.is-current .mf-timeline-icon {
 	background: var(--mf-surface);
-	border: 2px solid var(--mf-ink);
+	border: 1px solid var(--mf-ink);
 	color: var(--mf-ink);
 }
 
@@ -706,6 +720,11 @@
 	background: var(--mf-dark);
 	border: 1px solid var(--mf-dark);
 	color: #ffffff;
+}
+
+.mf-action-btn.is-primary .icon {
+	color: #ffffff;
+	stroke: currentColor;
 }
 
 .mf-action-btn.is-primary:hover {
