@@ -473,7 +473,9 @@ class NamarMyFollowups {
 			item.allocated_to_role,
 			item.owner_role,
 			item.department,
-			this.priority_label(item.priority)
+			item.allocated_to_full_name,
+			item.assignee_name,
+			this.user_display(item.allocated_to)
 		);
 		const due = this.due_meta(item);
 		const is_active = String(name) === String(this.state.selected_name);
