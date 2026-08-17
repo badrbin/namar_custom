@@ -20,9 +20,50 @@ elif action == 'get_qty':
     if not material_request:
         frappe.throw('Material Request is required')
 
-    so_name = frappe.db.get_value('Material Request', material_request, 'sales_order')
+    mr_policy_data = frappe.db.get_value(
+        'Material Request',
+        material_request,
+        ['sales_order', 'custom_request_scenario'],
+        as_dict=True,
+    ) or {}
+    so_name = mr_policy_data.get('sales_order')
+    scenario = (mr_policy_data.get('custom_request_scenario') or '').strip()
+    link_to_sales_order = 1
 
-    if not so_name:
+    if scenario and frappe.db.exists('DocType', 'Material Request Scenario Rule'):
+        configured_value = frappe.db.get_value(
+            'Material Request Scenario Rule',
+            {'scenario_name': scenario, 'enabled': 1},
+            'link_delivery_note_to_sales_order',
+        )
+        if configured_value is not None:
+            link_to_sales_order = frappe.utils.cint(configured_value)
+
+    if not link_to_sales_order:
+        remaining_items = frappe.db.sql("""
+            SELECT
+                mr_item.item_code,
+                SUM(mr_item.qty) - IFNULL(delivered.total_delivered, 0) AS remaining
+            FROM `tabMaterial Request Item` mr_item
+            LEFT JOIN (
+                SELECT dni.item_code, SUM(dni.qty) AS total_delivered
+                FROM `tabDelivery Note Item` dni
+                INNER JOIN `tabDelivery Note` dn ON dn.name = dni.parent
+                WHERE dn.custom_material_request = %s
+                    AND dn.docstatus = 1
+                GROUP BY dni.item_code
+            ) delivered ON delivered.item_code = mr_item.item_code
+            WHERE mr_item.parent = %s
+            GROUP BY mr_item.item_code, delivered.total_delivered
+        """, (material_request, material_request), as_dict=True)
+
+        qty_map = {}
+        for item in remaining_items:
+            remaining = frappe.utils.flt(item.remaining)
+            if remaining > 0:
+                qty_map[item.item_code] = remaining
+        frappe.response['message'] = qty_map
+    elif not so_name:
         frappe.response['message'] = {}
     else:
         remaining_items = frappe.db.sql("""
@@ -45,12 +86,24 @@ else:
         frappe.throw('Material Request name is required')
 
     mr_data = frappe.db.get_value('Material Request', source_name,
-        ['name', 'docstatus', 'sales_order'], as_dict=True)
+        ['name', 'docstatus', 'sales_order', 'custom_request_scenario'], as_dict=True)
 
     if not mr_data:
         frappe.throw('Material Request not found')
     if mr_data.docstatus != 1:
         frappe.throw('Material Request must be submitted')
+
+    scenario = (mr_data.get('custom_request_scenario') or '').strip()
+    link_to_sales_order = 1
+    if scenario and frappe.db.exists('DocType', 'Material Request Scenario Rule'):
+        configured_value = frappe.db.get_value(
+            'Material Request Scenario Rule',
+            {'scenario_name': scenario, 'enabled': 1},
+            'link_delivery_note_to_sales_order',
+        )
+        if configured_value is not None:
+            link_to_sales_order = frappe.utils.cint(configured_value)
+    link_to_sales_order = bool(mr_data.sales_order and link_to_sales_order)
 
     # جلب أصناف طلب المواد
     mr_items = frappe.db.sql("""
@@ -62,7 +115,7 @@ else:
     # جلب الكميات المتبقية من أمر البيع (إن وجد)
     qty_map = {}
     so_detail_map = {}
-    if mr_data.sales_order:
+    if link_to_sales_order:
         so_items = frappe.db.sql("""
             SELECT name, item_code, qty, delivered_qty, rate, warehouse
             FROM `tabSales Order Item`
@@ -143,8 +196,8 @@ else:
         if mr_avail <= 0:
             continue
 
-        # بدون أمر بيع - نضيف الصنف مباشرة
-        if not mr_data.sales_order:
+        # الاستبدال والنواقص يضيفان أصناف طلب المواد دون ربطها بأسطر أمر البيع.
+        if not link_to_sales_order:
             dn.append('items', {
                 'item_code': item.item_code,
                 'item_name': item.item_name,
