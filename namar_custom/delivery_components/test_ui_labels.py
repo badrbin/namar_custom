@@ -15,7 +15,7 @@ class DeliveryComponentUiLabelsTestCase(unittest.TestCase):
         self.assertIn('registered ? "تم التصنيع" : "غير مصنع"', source)
         self.assertIn("حزم القطاعات المصنعة", source)
         self.assertIn("تصنيع القطاعات", source)
-        self.assertIn("interface_version: 3", source)
+        self.assertIn("interface_version: 4", source)
 
     def test_blank_tracking_route_is_not_treated_as_barcode(self):
         source = (
@@ -60,6 +60,21 @@ class DeliveryComponentUiLabelsTestCase(unittest.TestCase):
 
         self.assertNotIn("delivery-component-print-btn", unified_dashboard)
         self.assertNotIn("طباعة باركود القطاعات</button>", unified_dashboard)
+
+    def test_delivery_manifest_is_independent_from_sector_readiness(self):
+        source = (
+            APP_ROOT / "public/js/delivery_components/material_request_delivery_components.js"
+        ).read_text(encoding="utf-8")
+        unified_dashboard = source.split("function renderUnifiedDashboard", 1)[1].split(
+            "function refreshFulfillment", 1
+        )[0]
+
+        self.assertIn("rows(frm).filter(isBarcodeRoute)", unified_dashboard)
+        self.assertNotIn("مكونات توريد فقط", unified_dashboard)
+        self.assertNotIn("مكونات مع الباب", unified_dashboard)
+        self.assertIn("مكونات التوريد", source)
+        self.assertIn("لا تستخدم حالات جاهزية أو مسح باركود", source)
+        self.assertIn("get_delivery_supply_manifest", source)
 
     def test_snapshot_backfill_is_production_scoped_and_admin_only(self):
         api_source = (APP_ROOT / "delivery_components/api.py").read_text(encoding="utf-8")

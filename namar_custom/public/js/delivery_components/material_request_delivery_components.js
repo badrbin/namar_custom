@@ -5,12 +5,18 @@
     markReady: "namar_custom.delivery_components.api.mark_delivery_component_package_ready",
     markEvent: "namar_custom.delivery_components.api.mark_delivery_component_package_event",
     fulfillment: "namar_custom.delivery_components.api.get_material_request_fulfillment_readiness",
-    resolve: "namar_custom.delivery_components.api.resolve_delivery_tracking_code"
+    resolve: "namar_custom.delivery_components.api.resolve_delivery_tracking_code",
+    manifest: "namar_custom.delivery_components.api.get_delivery_supply_manifest"
   };
   var realtimeBound = false;
   var focusBound = false;
   var lastFocusReloadAt = 0;
   var preparingPrint = false;
+  var preparingSupplyPrint = false;
+  var supplyManifestCache = {};
+  var supplyManifestWaiters = {};
+
+  window.namar_delivery_supply_manifest_app = true;
 
   function flt(value) {
     return frappe.utils && frappe.utils.flt ? frappe.utils.flt(value || 0) : Number(value || 0);
@@ -52,6 +58,13 @@
 
   function isBarcodeRoute(row) {
     return trackingRoute(row && row.tracking_route) === "تصنيع مستقل - باركود";
+  }
+
+  function isSupplyPackage(row) {
+    return !!row
+      && Number(row.package_qty || 0) > 0
+      && !Number(row.exclude_from_delivery || 0)
+      && trackingRoute(row.tracking_route) !== "مستبعد";
   }
 
   function rows(frm) {
@@ -539,6 +552,207 @@
     return true;
   }
 
+  function supplyPrintUrl(frm) {
+    return "/printview?doctype=Material%20Request&name="
+      + encodeURIComponent(frm.doc.name || "")
+      + "&format="
+      + encodeURIComponent("ملصق مكونات التوريد 4x3")
+      + "&no_letterhead=1";
+  }
+
+  function supplyManifestKey(frm) {
+    return [frm.doc.name || "", frm.doc.modified || ""].join("|");
+  }
+
+  function clearSupplyManifestCache() {
+    supplyManifestCache = {};
+    supplyManifestWaiters = {};
+  }
+
+  function fetchSupplyManifest(frm, callback) {
+    var key = supplyManifestKey(frm);
+    if (supplyManifestCache[key]) {
+      callback(supplyManifestCache[key]);
+      return;
+    }
+    if (supplyManifestWaiters[key]) {
+      supplyManifestWaiters[key].push(callback);
+      return;
+    }
+
+    supplyManifestWaiters[key] = [callback];
+    frappe.call({
+      method: api.manifest,
+      args: { mr: frm.doc.name },
+      callback: function(response) {
+        var manifest = response.message || {};
+        supplyManifestCache[key] = manifest;
+        var waiters = supplyManifestWaiters[key] || [];
+        delete supplyManifestWaiters[key];
+        waiters.forEach(function(waiter) { waiter(manifest); });
+      },
+      error: function() {
+        var waiters = supplyManifestWaiters[key] || [];
+        delete supplyManifestWaiters[key];
+        waiters.forEach(function(waiter) { waiter(null); });
+      }
+    });
+  }
+
+  function supplyRequestItemsTable(requestItems) {
+    if (!requestItems.length) return "";
+    var hasUom = requestItems.some(function(row) { return !!row.uom; });
+    var body = requestItems.map(function(row) {
+      return '<tr>'
+        + '<td style="padding:9px 8px;border-bottom:1px solid var(--border-color);direction:ltr;text-align:left;font-weight:800;">' + escapeHtml(row.item_code) + '</td>'
+        + '<td style="padding:9px 8px;border-bottom:1px solid var(--border-color);text-align:right;direction:rtl;">' + escapeHtml(row.item_name) + '</td>'
+        + '<td style="padding:9px 8px;border-bottom:1px solid var(--border-color);text-align:center;direction:ltr;font-weight:800;">' + formatCount(row.quantity) + '</td>'
+        + (hasUom ? '<td style="padding:9px 8px;border-bottom:1px solid var(--border-color);text-align:center;direction:rtl;">' + escapeHtml(row.uom) + '</td>' : '')
+        + '</tr>';
+    }).join("");
+    return '<div style="font-size:15px;font-weight:900;margin-top:16px;">أصناف الطلب</div>'
+      + '<div style="margin-top:8px;overflow:auto;border:1px solid var(--border-color);border-radius:10px;">'
+      + '<table style="width:100%;min-width:600px;border-collapse:collapse;table-layout:fixed;direction:rtl;">'
+      + '<thead style="background:var(--control-bg);"><tr>'
+      + '<th style="padding:9px 8px;text-align:left;direction:ltr;color:var(--text-muted);font-size:12px;">الكود</th>'
+      + '<th style="padding:9px 8px;text-align:right;direction:rtl;color:var(--text-muted);font-size:12px;">الصنف</th>'
+      + '<th style="padding:9px 8px;text-align:center;color:var(--text-muted);font-size:12px;">الكمية</th>'
+      + (hasUom ? '<th style="padding:9px 8px;text-align:center;direction:rtl;color:var(--text-muted);font-size:12px;">الوحدة</th>' : '')
+      + '</tr></thead><tbody>' + body + '</tbody></table></div>';
+  }
+
+  function supplyComponentsTable(components) {
+    if (!components.length) return "";
+    var hasColor = components.some(function(row) { return !!row.color; });
+    var hasItemCode = components.some(function(row) { return !!row.item_code; });
+    var body = components.map(function(row) {
+      return '<tr>'
+        + '<td style="padding:9px 8px;border-bottom:1px solid var(--border-color);text-align:right;direction:rtl;font-weight:800;">' + escapeHtml(row.component) + '</td>'
+        + (hasColor ? '<td style="padding:9px 8px;border-bottom:1px solid var(--border-color);text-align:right;direction:rtl;">' + escapeHtml(row.color) + '</td>' : '')
+        + (hasItemCode ? '<td style="padding:9px 8px;border-bottom:1px solid var(--border-color);direction:ltr;text-align:left;">' + escapeHtml(row.item_code) + '</td>' : '')
+        + '<td style="padding:9px 8px;border-bottom:1px solid var(--border-color);text-align:right;direction:rtl;">' + escapeHtml(row.category) + '</td>'
+        + '<td style="padding:9px 8px;border-bottom:1px solid var(--border-color);text-align:center;direction:rtl;">' + escapeHtml(row.package_label) + '</td>'
+        + '<td style="padding:9px 8px;border-bottom:1px solid var(--border-color);text-align:center;direction:ltr;font-weight:800;">' + formatCount(row.package_count) + '</td>'
+        + '<td style="padding:9px 8px;border-bottom:1px solid var(--border-color);text-align:center;direction:ltr;font-weight:800;">' + formatCount(row.total_qty) + '</td>'
+        + '</tr>';
+    }).join("");
+    return '<div style="font-size:15px;font-weight:900;margin-top:16px;">مكونات الطلب</div>'
+      + '<div style="margin-top:8px;overflow:auto;border:1px solid var(--border-color);border-radius:10px;">'
+      + '<table style="width:100%;min-width:760px;border-collapse:collapse;table-layout:fixed;direction:rtl;">'
+      + '<thead style="background:var(--control-bg);"><tr>'
+      + '<th style="padding:9px 8px;text-align:right;direction:rtl;color:var(--text-muted);font-size:12px;">المكون</th>'
+      + (hasColor ? '<th style="padding:9px 8px;text-align:right;direction:rtl;color:var(--text-muted);font-size:12px;">اللون</th>' : '')
+      + (hasItemCode ? '<th style="padding:9px 8px;text-align:left;direction:ltr;color:var(--text-muted);font-size:12px;">كود المخزن</th>' : '')
+      + '<th style="padding:9px 8px;text-align:right;direction:rtl;color:var(--text-muted);font-size:12px;">المسار</th>'
+      + '<th style="padding:9px 8px;text-align:center;direction:rtl;color:var(--text-muted);font-size:12px;">التغليف</th>'
+      + '<th style="padding:9px 8px;text-align:center;color:var(--text-muted);font-size:12px;">عدد الحزم</th>'
+      + '<th style="padding:9px 8px;text-align:center;color:var(--text-muted);font-size:12px;">إجمالي الكمية</th>'
+      + '</tr></thead><tbody>' + body + '</tbody></table></div>';
+  }
+
+  function showSupplyPrintFallback(frm) {
+    frappe.msgprint({
+      title: "ملصقات مكونات التوريد جاهزة",
+      indicator: "green",
+      message: '<div dir="rtl" style="text-align:right;">منع المتصفح فتح نافذة الطباعة تلقائيًا. '
+        + '<a class="btn btn-primary btn-sm" target="_blank" rel="noopener" href="' + escapeHtml(supplyPrintUrl(frm)) + '">فتح الملصقات</a></div>'
+    });
+  }
+
+  function prepareAndPrintSupplyManifest(frm) {
+    if (preparingSupplyPrint) return;
+    if (frm.is_new()) {
+      frappe.msgprint("احفظ طلب المواد قبل طباعة مكونات التوريد.");
+      return;
+    }
+    if (formHasUnsavedDeliveryChanges(frm)) {
+      frappe.msgprint("احفظ طلب المواد أولًا حتى تتم الطباعة من آخر بيانات محفوظة.");
+      return;
+    }
+
+    preparingSupplyPrint = true;
+    var printWindow = window.open("about:blank", "_blank");
+    frappe.call({
+      method: api.sync,
+      args: { mr: frm.doc.name },
+      freeze: true,
+      freeze_message: "جاري تجهيز مكونات التوريد للطباعة...",
+      callback: function(response) {
+        var packages = (response.message && response.message.packages) || [];
+        var packageCount = packages.filter(isSupplyPackage).length;
+        if (!packageCount) {
+          preparingSupplyPrint = false;
+          closePreparingWindow(printWindow);
+          frappe.msgprint("لا توجد مكونات توريد قابلة للطباعة في طلب المواد الحالي.");
+          clearSupplyManifestCache();
+          frm.reload_doc();
+          return;
+        }
+
+        if (printWindow && !printWindow.closed) {
+          try {
+            printWindow.location.replace(supplyPrintUrl(frm));
+          } catch (error) {
+            closePreparingWindow(printWindow);
+            showSupplyPrintFallback(frm);
+          }
+        } else {
+          showSupplyPrintFallback(frm);
+        }
+        frappe.show_alert({
+          message: "تم تجهيز " + packageCount + " ملصق لمكونات التوريد.",
+          indicator: "green"
+        }, 7);
+        preparingSupplyPrint = false;
+        clearSupplyManifestCache();
+        frm.reload_doc();
+      },
+      error: function() {
+        preparingSupplyPrint = false;
+        closePreparingWindow(printWindow);
+      }
+    });
+  }
+
+  function appendSupplyManifest(frm, wrapper, manifest) {
+    wrapper.find(".delivery-supply-manifest").remove();
+    if (!manifest) {
+      wrapper.append('<div class="delivery-supply-manifest" dir="rtl" style="padding:14px;border:1px solid var(--border-color);border-radius:10px;color:var(--text-muted);text-align:right;">تعذر تحميل قائمة مكونات التوريد.</div>');
+      return;
+    }
+    var requestItems = manifest.request_items || [];
+    var components = manifest.components || [];
+    var summary = '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px;">'
+      + '<span style="padding:5px 10px;border-radius:999px;background:var(--control-bg);font-weight:800;">أصناف الطلب: ' + formatCount(manifest.request_item_count || 0) + '</span>'
+      + '<span style="padding:5px 10px;border-radius:999px;background:var(--control-bg);font-weight:800;">المكونات: ' + formatCount(manifest.component_count || 0) + '</span>'
+      + '<span style="padding:5px 10px;border-radius:999px;background:var(--control-bg);font-weight:800;">الحزم: ' + formatCount(manifest.package_count || 0) + '</span>'
+      + '</div>';
+    var section = $('<div class="delivery-supply-manifest" dir="rtl" style="padding:16px;border:1px solid var(--border-color);border-radius:12px;background:var(--card-bg);margin:12px 0;text-align:right;">'
+      + '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;">'
+      + '<div><div style="font-size:18px;font-weight:900;margin-bottom:4px;">مكونات التوريد</div>'
+      + '<div style="color:var(--text-muted);">قائمة مستقلة تجمع أصناف الطلب وكل مكونات التوريد. لا تغيّر تصنيع الأبواب أو القطاعات ولا تستخدم حالات جاهزية أو مسح باركود.</div></div>'
+      + (components.length ? '<button type="button" class="btn btn-default btn-sm delivery-supply-print-btn">طباعة مكونات التوريد</button>' : '')
+      + '</div>' + summary + supplyRequestItemsTable(requestItems) + supplyComponentsTable(components) + '</div>');
+    wrapper.append(section);
+    section.find(".delivery-supply-print-btn").on("click", function(event) {
+      event.preventDefault();
+      prepareAndPrintSupplyManifest(frm);
+    });
+  }
+
+  function renderSupplyManifest(frm, field) {
+    var wrapper = field && field.$wrapper;
+    if (!wrapper || !wrapper.length) return;
+    wrapper.find(".delivery-supply-manifest").remove();
+    fetchSupplyManifest(frm, function(manifest) {
+      var currentField = frm.fields_dict && frm.fields_dict.custom_delivery_component_dashboard;
+      var currentWrapper = currentField && currentField.$wrapper;
+      if (currentWrapper && currentWrapper.length) {
+        appendSupplyManifest(frm, currentWrapper, manifest);
+      }
+    });
+  }
+
   function renderUnifiedDashboard(frm) {
     var field = frm.fields_dict.custom_delivery_component_dashboard;
     if (!field) return true;
@@ -548,10 +762,8 @@
       return true;
     }
 
-    var packageRows = rows(frm);
-    var totalPackages = flt(frm.doc.custom_delivery_component_total_packages || 0) || packageRows.filter(function(row) {
-      return isBarcodeRoute(row);
-    }).length;
+    var packageRows = rows(frm).filter(isBarcodeRoute);
+    var totalPackages = packageRows.length;
     var registeredPackages = packageRows.filter(function(row) {
       if (!isBarcodeRoute(row)) return false;
       var packageQty = flt(row.package_qty || 0);
@@ -561,14 +773,8 @@
         || ["جاهز", "محمل", "تم التوريد"].indexOf(trackingStatus) !== -1;
     }).length;
     var remainingPackages = Math.max(totalPackages - registeredPackages, 0);
-    var deliveryOnlyComponents = packageRows.filter(function(row) {
-      return trackingRoute(row.tracking_route) === "توريد فقط - بدون باركود";
-    }).length;
-    var withDoorComponents = packageRows.filter(function(row) {
-      return trackingRoute(row.tracking_route) === "مع الباب";
-    }).length;
     var statusText = totalPackages <= 0
-      ? (packageRows.length ? "لا تتطلب باركود" : "لا توجد مكونات")
+      ? "لا توجد قطاعات"
       : remainingPackages <= 0
         ? "مكتمل"
         : registeredPackages > 0 ? "جزئي" : "غير جاهز";
@@ -640,7 +846,7 @@
       + '<th style="padding:9px 8px; text-align:center; direction:rtl; color:var(--text-muted); font-size:12px; white-space:nowrap;">الحالة</th>'
       + trailingHeaders
       + '</tr></thead><tbody>' + packageRowsHtml + '</tbody></table></div></div>'
-      : '<div style="margin-top:12px; color:var(--text-muted);">لا توجد حزم بعد. استخدم زر طباعة باركود القطاعات أعلى لوحة التصنيع لتجهيزها تلقائيًا.</div>';
+      : '<div style="margin-top:12px; color:var(--text-muted);">لا توجد حزم قطاعات تتطلب باركود تصنيع.</div>';
 
     var html = ''
       + '<div class="delivery-component-wrap" data-delivery-tracking-source="custom-app" style="padding:16px; border:1px solid var(--border-color); border-radius:12px; background:var(--card-bg); margin-bottom:12px;">'
@@ -656,15 +862,16 @@
       + '<div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:14px;">'
       + statCard("حزم القطاعات المصنعة", formatCount(registeredPackages) + " / " + formatCount(totalPackages), remainingPackages > 0 ? "amber" : "green")
       + statCard("المتبقي", formatCount(remainingPackages), remainingPackages > 0 ? "amber" : "green")
-      + (deliveryOnlyComponents ? statCard("مكونات توريد فقط", formatCount(deliveryOnlyComponents), "default") : "")
-      + (withDoorComponents ? statCard("مكونات مع الباب", formatCount(withDoorComponents), "default") : "")
       + statCard("رمز الطلب", escapeHtml(requestCode), "default")
       + '</div>'
       + tableHtml
       + '</div>';
     frm.set_df_property("custom_delivery_component_dashboard", "options", html);
     frm.refresh_field("custom_delivery_component_dashboard");
-    if (field.$wrapper) bindDashboardInteractions(field, frm);
+    if (field.$wrapper) {
+      bindDashboardInteractions(field, frm);
+      renderSupplyManifest(frm, field);
+    }
     setupRealtime();
     setupFocusFallback();
     return true;
@@ -725,9 +932,19 @@
     window.addEventListener("focus", maybeReloadOnFocus);
   }
 
+  window.namar_delivery_supply_manifest = {
+    render: function(frm) {
+      var field = frm && frm.fields_dict && frm.fields_dict.custom_delivery_component_dashboard;
+      renderSupplyManifest(frm, field);
+    },
+    prepare_and_print: prepareAndPrintSupplyManifest,
+    clear_cache: clearSupplyManifestCache
+  };
+  window.namar_delivery_only_components = window.namar_delivery_supply_manifest;
+
   window.namar_delivery_tracking = window.namar_delivery_tracking || {};
   window.namar_delivery_tracking.delivery_components = {
-    interface_version: 3,
+    interface_version: 4,
     render_material_request: renderUnifiedDashboard,
     sync_packages: syncPackages,
     prepare_and_print: prepareAndPrintPackages

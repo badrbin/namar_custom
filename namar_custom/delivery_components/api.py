@@ -33,6 +33,16 @@ def get_delivery_component_packages(
     )
 
 
+@frappe.whitelist()
+def get_delivery_supply_manifest(
+    mr: str | None = None,
+    material_request: str | None = None,
+):
+    return service.get_delivery_supply_manifest(
+        _material_request_name(mr, material_request)
+    )
+
+
 @frappe.whitelist(allow_guest=True)
 def mark_delivery_component_package_ready(
     mr: str | None = None,

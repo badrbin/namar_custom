@@ -44,6 +44,9 @@ from namar_custom.delivery_components.tracking_code_logic import (
     normalize_tracking_code,
 )
 from namar_custom.delivery_components.tracking_codes import ensure_material_request_tracking_code
+from namar_custom.delivery_components.supply_manifest import (
+    build_delivery_supply_manifest as build_supply_manifest,
+)
 
 
 PACKAGE_DOCTYPE = "Material Request Delivery Component Package"
@@ -1348,6 +1351,17 @@ def get_delivery_component_packages(
         "needs_sync": 1 if needs_sync else 0,
         "fulfillment": overall,
     }
+
+
+def get_delivery_supply_manifest(material_request: str | None = None) -> dict[str, Any]:
+    material_request = normalize_material_request(material_request)
+    if not material_request:
+        frappe.throw("اسم طلب المواد مطلوب")
+    if not frappe.db.exists("Material Request", material_request):
+        frappe.throw("طلب المواد غير موجود: " + material_request)
+
+    mr_doc = ensure_material_request_access(material_request)
+    return build_supply_manifest(mr_doc)
 
 
 def publish_package_changed_event(material_request: str, package_row: dict[str, Any], summary: dict[str, Any]) -> None:
