@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import re
@@ -13,6 +14,7 @@ MAX_LIMIT_START = 1_000_000
 
 FOLLOWUP_BUCKETS = ("all", "open", "overdue", "today", "upcoming", "recent")
 PRIORITIES = ("High", "Medium", "Low")
+MENTION_BUCKETS = ("open", "unread", "converted", "closed")
 
 MAX_SEARCH_LENGTH = 140
 MAX_DESCRIPTION_LENGTH = 4_000
@@ -21,6 +23,11 @@ MAX_NOTE_LENGTH = 4_000
 MAX_REFERENCE_LENGTH = 140
 
 HTML_TAG_PATTERN = re.compile(r"<[^>]*>")
+SAFE_REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]+$")
+MENTION_EVENT_KEY_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+MENTION_STALE_MESSAGE = (
+    "تم تحديث هذه الإشارة منذ عرضها. حمّل أحدث التفاصيل ثم أعد المحاولة."
+)
 
 
 def clean_text(value: Any, max_length: int | None = None) -> str:
@@ -88,6 +95,102 @@ def normalize_priority_filter(value: Any) -> str:
     if not priority:
         return ""
     return normalize_priority(priority)
+
+
+def normalize_mention_bucket(value: Any) -> str:
+    bucket = clean_text(value, 20).lower() or "open"
+    if bucket not in MENTION_BUCKETS:
+        raise ValueError("تبويب وارد الإشارات غير صحيح")
+    return bucket
+
+
+def normalize_seen(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value != 0
+
+    normalized = clean_text(value, 10).lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError("قيمة المشاهدة يجب أن تكون صحيحة أو خاطئة")
+
+
+def normalize_request_id(value: Any) -> str:
+    request_id = require_text(value, "معرّف الطلب", MAX_REFERENCE_LENGTH)
+    if not SAFE_REQUEST_ID_PATTERN.fullmatch(request_id):
+        raise ValueError("معرّف الطلب يحتوي محارف غير مسموحة")
+    return request_id
+
+
+def normalize_expected_mention_event_key(value: Any) -> str:
+    event_key = require_text(value, "نسخة الإشارة", MAX_REFERENCE_LENGTH)
+    if not MENTION_EVENT_KEY_PATTERN.fullmatch(event_key):
+        raise ValueError("رمز نسخة الإشارة غير صحيح")
+    return event_key
+
+
+def validate_expected_mention_event_key(expected: Any, current: Any) -> str:
+    event_key = normalize_expected_mention_event_key(expected)
+    if event_key != clean_text(current, MAX_REFERENCE_LENGTH):
+        raise ValueError(MENTION_STALE_MESSAGE)
+    return event_key
+
+
+def _stable_digest(*parts: Any) -> str:
+    payload = "\x1f".join("" if part is None else str(part) for part in parts)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def mention_thread_key(for_user: Any, reference_doctype: Any, reference_name: Any) -> str:
+    return _stable_digest(
+        require_text(for_user, "المستخدم", MAX_REFERENCE_LENGTH),
+        require_text(reference_doctype, "نوع المستند المرجعي", MAX_REFERENCE_LENGTH),
+        require_text(reference_name, "المستند المرجعي", MAX_REFERENCE_LENGTH),
+    )
+
+
+def mention_event_key(
+    for_user: Any,
+    comment_name: Any,
+    comment_modified: Any,
+    content: Any,
+) -> str:
+    return _stable_digest(
+        "Mention",
+        require_text(for_user, "المستخدم", MAX_REFERENCE_LENGTH),
+        require_text(comment_name, "التعليق", MAX_REFERENCE_LENGTH),
+        require_text(comment_modified, "وقت تعديل التعليق", MAX_REFERENCE_LENGTH),
+        "" if content is None else str(content),
+    )
+
+
+def mention_reply_event_key(thread_name: Any, user: Any, request_id: Any) -> str:
+    return _stable_digest(
+        "Reply",
+        require_text(thread_name, "عنصر الوارد", MAX_REFERENCE_LENGTH),
+        require_text(user, "المستخدم", MAX_REFERENCE_LENGTH),
+        normalize_request_id(request_id),
+    )
+
+
+def mention_state_event_key(
+    event_type: Any,
+    thread_name: Any,
+    user: Any,
+    previous_modified: Any,
+) -> str:
+    normalized_type = require_text(event_type, "نوع الحدث", 40)
+    if normalized_type not in {"Closed", "Reopened", "Converted"}:
+        raise ValueError("نوع حدث الحالة غير صحيح")
+    return _stable_digest(
+        normalized_type,
+        require_text(thread_name, "عنصر الوارد", MAX_REFERENCE_LENGTH),
+        require_text(user, "المستخدم", MAX_REFERENCE_LENGTH),
+        require_text(previous_modified, "وقت الحالة السابقة", MAX_REFERENCE_LENGTH),
+    )
 
 
 def normalize_date(value: Any, label: str = "التاريخ") -> str:

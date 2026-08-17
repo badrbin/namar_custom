@@ -9,6 +9,28 @@ app_license = "MIT"
 
 boot_session = "namar_test.boot.boot_session"
 
+permission_query_conditions = {
+    "Namar Mention Thread": (
+        "namar_test.namar_test.doctype.namar_mention_thread."
+        "namar_mention_thread.get_permission_query_conditions"
+    ),
+    "Namar Mention Event": (
+        "namar_test.namar_test.doctype.namar_mention_event."
+        "namar_mention_event.get_permission_query_conditions"
+    ),
+}
+
+has_permission = {
+    "Namar Mention Thread": (
+        "namar_test.namar_test.doctype.namar_mention_thread."
+        "namar_mention_thread.has_permission"
+    ),
+    "Namar Mention Event": (
+        "namar_test.namar_test.doctype.namar_mention_event."
+        "namar_mention_event.has_permission"
+    ),
+}
+
 fixtures = [
     {
         "dt": "DocType",
@@ -98,7 +120,14 @@ override_whitelisted_methods = {
 
 doc_events = {
     "Comment": {
-        "on_update": ["namar_test.comment_mentions.notify_new_mentions_on_comment_update"],
+        "after_insert": ["namar_test.mentions.events.capture_mentions_after_insert"],
+        "on_update": [
+            "namar_test.comment_mentions.notify_new_mentions_on_comment_update",
+            "namar_test.mentions.events.capture_mentions_on_update",
+        ],
+    },
+    "Notification Log": {
+        "before_insert": ["namar_test.mentions.events.link_notification_to_mention_thread"],
     },
     "Payment Entry": {
         "before_save": ["namar_test.events.stop_pay"],
