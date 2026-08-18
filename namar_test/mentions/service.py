@@ -245,13 +245,19 @@ def _thread_permissions(thread) -> dict[str, bool]:
 
 
 def _safe_threads(user: str) -> list[Any]:
-    rows = frappe.get_all(
-        THREAD_DOCTYPE,
-        fields=list(THREAD_FIELDS),
-        filters={"for_user": user},
-        order_by="latest_mentioned_at desc, modified desc",
-        limit_page_length=0,
-    )
+    rows = [
+        frappe._dict({fieldname: row.get(fieldname) for fieldname in THREAD_FIELDS})
+        for row in (
+            frappe.db.get_values(
+                THREAD_DOCTYPE,
+                {"for_user": user},
+                "*",
+                as_dict=True,
+                order_by="latest_mentioned_at desc, modified desc",
+            )
+            or []
+        )
+    ]
     permission_cache: dict[tuple[str, str], bool] = {}
     safe_rows: list[Any] = []
     for row in rows:
