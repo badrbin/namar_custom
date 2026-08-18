@@ -535,6 +535,7 @@ class SmokeRunner:
     def mentions(self, bucket: str, *, page_length: int = 25) -> dict[str, Any]:
         payload = self.client.call(
             "get_mentions",
+            http_method="POST",
             args={
                 "bucket": bucket,
                 "search": self.run_id,
@@ -549,6 +550,7 @@ class SmokeRunner:
     def detail(self, thread_name: str) -> dict[str, Any]:
         payload = self.client.call(
             "get_mention_detail",
+            http_method="POST",
             args={"thread_name": thread_name},
         )
         if not isinstance(payload, dict):
@@ -727,6 +729,39 @@ class SmokeRunner:
             if attempt < POLL_ATTEMPTS:
                 time.sleep(POLL_INTERVAL_SECONDS)
         raise SmokeFailure("لم يتغير last_event_key ضمن مهلة polling لاختبار stale token")
+
+    def wait_for_seen_state(self, expected_event_key: str) -> None:
+        last_state: dict[str, Any] = {}
+        for attempt in range(1, POLL_ATTEMPTS + 1):
+            detail_payload = self.detail(self.thread_name)
+            mention = detail_mention(detail_payload)
+            current_event_key = normalize_text(mention.get("last_event_key"))
+            last_seen_event_key = normalize_text(mention.get("last_seen_event_key"))
+            unread_item = find_item(self.mentions("unread"), self.thread_name)
+            last_state = {
+                "last_event_key": current_event_key,
+                "last_seen_event_key": last_seen_event_key,
+                "unread": bool(mention.get("unread")),
+                "listed_in_unread": bool(unread_item),
+            }
+            if current_event_key != expected_event_key:
+                raise SmokeFailure(
+                    "وصل حدث Mention جديد أثناء التحقق من القراءة؛ "
+                    f"expected={expected_event_key} current={current_event_key}"
+                )
+            if (
+                last_seen_event_key == expected_event_key
+                and not last_state["unread"]
+                and not last_state["listed_in_unread"]
+            ):
+                self.check("mark_mention_seen", f"attempt={attempt}")
+                return
+            if attempt < POLL_ATTEMPTS:
+                time.sleep(POLL_INTERVAL_SECONDS)
+        raise SmokeFailure(
+            "لم تتسق حالة القراءة ضمن مهلة polling: "
+            + json.dumps(last_state, ensure_ascii=False, sort_keys=True)
+        )
 
     def marker_comment_names(self) -> set[str]:
         rows = self.client.list_docs(
@@ -1138,6 +1173,7 @@ class SmokeRunner:
         self.wait_for_thread()
         candidates = self.client.call(
             "search_reply_mentions",
+            http_method="POST",
             args={"thread_name": self.thread_name, "search_term": ""},
         )
         ensure(isinstance(candidates, list), "search_reply_mentions لم ترجع قائمة")
@@ -1183,8 +1219,13 @@ class SmokeRunner:
             ensure(permissions.get(permission) is True, f"الصلاحية {permission} ليست مفعلة")
         self.check("detail + messages + permissions")
 
-        expected_event_key = self.current_event_key()
-        self.client.call(
+        expected_event_key = normalize_text(mention.get("last_event_key"))
+        ensure(
+            len(expected_event_key) == 64
+            and all(char in "0123456789abcdef" for char in expected_event_key.lower()),
+            "last_event_key المعروض في التفاصيل غير صالح",
+        )
+        seen_response = self.client.call(
             "mark_mention_seen",
             http_method="POST",
             args={
@@ -1193,10 +1234,18 @@ class SmokeRunner:
                 "expected_last_event_key": expected_event_key,
             },
         )
-        detail_payload = self.detail(self.thread_name)
-        ensure(not bool(detail_mention(detail_payload).get("unread")), "mark_mention_seen لم يحدّث unread")
-        ensure(not find_item(self.mentions("unread"), self.thread_name), "Thread بقيت في bucket=unread")
-        self.check("mark_mention_seen")
+        ensure(isinstance(seen_response, dict), "mark_mention_seen لم يرجع كائنًا")
+        seen_mention = seen_response.get("mention") or {}
+        ensure(
+            normalize_text(seen_mention.get("last_event_key")) == expected_event_key,
+            "mark_mention_seen غيّر last_event_key",
+        )
+        ensure(
+            normalize_text(seen_mention.get("last_seen_event_key")) == expected_event_key,
+            "mark_mention_seen لم يحفظ last_seen_event_key",
+        )
+        ensure(not bool(seen_mention.get("unread")), "mark_mention_seen لم يحدّث unread في الاستجابة")
+        self.wait_for_seen_state(expected_event_key)
 
         self.run_optional_self_reply()
 
