@@ -245,6 +245,8 @@ def _thread_permissions(thread) -> dict[str, bool]:
 
 
 def _safe_threads(user: str) -> list[Any]:
+    # Keep the proven Document load path here, then immediately reduce every
+    # row to the public thread allowlist before any filtering or serialization.
     rows = [
         frappe._dict({fieldname: row.get(fieldname) for fieldname in THREAD_FIELDS})
         for row in (
