@@ -1839,9 +1839,17 @@ class SmokeRunner:
             reply_events = [
                 row for row in messages if row.get("request_id") == request_id
             ]
+            mention_events = [
+                row
+                for row in messages
+                if row.get("event_type") == "Mention"
+                and normalize_text(row.get("comment")) == first_comment_name
+            ]
             if (
-                normalize_text(mention.get("last_event_key")) != expected_event_key
-                and len(reply_events) == 1
+                len(reply_events) == 1
+                and len(mention_events) == 1
+                and normalize_text(mention.get("last_event_key"))
+                == normalize_text(mention_events[0].get("event_key"))
             ):
                 self.check(
                     "reply_mention بمنشن ذاتي والتقاط وارد واحد",
@@ -1852,7 +1860,7 @@ class SmokeRunner:
                 time.sleep(POLL_INTERVAL_SECONDS)
         else:
             raise SmokeFailure(
-                "لم يلتقط الرد الذاتي كمنشن واحد ضمن مهلة polling"
+                "لم يلتقط الرد الذاتي كحدث Mention واحد مطابق للتعليق ضمن مهلة polling"
             )
 
         close_request_id = f"{self.run_id}-REPLY-CLOSE"
