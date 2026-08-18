@@ -32,7 +32,7 @@ import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 from urllib.parse import quote, urlparse
 from uuid import uuid4
 
@@ -48,6 +48,40 @@ KNOWN_PRODUCTION_HOSTS = {"erp.namar.net"}
 MAX_RESOURCES = 20
 POLL_ATTEMPTS = 15
 POLL_INTERVAL_SECONDS = 1.0
+MAX_HTTP_TRANSCRIPT_ENTRIES = 250
+MAX_SEEN_OBSERVATIONS = 64
+
+TRANSCRIPT_REQUEST_HEADERS = ("Cache-Control", "Pragma")
+TRANSCRIPT_RESPONSE_HEADERS = (
+    "X-Frappe-Request-Id",
+    "Date",
+    "Age",
+    "Cache-Control",
+    "ETag",
+    "Last-Modified",
+    "Vary",
+    "X-Cache-Status",
+    "X-Proxy-Upstream",
+    "CF-Cache-Status",
+    "Via",
+    "Server",
+)
+TRANSCRIPT_SAFE_ARGUMENTS = {
+    "bucket",
+    "limit_start",
+    "page_length",
+    "thread_name",
+    "expected_last_event_key",
+    "seen",
+}
+MENTION_STATE_FIELDS = (
+    "name",
+    "last_event_key",
+    "last_seen_event_key",
+    "unread",
+    "status",
+    "modified",
+)
 
 THREAD_REQUIRED_FIELDS = {
     "thread_key",
@@ -180,6 +214,55 @@ def digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def selected_headers(
+    headers: Any,
+    allowed: Iterable[str],
+) -> dict[str, str]:
+    """Return only explicitly allowlisted, bounded HTTP headers."""
+
+    selected: dict[str, str] = {}
+    if not headers:
+        return selected
+    for name in allowed:
+        value = headers.get(name)
+        if value is not None:
+            selected[name] = normalize_text(value)[:500]
+    return selected
+
+
+def safe_request_arguments(
+    params: dict[str, Any] | None,
+    payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Keep diagnostic request shape without persisting free text or credentials."""
+
+    values = params if params is not None else payload or {}
+    safe: dict[str, Any] = {}
+    for key in sorted(TRANSCRIPT_SAFE_ARGUMENTS.intersection(values)):
+        value = values.get(key)
+        if value is None or isinstance(value, (bool, int, float)):
+            safe[key] = value
+        else:
+            safe[key] = normalize_text(value)[:200]
+
+    if "search" in values:
+        raw_search = "" if values.get("search") is None else str(values.get("search"))
+        normalized_search = raw_search.strip()
+        safe["search"] = {
+            "length": len(raw_search),
+            "trailing_whitespace": len(raw_search) - len(raw_search.rstrip()),
+            "sha256": digest(raw_search),
+            "normalized_sha256": digest(normalized_search),
+        }
+    return safe
+
+
+def mention_state(item: Any) -> dict[str, Any] | None:
+    if not isinstance(item, dict):
+        return None
+    return {key: item.get(key) for key in MENTION_STATE_FIELDS}
+
+
 def parse_server_message(response: requests.Response) -> str:
     try:
         data = response.json()
@@ -220,6 +303,9 @@ class FrappeClient:
     def __init__(self, config: SmokeConfig):
         self.config = config
         self.session = requests.Session()
+        self._request_observer: Callable[[dict[str, Any]], None] | None = None
+        self._request_seq = 0
+        self.last_request_seq: int | None = None
         self.session.headers.update(
             {
                 "Authorization": config.token,
@@ -229,6 +315,28 @@ class FrappeClient:
             }
         )
 
+    def set_request_observer(
+        self,
+        observer: Callable[[dict[str, Any]], None],
+        *,
+        start_seq: int = 0,
+    ) -> None:
+        self._request_observer = observer
+        self._request_seq = max(0, int(start_seq))
+        self.last_request_seq = None
+
+    def _finish_request_transcript(
+        self,
+        entry: dict[str, Any],
+        *,
+        started_monotonic: float,
+    ) -> None:
+        entry["finished_at_utc"] = datetime.now(timezone.utc).isoformat()
+        entry["duration_ms"] = round((time.perf_counter() - started_monotonic) * 1000, 3)
+        self.last_request_seq = int(entry["seq"])
+        if self._request_observer:
+            self._request_observer(entry)
+
     def raw_request(
         self,
         method: str,
@@ -236,14 +344,46 @@ class FrappeClient:
         *,
         params: dict[str, Any] | None = None,
         payload: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> requests.Response:
-        return self.session.request(
-            method,
-            self.config.base_url + path,
-            params=params,
-            json=payload,
-            timeout=self.config.timeout,
+        self._request_seq += 1
+        started_monotonic = time.perf_counter()
+        entry: dict[str, Any] = {
+            "seq": self._request_seq,
+            "started_at_utc": datetime.now(timezone.utc).isoformat(),
+            "method": method.upper(),
+            "url": self.config.base_url + path,
+            "path": path,
+            "query_keys": sorted((params or {}).keys()),
+            "body_keys": sorted((payload or {}).keys()),
+            "safe_args": safe_request_arguments(params, payload),
+            # Authorization/Cookie and all inherited Session headers are deliberately absent.
+            "request_headers": selected_headers(headers, TRANSCRIPT_REQUEST_HEADERS),
+        }
+        try:
+            response = self.session.request(
+                method,
+                self.config.base_url + path,
+                params=params,
+                json=payload,
+                headers=headers,
+                timeout=self.config.timeout,
+            )
+        except requests.RequestException as exc:
+            entry["error_type"] = type(exc).__name__
+            self._finish_request_transcript(entry, started_monotonic=started_monotonic)
+            raise
+
+        entry["status"] = response.status_code
+        effective_url = normalize_text(getattr(response.request, "url", ""))
+        if effective_url:
+            entry["effective_url_sha256"] = digest(effective_url)
+        entry["response_headers"] = selected_headers(
+            response.headers,
+            TRANSCRIPT_RESPONSE_HEADERS,
         )
+        self._finish_request_transcript(entry, started_monotonic=started_monotonic)
+        return response
 
     def request(
         self,
@@ -252,9 +392,16 @@ class FrappeClient:
         *,
         params: dict[str, Any] | None = None,
         payload: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
         expected: Iterable[int] = (200,),
     ) -> dict[str, Any]:
-        response = self.raw_request(method, path, params=params, payload=payload)
+        response = self.raw_request(
+            method,
+            path,
+            params=params,
+            payload=payload,
+            headers=headers,
+        )
         if response.status_code not in set(expected):
             raise HttpFailure(method, path, response.status_code, parse_server_message(response))
         if not response.content:
@@ -273,12 +420,23 @@ class FrappeClient:
         *,
         http_method: str = "GET",
         args: dict[str, Any] | None = None,
+        request_headers: dict[str, str] | None = None,
     ) -> Any:
         path = f"{API_BASE}.{method_name}"
         if http_method == "GET":
-            data = self.request("GET", path, params=args or {})
+            data = self.request(
+                "GET",
+                path,
+                params=args or {},
+                headers=request_headers,
+            )
         else:
-            data = self.request("POST", path, payload=args or {})
+            data = self.request(
+                "POST",
+                path,
+                payload=args or {},
+                headers=request_headers,
+            )
         return data.get("message")
 
     def get_logged_user(self) -> str:
@@ -439,6 +597,19 @@ class SmokeRunner:
         self.marker = normalize_text(manifest.get("marker"))
         self.reference_name = normalize_text(manifest.get("reference_name"))
         self.thread_name = normalize_text(manifest.get("thread_name"))
+        transcript = self.manifest.setdefault("http_transcript", [])
+        transcript_seq = max(
+            (
+                int(row.get("seq") or 0)
+                for row in transcript
+                if isinstance(row, dict)
+            ),
+            default=0,
+        )
+        self.client.set_request_observer(
+            self.record_http_exchange,
+            start_seq=transcript_seq,
+        )
 
     @classmethod
     def new(
@@ -465,6 +636,8 @@ class SmokeRunner:
             "resources": [],
             "checks": [],
             "warnings": [],
+            "http_transcript": [],
+            "seen_state_observations": [],
             "contains_secrets": False,
         }
         runner = cls(
@@ -486,6 +659,68 @@ class SmokeRunner:
         )
         os.chmod(temporary, 0o600)
         temporary.replace(self.manifest_path)
+
+    def record_http_exchange(self, entry: dict[str, Any]) -> None:
+        transcript = self.manifest.setdefault("http_transcript", [])
+        if len(transcript) >= MAX_HTTP_TRANSCRIPT_ENTRIES:
+            if not self.manifest.get("http_transcript_truncated"):
+                self.manifest["http_transcript_truncated"] = True
+                self.save_manifest()
+            return
+        persisted = dict(entry)
+        persisted["run_status"] = self.manifest.get("status")
+        transcript.append(persisted)
+        self.save_manifest()
+
+    def record_seen_observation(
+        self,
+        *,
+        label: str,
+        source: str,
+        expected_event_key: str,
+        attempt: int,
+        item: dict[str, Any] | None = None,
+        list_payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        observations = self.manifest.setdefault("seen_state_observations", [])
+        ensure(
+            len(observations) < MAX_SEEN_OBSERVATIONS,
+            "تجاوز transcript حالة القراءة الحد الآمن",
+        )
+        listed_item = (
+            find_item(list_payload, self.thread_name)
+            if isinstance(list_payload, dict)
+            else None
+        )
+        observed_item = listed_item if list_payload is not None else item
+        observation = {
+            "seq": len(observations) + 1,
+            "observed_at_utc": datetime.now(timezone.utc).isoformat(),
+            "http_seq": self.client.last_request_seq,
+            "label": label,
+            "source": source,
+            "attempt": attempt,
+            "expected_event_key": expected_event_key,
+            "listed_in_unread": bool(listed_item) if list_payload is not None else None,
+            "item": mention_state(observed_item),
+        }
+        if list_payload is not None:
+            response_search = "" if list_payload.get("search") is None else str(
+                list_payload.get("search")
+            )
+            observation["list_bucket"] = list_payload.get("bucket")
+            observation["list_response_search"] = {
+                "length": len(response_search),
+                "sha256": digest(response_search),
+            }
+            observation["list_total"] = list_payload.get("total")
+            observation["list_count_unread"] = (list_payload.get("counts") or {}).get(
+                "unread"
+            )
+        observations.append(observation)
+        # Persist before validation or sleeping so the first discrepant response is retained.
+        self.save_manifest()
+        return observed_item
 
     def check(self, title: str, detail: str = "تم") -> None:
         self.manifest.setdefault("checks", []).append(
@@ -532,16 +767,25 @@ class SmokeRunner:
         )
         self.save_manifest()
 
-    def mentions(self, bucket: str, *, page_length: int = 25) -> dict[str, Any]:
+    def mentions(
+        self,
+        bucket: str,
+        *,
+        page_length: int = 25,
+        http_method: str = "POST",
+        search: str | None = None,
+        request_headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         payload = self.client.call(
             "get_mentions",
-            http_method="POST",
+            http_method=http_method,
             args={
                 "bucket": bucket,
-                "search": self.run_id,
+                "search": self.run_id if search is None else search,
                 "limit_start": 0,
                 "page_length": page_length,
             },
+            request_headers=request_headers,
         )
         if not isinstance(payload, dict):
             raise SmokeFailure("get_mentions لم يرجع كائنًا")
@@ -730,29 +974,185 @@ class SmokeRunner:
                 time.sleep(POLL_INTERVAL_SECONDS)
         raise SmokeFailure("لم يتغير last_event_key ضمن مهلة polling لاختبار stale token")
 
+    def assert_observed_event_key(
+        self,
+        item: dict[str, Any] | None,
+        expected_event_key: str,
+        *,
+        label: str,
+    ) -> None:
+        if not item:
+            return
+        current_event_key = normalize_text(item.get("last_event_key"))
+        if current_event_key != expected_event_key:
+            raise SmokeFailure(
+                "وصل حدث Mention جديد أثناء التحقق من القراءة؛ "
+                f"source={label} expected={expected_event_key} current={current_event_key}"
+            )
+
+    def seen_state_is_consistent(
+        self,
+        detail_item: dict[str, Any],
+        unread_payload: dict[str, Any],
+        expected_event_key: str,
+    ) -> bool:
+        return bool(
+            normalize_text(detail_item.get("last_event_key")) == expected_event_key
+            and normalize_text(detail_item.get("last_seen_event_key"))
+            == expected_event_key
+            and not bool(detail_item.get("unread"))
+            and not find_item(unread_payload, self.thread_name)
+        )
+
+    def unread_bucket_invariant_broken(self, payload: dict[str, Any]) -> bool:
+        item = find_item(payload, self.thread_name)
+        if not item:
+            return False
+        last_event_key = normalize_text(item.get("last_event_key"))
+        last_seen_event_key = normalize_text(item.get("last_seen_event_key"))
+        return bool(
+            last_event_key
+            and last_event_key == last_seen_event_key
+            and not bool(item.get("unread"))
+        )
+
+    def observe_seen_detail(
+        self,
+        *,
+        label: str,
+        expected_event_key: str,
+        attempt: int,
+    ) -> dict[str, Any]:
+        detail_item = detail_mention(self.detail(self.thread_name))
+        self.record_seen_observation(
+            label=label,
+            source="detail",
+            expected_event_key=expected_event_key,
+            attempt=attempt,
+            item=detail_item,
+        )
+        self.assert_observed_event_key(
+            detail_item,
+            expected_event_key,
+            label=label,
+        )
+        return detail_item
+
+    def observe_unread_list(
+        self,
+        *,
+        label: str,
+        expected_event_key: str,
+        attempt: int,
+        http_method: str = "POST",
+        search: str | None = None,
+        request_headers: dict[str, str] | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        payload = self.mentions(
+            "unread",
+            http_method=http_method,
+            search=search,
+            request_headers=request_headers,
+        )
+        item = self.record_seen_observation(
+            label=label,
+            source="unread_list",
+            expected_event_key=expected_event_key,
+            attempt=attempt,
+            list_payload=payload,
+        )
+        self.assert_observed_event_key(item, expected_event_key, label=label)
+        return payload, item
+
     def wait_for_seen_state(self, expected_event_key: str) -> None:
+        # First take three equivalent list reads with deliberately different HTTP cache keys.
+        detail_item = self.observe_seen_detail(
+            label="post_mark_post_detail",
+            expected_event_key=expected_event_key,
+            attempt=0,
+        )
+
+        exact_get, exact_item = self.observe_unread_list(
+            label="post_mark_get_unread_exact",
+            expected_event_key=expected_event_key,
+            attempt=0,
+            http_method="GET",
+        )
+
+        padded_get, padded_item = self.observe_unread_list(
+            label="post_mark_get_unread_padded_no_cache",
+            expected_event_key=expected_event_key,
+            attempt=0,
+            http_method="GET",
+            search=f"{self.run_id} ",
+            request_headers={"Cache-Control": "no-cache, no-store", "Pragma": "no-cache"},
+        )
+
+        post_list, post_item = self.observe_unread_list(
+            label="post_mark_post_unread",
+            expected_event_key=expected_event_key,
+            attempt=0,
+        )
+
+        variants = {
+            "get_exact": (exact_get, exact_item),
+            "get_padded_no_cache": (padded_get, padded_item),
+            "post": (post_list, post_item),
+        }
+        broken_variants = [
+            label
+            for label, (payload, _) in variants.items()
+            if self.unread_bucket_invariant_broken(payload)
+        ]
+        self.manifest["seen_read_comparison"] = {
+            "recorded_at_utc": datetime.now(timezone.utc).isoformat(),
+            "detail": mention_state(detail_item),
+            "listed": {label: bool(item) for label, (_, item) in variants.items()},
+            "items": {label: mention_state(item) for label, (_, item) in variants.items()},
+            "broken_variants": broken_variants,
+        }
+        self.save_manifest()
+        if broken_variants:
+            raise SmokeFailure(
+                "get_mentions(bucket=unread) أعاد عنصرًا unread=false ومفاتيحه متساوية؛ "
+                f"variants={','.join(broken_variants)}"
+            )
+        if self.seen_state_is_consistent(detail_item, post_list, expected_event_key):
+            self.check("mark_mention_seen", "attempt=0")
+            return
+
         last_state: dict[str, Any] = {}
         for attempt in range(1, POLL_ATTEMPTS + 1):
-            detail_payload = self.detail(self.thread_name)
-            mention = detail_mention(detail_payload)
-            current_event_key = normalize_text(mention.get("last_event_key"))
-            last_seen_event_key = normalize_text(mention.get("last_seen_event_key"))
-            unread_item = find_item(self.mentions("unread"), self.thread_name)
-            last_state = {
-                "last_event_key": current_event_key,
-                "last_seen_event_key": last_seen_event_key,
-                "unread": bool(mention.get("unread")),
-                "listed_in_unread": bool(unread_item),
-            }
-            if current_event_key != expected_event_key:
+            detail_item = self.observe_seen_detail(
+                label="poll_post_detail",
+                expected_event_key=expected_event_key,
+                attempt=attempt,
+            )
+
+            unread_payload, unread_item = self.observe_unread_list(
+                label="poll_post_unread",
+                expected_event_key=expected_event_key,
+                attempt=attempt,
+            )
+            if self.unread_bucket_invariant_broken(unread_payload):
                 raise SmokeFailure(
-                    "وصل حدث Mention جديد أثناء التحقق من القراءة؛ "
-                    f"expected={expected_event_key} current={current_event_key}"
+                    "get_mentions(bucket=unread) كسر invariant أثناء polling: "
+                    "العنصر unread=false ومفاتيحه متساوية"
                 )
-            if (
-                last_seen_event_key == expected_event_key
-                and not last_state["unread"]
-                and not last_state["listed_in_unread"]
+
+            last_state = {
+                "detail": mention_state(detail_item),
+                "listed_in_unread": bool(unread_item),
+                "unread_list_item": mention_state(unread_item),
+                "unread_list_total": unread_payload.get("total"),
+                "unread_list_count": (unread_payload.get("counts") or {}).get(
+                    "unread"
+                ),
+            }
+            if self.seen_state_is_consistent(
+                detail_item,
+                unread_payload,
+                expected_event_key,
             ):
                 self.check("mark_mention_seen", f"attempt={attempt}")
                 return
@@ -1192,9 +1592,17 @@ class SmokeRunner:
         self.run_stale_version_guard()
 
         open_payload = self.mentions("open")
-        unread_payload = self.mentions("unread")
+        # Prime the exact GET cache key while the fixture is still unread.
+        unread_payload = self.mentions("unread", http_method="GET")
         open_item = find_item(open_payload, self.thread_name)
         unread_item = find_item(unread_payload, self.thread_name)
+        self.record_seen_observation(
+            label="pre_mark_get_unread_exact",
+            source="unread_list",
+            expected_event_key=normalize_text((unread_item or {}).get("last_event_key")),
+            attempt=0,
+            list_payload=unread_payload,
+        )
         ensure(open_item, "Thread لا تظهر في bucket=open")
         ensure(unread_item, "Thread الجديدة لا تظهر في bucket=unread")
         ensure(bool(open_item.get("unread")), "Thread الجديدة ليست غير مقروءة")
@@ -1225,6 +1633,13 @@ class SmokeRunner:
             and all(char in "0123456789abcdef" for char in expected_event_key.lower()),
             "last_event_key المعروض في التفاصيل غير صالح",
         )
+        self.record_seen_observation(
+            label="pre_mark_post_detail",
+            source="detail",
+            expected_event_key=expected_event_key,
+            attempt=0,
+            item=mention,
+        )
         seen_response = self.client.call(
             "mark_mention_seen",
             http_method="POST",
@@ -1236,6 +1651,13 @@ class SmokeRunner:
         )
         ensure(isinstance(seen_response, dict), "mark_mention_seen لم يرجع كائنًا")
         seen_mention = seen_response.get("mention") or {}
+        self.record_seen_observation(
+            label="mark_once_response",
+            source="mark_response",
+            expected_event_key=expected_event_key,
+            attempt=0,
+            item=seen_mention,
+        )
         ensure(
             normalize_text(seen_mention.get("last_event_key")) == expected_event_key,
             "mark_mention_seen غيّر last_event_key",
