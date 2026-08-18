@@ -820,23 +820,94 @@
 	color: var(--mf-muted);
 }
 
-.mf-mention-reply-input {
+.mf-mention-reply-heading {
+	align-items: center;
+	display: flex;
+	justify-content: space-between;
+	margin-bottom: 9px;
+}
+
+.mf-mention-reply-heading h3 {
+	margin: 0;
+}
+
+.mf-mention-picker-trigger {
+	align-items: center;
+	background: var(--mf-surface);
+	border: 1px solid var(--mf-border);
+	border-radius: 8px;
+	color: var(--mf-blue);
+	display: inline-flex;
+	font-size: 12px;
+	font-weight: 650;
+	gap: 6px;
+	min-height: 34px;
+	padding: 5px 10px;
+}
+
+.mf-mention-picker-trigger:hover,
+.mf-mention-picker-trigger:focus-visible {
+	background: rgb(36 144 239 / 8%);
+	border-color: var(--mf-blue);
+	outline: 0;
+}
+
+.mf-mention-picker-trigger > span:first-child {
+	font-size: 17px;
+	font-weight: 750;
+	line-height: 1;
+}
+
+.mf-mention-reply-editor {
 	background: var(--mf-surface);
 	border: 1px solid var(--mf-border);
 	border-radius: 10px;
 	color: var(--mf-ink);
-	line-height: 1.7;
-	min-height: 112px;
-	outline: 0;
-	padding: 13px 15px;
-	resize: vertical;
-	text-align: start;
+	overflow: visible;
+	position: relative;
 	width: 100%;
 }
 
-.mf-mention-reply-input:focus {
+.mf-mention-reply-editor:focus-within {
 	border-color: var(--mf-blue);
 	box-shadow: 0 0 0 2px rgb(36 144 239 / 12%);
+}
+
+.mf-mention-reply-editor .frappe-control,
+.mf-mention-reply-editor .ql-container {
+	border: 0 !important;
+	margin: 0;
+}
+
+.mf-mention-reply-editor .ql-editor {
+	color: var(--mf-ink);
+	font-family: inherit;
+	font-size: 14px;
+	line-height: 1.7;
+	min-height: 112px;
+	overflow-y: auto;
+	padding: 13px 15px;
+	text-align: start;
+}
+
+.mf-mention-reply-editor .ql-editor.ql-blank::before {
+	color: var(--mf-muted);
+	font-style: normal;
+	inset-inline: 15px;
+}
+
+.mf-mention-reply-editor .ql-mention-list-container {
+	direction: rtl;
+	max-height: 240px;
+	overflow-y: auto;
+	text-align: right;
+	z-index: 1060;
+}
+
+.mf-mention-reply-hint {
+	color: var(--mf-muted);
+	font-size: 11px;
+	margin: 6px 2px 0;
 }
 
 .mf-mention-reply-actions {

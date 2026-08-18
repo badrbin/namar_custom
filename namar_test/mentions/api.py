@@ -25,6 +25,11 @@ def get_mention_detail(thread_name: str):
     return service.get_mention_detail(thread_name)
 
 
+@frappe.whitelist()
+def search_reply_mentions(thread_name: str, search_term: str = ""):
+    return service.search_reply_mentions(thread_name, search_term)
+
+
 @frappe.whitelist(methods=["POST"])
 def mark_mention_seen(
     thread_name: str,
@@ -40,12 +45,14 @@ def reply_mention(
     reply: str,
     request_id: str,
     expected_last_event_key: str,
+    reply_html: str = "",
 ):
     return service.reply_mention(
         thread_name,
         reply,
         request_id,
         expected_last_event_key,
+        reply_html=reply_html,
     )
 
 
@@ -55,12 +62,14 @@ def reply_and_close(
     reply: str,
     request_id: str,
     expected_last_event_key: str,
+    reply_html: str = "",
 ):
     return service.reply_and_close(
         thread_name,
         reply,
         request_id,
         expected_last_event_key,
+        reply_html=reply_html,
     )
 
 
