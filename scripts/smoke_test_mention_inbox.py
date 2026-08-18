@@ -11,9 +11,9 @@ manifest محلي قبل متابعة الاختبارات. التنظيف لا 
 البصمة الحية والمرجع المعزول مع الـmanifest.
 
 لا تختبر الأداة الرد حيًا افتراضيًا. يمكن تفعيله صراحة عبر
-``--include-self-reply``؛ عندها تختبر idempotency لـ``reply_mention``، ثم
-``reply_and_close`` وإعادة الفتح. الردان نصيان على ToDo الاختبار ولا يحتويان
-@mention، ولذلك لا يرسلان إشعارًا إلى موظف آخر.
+``--include-self-reply``؛ عندها تختبر منشن مستخدم التوكن نفسه فقط، وidempotency
+لـ``reply_mention`` واختلاف المستلمين، ثم ``reply_and_close`` وإعادة الفتح.
+لا تُدخل الأداة بريد أي موظف آخر في حمولة الرد ولا ترسل إليه إشعارًا.
 
 Thread وEvent نوعان داخليان بلا قراءة REST. تتحقق الأداة منهما عبر API المنتج،
 وتحذف Thread المملوكة فقط بعد حذف Comments المعزولة؛ on_trash يحذف Events
@@ -80,6 +80,7 @@ EVENT_REQUIRED_FIELDS = {
 MENTION_ENDPOINTS = (
     "get_mentions",
     "get_mention_detail",
+    "search_reply_mentions",
     "mark_mention_seen",
     "close_mention",
     "reopen_mention",
@@ -983,18 +984,26 @@ class SmokeRunner:
 
     def run_optional_self_reply(self) -> None:
         if not self.config.include_self_reply:
-            self.warn("تجاوز reply_mention/reply_and_close؛ استخدم --include-self-reply لاختبار رد ذاتي معزول")
+            self.warn("تجاوز reply_mention/reply_and_close؛ استخدم --include-self-reply لاختبار منشن ذاتي معزول")
             return
 
         expected_event_key = self.current_event_key()
         request_id = f"{self.run_id}-REPLY"
-        reply = f"{self.marker} SELF-REPLY بلا mention"
+        reply = f"{self.marker} SELF-REPLY @{self.user}"
+        escaped_user = html.escape(self.user, quote=True)
+        reply_html = (
+            f"<p>{html.escape(self.marker)} SELF-REPLY "
+            f'<span class="mention" data-id="{escaped_user}" '
+            f'data-value="{escaped_user}" data-is-group="false">'
+            f"@{escaped_user}</span></p>"
+        )
         first_response = self.client.call(
             "reply_mention",
             http_method="POST",
             args={
                 "thread_name": self.thread_name,
                 "reply": reply,
+                "reply_html": reply_html,
                 "request_id": request_id,
                 "expected_last_event_key": expected_event_key,
             },
@@ -1004,7 +1013,19 @@ class SmokeRunner:
         first_comment = first_response.get("comment") or {}
         ensure(first_reply.get("request_id") == request_id, "reply_mention فقد request_id")
         ensure(first_reply.get("event_type") == "Reply", "reply_mention لم ينشئ حدث Reply")
-        ensure(normalize_text(first_comment.get("name")), "reply_mention لم يرجع Comment")
+        first_comment_name = normalize_text(first_comment.get("name"))
+        ensure(first_comment_name, "reply_mention لم يرجع Comment")
+        stored_comment = self.client.get_doc("Comment", first_comment_name)
+        ensure(stored_comment, "تعذر قراءة Comment الناتجة من الرد الذاتي")
+        stored_content = normalize_text(stored_comment.get("content"))
+        ensure(
+            f'data-id="{escaped_user}"' in stored_content,
+            "Comment الناتجة لا تحتوي منشن مستخدم التوكن",
+        )
+        ensure(
+            'data-is-group="false"' in stored_content,
+            "Comment الناتجة لم تثبت أن المنشن لمستخدم وليس مجموعة",
+        )
 
         repeated_response = self.client.call(
             "reply_mention",
@@ -1012,6 +1033,7 @@ class SmokeRunner:
             args={
                 "thread_name": self.thread_name,
                 "reply": reply,
+                "reply_html": reply_html,
                 "request_id": request_id,
                 "expected_last_event_key": expected_event_key,
             },
@@ -1033,7 +1055,31 @@ class SmokeRunner:
             sum(1 for row in messages if row.get("request_id") == request_id) == 1,
             "reply_mention idempotent يجب أن يظهر مرة واحدة فقط",
         )
-        self.check("reply_mention ذاتي + idempotency", request_id)
+        comments_before_mismatch = self.marker_comment_names()
+        try:
+            self.client.call(
+                "reply_mention",
+                http_method="POST",
+                args={
+                    "thread_name": self.thread_name,
+                    "reply": reply,
+                    "reply_html": f"<p>{html.escape(self.marker)} SELF-REPLY</p>",
+                    "request_id": request_id,
+                    "expected_last_event_key": expected_event_key,
+                },
+            )
+        except HttpFailure as exc:
+            ensure(
+                exc.status_code == 417 and "مستلمين مختلفين" in exc.server_message,
+                f"رفض اختلاف المستلمين لم يكن ValidationError المتوقع: {exc}",
+            )
+        else:
+            raise SmokeFailure("قُبل request_id نفسه مع مستلمين مختلفين")
+        ensure(
+            self.marker_comment_names() == comments_before_mismatch,
+            "اختلاف مستلمي idempotency أنشأ Comment إضافية",
+        )
+        self.check("reply_mention بمنشن ذاتي + idempotency + recipient mismatch", request_id)
 
         close_request_id = f"{self.run_id}-REPLY-CLOSE"
         close_reply = f"{self.marker} SELF-REPLY-CLOSE بلا mention"
@@ -1090,6 +1136,22 @@ class SmokeRunner:
 
         self.create_isolated_reference_and_self_mention()
         self.wait_for_thread()
+        candidates = self.client.call(
+            "search_reply_mentions",
+            args={"thread_name": self.thread_name, "search_term": ""},
+        )
+        ensure(isinstance(candidates, list), "search_reply_mentions لم ترجع قائمة")
+        ensure(len(candidates) <= 8, "search_reply_mentions تجاوزت الحد الآمن")
+        ensure(
+            all(
+                isinstance(row, dict)
+                and set(row) == {"id", "value", "is_group"}
+                and row.get("is_group") is False
+                for row in candidates
+            ),
+            "search_reply_mentions أعادت نتيجة مجموعة أو عقدًا غير متوقع",
+        )
+        self.check("search_reply_mentions محدودة وبلا مجموعات")
         self.check_optional_notification_link()
         self.run_stale_version_guard()
 
@@ -1605,6 +1667,7 @@ def dry_run_summary(args: argparse.Namespace, env_file: Path, state_dir: Path) -
         "direct_thread_fixture": False,
         "internal_event_cleanup": "Thread.on_trash cascade؛ بلا REST read/delete لـEvent",
         "include_self_reply": bool(args.include_self_reply),
+        "self_reply_recipient_policy": "مستخدم FRAPPE_TEST_TOKEN فقط؛ لا موظف خارجي",
         "cleanup_manifest": str(args.cleanup_manifest) if args.cleanup_manifest else None,
         "state_dir": str(state_dir),
         "production_hosts_denied": sorted(KNOWN_PRODUCTION_HOSTS),
@@ -1650,7 +1713,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--include-self-reply",
         action="store_true",
-        help="يختبر reply_mention برد ذاتي نصي على ToDo المعزول؛ لا يحتوي @mention.",
+        help="يختبر reply_mention بمنشن مستخدم التوكن نفسه فقط؛ لا يذكر موظفًا آخر.",
     )
     parser.add_argument(
         "--cleanup-manifest",

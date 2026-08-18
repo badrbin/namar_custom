@@ -34,6 +34,10 @@ THREAD_DOCTYPE = "Namar Mention Thread"
 EVENT_DOCTYPE = "Namar Mention Event"
 MAX_MENTION_PAGE_LENGTH = 100
 DEFAULT_MENTION_PAGE_LENGTH = 25
+MAX_REPLY_HTML_LENGTH = MAX_NOTE_LENGTH * 4
+MAX_REPLY_MENTIONS = 5
+MAX_REPLY_MENTION_CANDIDATES = 8
+MAX_REPLY_MENTION_SCAN = 50
 
 THREAD_FIELDS = (
     "name",
@@ -358,6 +362,79 @@ def get_mention_detail(thread_name: str) -> dict[str, Any]:
     }
 
 
+def _eligible_mention_user(
+    thread,
+    user: Any,
+    *,
+    allow_administrator: bool = False,
+) -> str | None:
+    candidate = clean_text(user, MAX_REFERENCE_LENGTH)
+    if not candidate or candidate == "Guest" or (
+        candidate == "Administrator" and not allow_administrator
+    ):
+        return None
+    eligible = frappe.db.get_value(
+        "User",
+        {
+            "name": candidate,
+            "enabled": 1,
+            "user_type": "System User",
+            "allowed_in_mentions": 1,
+        },
+        "name",
+    )
+    if not eligible or not _can_read_reference(thread, eligible):
+        return None
+    return str(eligible)
+
+
+def search_reply_mentions(thread_name: str, search_term: str = "") -> list[dict[str, Any]]:
+    current_user = _assert_authenticated()
+    thread = _get_owned_thread(thread_name)
+    _get_reference_doc(thread)
+    term = normalize_search(search_term).casefold()
+    rows = frappe.get_all(
+        "User",
+        fields=["name", "full_name"],
+        filters={
+            "enabled": 1,
+            "user_type": "System User",
+            "allowed_in_mentions": 1,
+            "name": ["not in", ("Administrator", "Guest", current_user)],
+        },
+        order_by="full_name asc, name asc",
+        limit_page_length=MAX_REPLY_MENTION_SCAN,
+    )
+
+    latest_sender = clean_text(thread.latest_from_user, MAX_REFERENCE_LENGTH)
+    candidates: list[tuple[int, str, str]] = []
+    included_users: set[str] = set()
+    if latest_sender and latest_sender != current_user:
+        latest_label = _user_full_name(latest_sender) or latest_sender
+        latest_matches = not term or term in latest_label.casefold() or term in latest_sender.casefold()
+        if latest_matches and _eligible_mention_user(thread, latest_sender):
+            candidates.append((0, latest_label, latest_sender))
+            included_users.add(latest_sender)
+
+    for row in rows:
+        user = clean_text(row.name, MAX_REFERENCE_LENGTH)
+        if user in included_users:
+            continue
+        label = clean_text(row.full_name, MAX_REFERENCE_LENGTH) or user
+        if term and term not in label.casefold() and term not in user.casefold():
+            continue
+        if not _eligible_mention_user(thread, user):
+            continue
+        candidates.append((0 if user == latest_sender else 1, label, user))
+        included_users.add(user)
+
+    candidates.sort(key=lambda value: (value[0], value[1].casefold(), value[2].casefold()))
+    return [
+        {"id": user, "value": label, "is_group": False}
+        for _, label, user in candidates[:MAX_REPLY_MENTION_CANDIDATES]
+    ]
+
+
 def mark_mention_seen(
     thread_name: str,
     seen: Any,
@@ -452,35 +529,132 @@ def _reply_target(thread, current_user: str) -> str | None:
     target = clean_text(thread.latest_from_user, MAX_REFERENCE_LENGTH)
     if not target or target == current_user:
         return None
-    eligible = frappe.db.get_value(
-        "User",
-        {
-            "name": target,
-            "enabled": 1,
-            "user_type": "System User",
-            "allowed_in_mentions": 1,
-        },
-        "name",
+    return _eligible_mention_user(thread, target, allow_administrator=True)
+
+
+def _mention_html(user: str) -> str:
+    label = _user_full_name(user) or user
+    safe_user = html.escape(user, quote=True)
+    safe_label = html.escape(label)
+    return (
+        f'<span class="mention" data-id="{safe_user}" data-value="{safe_label}" '
+        f'data-is-group="false" data-denotation-char="@">@{safe_label}</span>'
     )
-    if not eligible or not _can_read_reference(thread, eligible):
-        return None
-    return eligible
 
 
-def _add_reply_comment(reference_doc, thread, reply_text: str, current_user: str):
-    reference_doc.check_permission("read")
-    target = _reply_target(thread, current_user)
-    safe_reply = html.escape(reply_text).replace("\n", "<br>")
-    if target:
-        safe_target = html.escape(target, quote=True)
-        safe_label = html.escape(_user_full_name(target) or target)
-        mention = (
-            f'<span class="mention" data-id="{safe_target}" data-is-group="false">'
-            f"@{safe_label}</span>"
+def _normalize_reply_markup(
+    thread,
+    reply: Any,
+    reply_html: Any,
+) -> tuple[str, str, list[str]]:
+    raw_html = "" if reply_html is None else str(reply_html).strip()
+    if not raw_html:
+        reply_text = _plain_required(reply, "الرد", MAX_NOTE_LENGTH)
+        safe_reply = html.escape(reply_text).replace("\n", "<br>")
+        return reply_text, f"<p>{safe_reply}</p>", []
+    if len(raw_html) > MAX_REPLY_HTML_LENGTH:
+        frappe.throw(
+            f"محتوى الرد يتجاوز الحد الأعلى وهو {MAX_REPLY_HTML_LENGTH} حرفًا",
+            frappe.ValidationError,
         )
-        content = f"<p>{mention}</p><p>{safe_reply}</p>"
-    else:
-        content = f"<p><strong>رد على الإشارة:</strong></p><p>{safe_reply}</p>"
+
+    from bs4 import BeautifulSoup, NavigableString, Tag
+    from frappe.utils import sanitize_html
+
+    source_soup = BeautifulSoup(raw_html, "html.parser")
+    for blocked in source_soup(["script", "style"]):
+        blocked.decompose()
+    sanitized = sanitize_html(str(source_soup), always_sanitize=True)
+    soup = BeautifulSoup(sanitized, "html.parser")
+    explicit_users: list[str] = []
+    seen_users: set[str] = set()
+    block_tags = {
+        "address",
+        "blockquote",
+        "div",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "li",
+        "p",
+        "pre",
+    }
+
+    def render(node) -> str:
+        if isinstance(node, NavigableString):
+            return html.escape(str(node))
+        if not isinstance(node, Tag):
+            return ""
+
+        classes = {str(value) for value in (node.get("class") or [])}
+        if "mention" in classes:
+            if str(node.get("data-is-group") or "").lower() == "true":
+                frappe.throw("منشن المجموعات غير متاح في الردود", frappe.ValidationError)
+            user = _eligible_mention_user(thread, node.get("data-id"))
+            if not user:
+                frappe.throw("الموظف المحدد للمنشن غير متاح لهذا المستند", frappe.PermissionError)
+            if user in seen_users:
+                return html.escape(f"@{_user_full_name(user) or user}")
+            if len(explicit_users) >= MAX_REPLY_MENTIONS:
+                frappe.throw(
+                    f"يمكن ذكر {MAX_REPLY_MENTIONS} موظفين كحد أقصى في الرد",
+                    frappe.ValidationError,
+                )
+            seen_users.add(user)
+            explicit_users.append(user)
+            return _mention_html(user)
+
+        if node.name == "br":
+            return "<br>"
+        if node.name in {"script", "style"}:
+            return ""
+
+        children = "".join(render(child) for child in node.children)
+        if node.name in block_tags:
+            return f"<p>{children}</p>" if plain_text(children) else ""
+        return children
+
+    container = soup.body if soup.body else soup
+    safe_markup = "".join(render(child) for child in container.children)
+    reply_text = _plain_required(safe_markup, "الرد", MAX_NOTE_LENGTH)
+    return reply_text, safe_markup, explicit_users
+
+
+def _compose_reply_comment(
+    thread,
+    reply_markup: str,
+    explicit_users: list[str],
+    current_user: str,
+) -> tuple[str, list[str]]:
+    recipients = list(explicit_users)
+    target = _reply_target(thread, current_user)
+    prefix = ""
+    if target and target not in recipients:
+        recipients.insert(0, target)
+        prefix = f"<p>{_mention_html(target)}</p>"
+    elif not recipients:
+        prefix = "<p><strong>رد على الإشارة:</strong></p>"
+    if len(recipients) > MAX_REPLY_MENTIONS:
+        frappe.throw(
+            f"يمكن ذكر {MAX_REPLY_MENTIONS} موظفين كحد أقصى في الرد",
+            frappe.ValidationError,
+        )
+    return f"{prefix}{reply_markup}", recipients
+
+
+def _comment_mentions(comment) -> list[str]:
+    if not comment:
+        return []
+    from frappe.desk.notifications import extract_mentions
+
+    return sorted({clean_text(user, MAX_REFERENCE_LENGTH) for user in extract_mentions(comment.content)})
+
+
+def _add_reply_comment(reference_doc, content: str):
+    reference_doc.check_permission("read")
     return reference_doc.add_comment("Comment", content)
 
 
@@ -491,9 +665,9 @@ def _reply(
     expected_last_event_key: str,
     *,
     close_after: bool,
+    reply_html: str = "",
 ) -> dict[str, Any]:
     user = _assert_authenticated()
-    reply_text = _plain_required(reply, "الرد", MAX_NOTE_LENGTH)
     normalized_request_id = _logic(normalize_request_id, request_id)
     event_key = _logic(
         mention_reply_event_key,
@@ -506,6 +680,17 @@ def _reply(
         thread = _get_owned_thread(thread_name, for_update=True)
         reference_doc = _get_reference_doc(thread)
         expected_event_key = _assert_expected_event(thread, expected_last_event_key)
+        reply_text, reply_markup, explicit_users = _normalize_reply_markup(
+            thread,
+            reply,
+            reply_html,
+        )
+        comment_content, requested_mentions = _compose_reply_comment(
+            thread,
+            reply_markup,
+            explicit_users,
+            user,
+        )
         existing = _existing_reply_event(thread, event_key)
         if existing:
             if plain_text(existing.content_plain, MAX_NOTE_LENGTH) != reply_text:
@@ -518,16 +703,23 @@ def _reply(
                 if existing.comment and frappe.db.exists("Comment", existing.comment)
                 else None
             )
+            if not comment:
+                frappe.throw(
+                    "تعذر التحقق من الرد السابق المرتبط بمعرّف الطلب",
+                    frappe.ValidationError,
+                )
+            if _comment_mentions(comment) != sorted(set(requested_mentions)):
+                frappe.throw(
+                    "استُخدم معرّف الطلب نفسه لمستلمين مختلفين",
+                    frappe.ValidationError,
+                )
             reply_event = existing
+            if close_after and _close_in_memory(thread, expected_event_key):
+                thread.save(ignore_permissions=True)
         else:
             if thread.status == "Closed":
                 frappe.throw("أعد فتح الإشارة قبل الرد عليها", frappe.ValidationError)
-            comment = _add_reply_comment(
-                reference_doc,
-                thread,
-                reply_text,
-                user,
-            )
+            comment = _add_reply_comment(reference_doc, comment_content)
             reply_event = _insert_event(
                 thread,
                 {
@@ -561,6 +753,8 @@ def reply_mention(
     reply: str,
     request_id: str,
     expected_last_event_key: str,
+    *,
+    reply_html: str = "",
 ) -> dict[str, Any]:
     return _reply(
         thread_name,
@@ -568,6 +762,7 @@ def reply_mention(
         request_id,
         expected_last_event_key,
         close_after=False,
+        reply_html=reply_html,
     )
 
 
@@ -576,6 +771,8 @@ def reply_and_close(
     reply: str,
     request_id: str,
     expected_last_event_key: str,
+    *,
+    reply_html: str = "",
 ) -> dict[str, Any]:
     return _reply(
         thread_name,
@@ -583,6 +780,7 @@ def reply_and_close(
         request_id,
         expected_last_event_key,
         close_after=True,
+        reply_html=reply_html,
     )
 
 

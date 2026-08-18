@@ -44,6 +44,7 @@ class NamarMyFollowups {
 		this.detail_sequence = 0;
 		this.last_loaded_at = 0;
 		this.search_timer = null;
+		this.mention_reply_control = null;
 		this.build();
 		this.bind_events();
 	}
@@ -193,9 +194,7 @@ class NamarMyFollowups {
 		this.$root.on("click", ".mf-reschedule", () => this.reschedule_followup());
 		this.$root.on("click", ".mf-add-note", () => this.add_note());
 		this.$root.on("click", ".mf-open-approval", () => this.open_approval());
-		this.$root.on("input", ".mf-mention-reply-input", () => {
-			this.state.reply_request_id = null;
-		});
+		this.$root.on("click", ".mf-mention-picker-trigger", () => this.open_reply_mention_picker());
 		this.$root.on("click", ".mf-mention-reply", () => this.reply_to_mention(false));
 		this.$root.on("click", ".mf-mention-reply-close", () => this.reply_to_mention(true));
 		this.$root.on("click", ".mf-mention-close", () => this.close_mention());
@@ -707,6 +706,7 @@ class NamarMyFollowups {
 	}
 
 	render_mention_detail() {
+		this.mention_reply_control = null;
 		const detail = this.state.detail || {};
 		const messages = this.first_array(detail.messages);
 		const permissions = detail.permissions || {};
@@ -794,10 +794,15 @@ class NamarMyFollowups {
 
 					${can_reply ? `
 						<section class="mf-section mf-mention-reply-section">
-							<h3>${this.escape(__("الرد"))}</h3>
-							<label class="sr-only" for="mf-mention-reply">${this.escape(__("اكتب ردك"))}</label>
-							<textarea id="mf-mention-reply" class="mf-mention-reply-input" rows="4" dir="auto"
-								placeholder="${this.escape(__("اكتب ردك على المستند..."))}"></textarea>
+							<div class="mf-mention-reply-heading">
+								<h3>${this.escape(__("الرد"))}</h3>
+								<button type="button" class="mf-mention-picker-trigger" aria-label="${this.escape(__("ذكر موظف في الرد"))}">
+									<span aria-hidden="true">@</span>
+									<span>${this.escape(__("ذكر موظف"))}</span>
+								</button>
+							</div>
+							<div id="mf-mention-reply" class="mf-mention-reply-editor" dir="rtl"></div>
+							<p class="mf-mention-reply-hint">${this.escape(__("اكتب @ أو اضغط «ذكر موظف» لإضافة منشن."))}</p>
 							<div class="mf-mention-reply-actions">
 								<button type="button" class="mf-action-btn is-primary mf-mention-reply">
 									${this.icon("send", "sm")}
@@ -838,6 +843,82 @@ class NamarMyFollowups {
 				` : ""}
 			</div>
 		`);
+
+		if (can_reply) this.init_mention_reply_editor();
+	}
+
+	init_mention_reply_editor() {
+		const $parent = this.$detail.find(".mf-mention-reply-editor");
+		const thread_name = this.state.selected_name;
+		if (!$parent.length || !thread_name) return;
+
+		const control = frappe.ui.form.make_control({
+			parent: $parent,
+			df: {
+				fieldtype: "Comment",
+				fieldname: "mention_reply",
+			},
+			enable_mentions: true,
+			render_input: true,
+			only_input: true,
+			no_wrapper: true,
+			on_submit: () => {
+				if (this.mention_reply_control === control && thread_name === this.state.selected_name) {
+					this.reply_to_mention(false);
+				}
+			},
+		});
+		this.mention_reply_control = control;
+
+		const quill = control.quill;
+		if (!quill) return;
+		quill.root.id = "mf-mention-reply-input";
+		quill.root.setAttribute("dir", "auto");
+		quill.root.setAttribute("aria-label", __("اكتب ردك"));
+		quill.root.dataset.placeholder = __("اكتب ردك على المستند...");
+		quill.on("text-change", () => {
+			if (this.mention_reply_control === control) this.state.reply_request_id = null;
+		});
+
+		const mention_module = quill.getModule("mention");
+		if (!mention_module) return;
+		let search_sequence = 0;
+		mention_module.options.source = frappe.utils.debounce(async (search_term, render_list) => {
+			const sequence = ++search_sequence;
+			if (this.mention_reply_control !== control || thread_name !== this.state.selected_name) {
+				render_list([], search_term);
+				return;
+			}
+			try {
+				const response = await this.call("search_reply_mentions", {
+					thread_name,
+					search_term,
+				}, this.mentions_api);
+				if (
+					sequence === search_sequence
+					&& this.mention_reply_control === control
+					&& thread_name === this.state.selected_name
+				) {
+					render_list(Array.isArray(response) ? response : [], search_term);
+				}
+			} catch (error) {
+				this.log_error("search_reply_mentions", error);
+				render_list([], search_term);
+			}
+		}, 300);
+	}
+
+	open_reply_mention_picker() {
+		const quill = this.mention_reply_control?.quill;
+		if (!quill || this.state.action_busy) return;
+		const range = quill.getSelection(true) || { index: Math.max(0, quill.getLength() - 1), length: 0 };
+		const index = range.index + range.length;
+		const previous = index > 0 ? quill.getText(index - 1, 1) : "";
+		const inserted = previous && !/\s/.test(previous) ? " @" : "@";
+		quill.setSelection(index, 0, "silent");
+		quill.insertText(index, inserted, "user");
+		quill.setSelection(index + inserted.length, 0, "user");
+		quill.focus();
 	}
 
 	render_mention_messages(messages, detail) {
@@ -1130,12 +1211,17 @@ class NamarMyFollowups {
 	}
 
 	async reply_to_mention(close_after_reply) {
-		if (this.state.source !== "mentions" || !this.state.selected_name) return;
-		const $input = this.$detail.find(".mf-mention-reply-input");
-		const reply = ($input.val() || "").trim();
+		if (
+			this.state.action_busy
+			|| this.state.source !== "mentions"
+			|| !this.state.selected_name
+		) return;
+		const control = this.mention_reply_control;
+		const reply_html = String(control?.get_value?.() || "").trim();
+		const reply = strip_html(reply_html).replace(/\s+/g, " ").trim();
 		if (!reply) {
 			frappe.show_alert({ message: __("اكتب الرد أولًا"), indicator: "orange" });
-			$input.trigger("focus");
+			control?.quill?.focus();
 			return;
 		}
 
@@ -1146,6 +1232,7 @@ class NamarMyFollowups {
 			args: {
 				thread_name: this.state.selected_name,
 				reply,
+				reply_html,
 				request_id,
 				expected_last_event_key: this.state.detail?.last_event_key,
 			},
@@ -1423,6 +1510,10 @@ class NamarMyFollowups {
 			this.$root.find('[data-mf-busy-disabled="1"]')
 				.prop("disabled", false)
 				.removeAttr("data-mf-busy-disabled");
+		}
+		if (this.mention_reply_control) {
+			if (busy) this.mention_reply_control.disable();
+			else this.mention_reply_control.enable();
 		}
 		this.$detail.toggleClass("is-action-busy", busy);
 	}
