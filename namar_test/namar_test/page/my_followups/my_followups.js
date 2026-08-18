@@ -45,6 +45,7 @@ class NamarMyFollowups {
 		this.last_loaded_at = 0;
 		this.search_timer = null;
 		this.mention_reply_control = null;
+		this.applied_seen_events = new Set();
 		this.build();
 		this.bind_events();
 	}
@@ -359,7 +360,13 @@ class NamarMyFollowups {
 			let selection = this.state.source === "mentions" && this.pending_thread
 				? this.pending_thread
 				: previous_selection;
-			const allow_external_selection = this.state.source === "mentions" && Boolean(this.pending_thread);
+			const keep_displayed_mention = this.state.source === "mentions"
+				&& preserve_selection
+				&& Boolean(previous_selection)
+				&& Boolean(this.state.detail)
+				&& this.item_key(this.state.detail) === String(previous_selection);
+			const allow_external_selection = this.state.source === "mentions"
+				&& Boolean(this.pending_thread || keep_displayed_mention);
 			this.pending_thread = "";
 			if (!selection || (!allow_external_selection && !this.state.items.some((item) => this.item_key(item) === selection))) {
 				selection = this.state.items.length ? this.item_key(this.state.items[0]) : null;
@@ -428,7 +435,12 @@ class NamarMyFollowups {
 			if (sequence !== this.detail_sequence || name !== this.state.selected_name) return;
 
 			const detail = this.normalize_detail_response(response);
-			if (this.state.source === "mentions" && Boolean(detail.unread)) {
+			const should_mark_seen = this.state.source === "mentions" && Boolean(detail.unread);
+			this.state.detail = detail;
+			this.state.detail_status = "ready";
+			this.render_detail();
+
+			if (should_mark_seen) {
 				try {
 					await this.call("mark_mention_seen", {
 						thread_name: name,
@@ -436,16 +448,13 @@ class NamarMyFollowups {
 						expected_last_event_key: detail.last_event_key,
 					}, this.mentions_api);
 					detail.unread = 0;
-					this.apply_seen_state(name);
+					this.apply_seen_state(name, detail.last_event_key);
 				} catch (error) {
+					if (sequence !== this.detail_sequence || name !== this.state.selected_name) return;
 					if (await this.handle_mention_conflict(error, name)) return;
 					this.log_error("mark_mention_seen", error);
 				}
 			}
-			if (sequence !== this.detail_sequence || name !== this.state.selected_name) return;
-			this.state.detail = detail;
-			this.state.detail_status = "ready";
-			this.render_detail();
 		} catch (error) {
 			if (sequence !== this.detail_sequence) return;
 			this.state.detail_status = "error";
@@ -1769,21 +1778,50 @@ class NamarMyFollowups {
 		}
 	}
 
-	apply_seen_state(name) {
+	apply_seen_state(name, event_key = "") {
 		if (this.state.source !== "mentions") return;
-		const item = this.state.items.find((entry) => this.item_key(entry) === String(name));
+		const item_index = this.state.items.findIndex((entry) => this.item_key(entry) === String(name));
+		const item = item_index >= 0 ? this.state.items[item_index] : null;
+		const seen_identity = `${String(name)}:${String(event_key)}`;
+		const is_first_application = !this.applied_seen_events.has(seen_identity);
+		this.applied_seen_events.add(seen_identity);
+		const was_unread = item ? Boolean(item.unread) : is_first_application;
 		if (item) item.unread = 0;
-		if (this.state.counts.unread !== undefined) {
+		if (was_unread && this.state.counts.unread !== undefined) {
 			this.state.counts.unread = Math.max(0, this.number(this.state.counts.unread) - 1);
 		}
-		this.$root.find(".mf-queue-item").each((_, element) => {
-			if (String($(element).data("name")) === String(name)) {
-				$(element)
-					.removeClass("is-unread")
-					.attr("aria-label", item ? this.mention_aria_label(item) : __("مقروءة"));
+
+		if (this.state.bucket === "unread" && item_index >= 0) {
+			this.state.items.splice(item_index, 1);
+			if (this.state.total !== null && this.state.total !== undefined) {
+				this.state.total = Math.max(0, this.number(this.state.total) - 1);
 			}
-		});
-		this.render_filters();
+			if (this.state.next_start !== null && this.state.next_start !== undefined) {
+				this.state.next_start = Math.max(0, this.number(this.state.next_start) - 1);
+				this.state.has_more = this.state.total === null || this.state.total === undefined
+					? this.state.has_more
+					: this.state.next_start < this.state.total;
+			}
+			this.state.limit_start = this.state.items.length;
+			this.render_filters();
+			this.render_list();
+		} else {
+			this.$root.find(".mf-queue-item").each((_, element) => {
+				if (String($(element).data("name")) === String(name)) {
+					$(element)
+						.removeClass("is-unread")
+						.attr("aria-label", item ? this.mention_aria_label(item) : __("مقروءة"));
+				}
+			});
+			this.render_filters();
+		}
+
+		if (String(this.state.selected_name) === String(name)) {
+			this.$root.find(".mf-read-pill")
+				.removeClass("is-unread")
+				.addClass("is-read")
+				.text(__("مقروءة"));
+		}
 	}
 
 	make_request_id() {
