@@ -18,6 +18,10 @@ manifest محلي قبل متابعة الاختبارات. التنظيف لا 
 Thread وEvent نوعان داخليان بلا قراءة REST. تتحقق الأداة منهما عبر API المنتج،
 وتحذف Thread المملوكة فقط بعد حذف Comments المعزولة؛ on_trash يحذف Events
 المرتبطة كـcascade، ولا تحاول الأداة قراءة Event أو حذفها مباشرة.
+
+يمكن إضافة ``--include-db-read-probe`` في تشغيل حي صريح لتسجيل عينات DB
+التجريبية مباشرة. يستخدم المجس FRAPPE_TEST_DB_* فقط، واتصال TLS متحققًا جديدًا
+ومعاملة ``START TRANSACTION READ ONLY`` لكل عينة، ثم rollback وclose دائمًا.
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ import hashlib
 import html
 import json
 import os
+import ssl
 import sys
 import time
 from dataclasses import dataclass
@@ -50,6 +55,20 @@ POLL_ATTEMPTS = 15
 POLL_INTERVAL_SECONDS = 1.0
 MAX_HTTP_TRANSCRIPT_ENTRIES = 250
 MAX_SEEN_OBSERVATIONS = 64
+MAX_DIRECT_DB_OBSERVATIONS = 16
+
+DIRECT_DB_SELECT_SQL = """
+SELECT
+    `name`,
+    `last_event_key`,
+    `last_seen_event_key`,
+    `status`,
+    `modified`
+FROM `tabNamar Mention Thread`
+WHERE `name` = %s AND `for_user` = %s
+LIMIT 1
+"""
+TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 
 TRANSCRIPT_REQUEST_HEADERS = ("Cache-Control", "Pragma")
 TRANSCRIPT_RESPONSE_HEADERS = (
@@ -144,6 +163,14 @@ def default_state_dir() -> Path:
 
 class SmokeFailure(RuntimeError):
     pass
+
+
+class DirectDBProbeFailure(SmokeFailure):
+    """Failure with a fixed safe category; raw DB errors must never escape."""
+
+    def __init__(self, category: str, message: str):
+        self.category = category
+        super().__init__(message)
 
 
 class HttpFailure(SmokeFailure):
@@ -263,6 +290,46 @@ def mention_state(item: Any) -> dict[str, Any] | None:
     return {key: item.get(key) for key in MENTION_STATE_FIELDS}
 
 
+def direct_db_mention_state(row: Any) -> dict[str, Any] | None:
+    if not isinstance(row, dict):
+        return None
+    last_event_key = row.get("last_event_key")
+    last_seen_event_key = row.get("last_seen_event_key")
+    return {
+        "name": row.get("name"),
+        "last_event_key": last_event_key,
+        "last_seen_event_key": last_seen_event_key,
+        "unread": bool(
+            normalize_text(last_event_key)
+            and normalize_text(last_event_key) != normalize_text(last_seen_event_key)
+        ),
+        "status": row.get("status"),
+        "modified": str(row.get("modified")) if row.get("modified") is not None else None,
+    }
+
+
+def compare_mention_states(
+    direct_state: dict[str, Any] | None,
+    api_states: dict[str, dict[str, Any] | None],
+) -> dict[str, dict[str, bool] | None]:
+    comparisons: dict[str, dict[str, bool] | None] = {}
+    for source, raw_api_state in api_states.items():
+        api_state = mention_state(raw_api_state)
+        if direct_state is None or api_state is None:
+            comparisons[source] = None
+            continue
+        comparisons[source] = {
+            field: (
+                bool(direct_state.get(field)) == bool(api_state.get(field))
+                if field == "unread"
+                else normalize_text(direct_state.get(field))
+                == normalize_text(api_state.get(field))
+            )
+            for field in MENTION_STATE_FIELDS
+        }
+    return comparisons
+
+
 def parse_server_message(response: requests.Response) -> str:
     try:
         data = response.json()
@@ -297,6 +364,190 @@ class SmokeConfig:
     timeout: int
     expected_user: str = ""
     include_self_reply: bool = False
+
+
+@dataclass(frozen=True, repr=False)
+class DirectTestDBConfig:
+    """Ephemeral test-only DB credentials; never serialize or print this object."""
+
+    host: str
+    port: int
+    database: str
+    user: str
+    password: str
+    timeout: int
+
+
+def env_is_truthy(name: str) -> bool:
+    return normalize_text(os.environ.get(name)).lower() in TRUTHY_ENV_VALUES
+
+
+def parse_db_port(name: str, *, default: int | None = None) -> int:
+    raw = normalize_text(os.environ.get(name))
+    if not raw and default is not None:
+        return default
+    try:
+        port = int(raw)
+    except (TypeError, ValueError):
+        raise SmokeFailure(f"{name} يجب أن يكون منفذًا صحيحًا") from None
+    ensure(1 <= port <= 65535, f"{name} خارج النطاق المسموح")
+    return port
+
+
+def validate_direct_test_db_config(timeout: int) -> DirectTestDBConfig:
+    """Build a fail-closed config using FRAPPE_TEST_DB_* variables only."""
+
+    required_names = (
+        "FRAPPE_TEST_DB_HOST",
+        "FRAPPE_TEST_DB_PORT",
+        "FRAPPE_TEST_DB_NAME",
+        "FRAPPE_TEST_DB_USER",
+        "FRAPPE_TEST_DB_PASSWORD",
+    )
+    missing = [name for name in required_names if not normalize_text(os.environ.get(name))]
+    ensure(
+        not missing,
+        "مجس DB التجريبية يتطلب المتغيرات: " + ", ".join(missing),
+    )
+    ensure(
+        env_is_truthy("FRAPPE_TEST_DB_READ_ONLY"),
+        "FRAPPE_TEST_DB_READ_ONLY يجب أن يكون truthy لتفعيل المجس",
+    )
+    ensure(
+        env_is_truthy("FRAPPE_TEST_DB_SSL"),
+        "FRAPPE_TEST_DB_SSL يجب أن يكون truthy؛ لا يسمح باتصال DB بلا TLS",
+    )
+
+    host = normalize_text(os.environ.get("FRAPPE_TEST_DB_HOST")).lower().rstrip(".")
+    database = normalize_text(os.environ.get("FRAPPE_TEST_DB_NAME"))
+    user = normalize_text(os.environ.get("FRAPPE_TEST_DB_USER"))
+    password = os.environ.get("FRAPPE_TEST_DB_PASSWORD", "")
+    port = parse_db_port("FRAPPE_TEST_DB_PORT")
+    ensure(host, "FRAPPE_TEST_DB_HOST غير صالح")
+
+    denied_db_hosts = set(KNOWN_PRODUCTION_HOSTS)
+    prod_site_host = host_from_value(os.environ.get("FRAPPE_PROD_SITE", ""))
+    if prod_site_host:
+        denied_db_hosts.add(prod_site_host)
+    ensure(host not in denied_db_hosts, "رفض مجس DB: مضيف قاعدة التجريبي مضيف إنتاج")
+
+    prod_names = (
+        "FRAPPE_PROD_DB_HOST",
+        "FRAPPE_PROD_DB_PORT",
+        "FRAPPE_PROD_DB_NAME",
+        "FRAPPE_PROD_DB_USER",
+    )
+    prod_values = {name: normalize_text(os.environ.get(name)) for name in prod_names}
+    if any(prod_values.values()):
+        ensure(
+            prod_values["FRAPPE_PROD_DB_HOST"]
+            and prod_values["FRAPPE_PROD_DB_NAME"],
+            "حماية DB تتطلب هدف الإنتاج كاملًا عند ضبط أي FRAPPE_PROD_DB_*",
+        )
+        prod_host = prod_values["FRAPPE_PROD_DB_HOST"].lower().rstrip(".")
+        prod_port = parse_db_port("FRAPPE_PROD_DB_PORT", default=3306)
+        prod_database = prod_values["FRAPPE_PROD_DB_NAME"]
+        ensure(
+            (host, port, database) != (prod_host, prod_port, prod_database),
+            "رفض مجس DB: هدف قاعدة التجريبي يطابق هدف قاعدة الإنتاج",
+        )
+
+    return DirectTestDBConfig(
+        host=host,
+        port=port,
+        database=database,
+        user=user,
+        password=password,
+        timeout=min(max(int(timeout), 5), 30),
+    )
+
+
+class DirectTestDBProbe:
+    """One verified-TLS, read-only transaction and connection per observation."""
+
+    def __init__(self, config: DirectTestDBConfig):
+        self.config = config
+
+    def read_thread(self, *, thread_name: str, owner: str) -> dict[str, Any] | None:
+        ensure(thread_name and owner, "مجس DB يتطلب اسم Thread ومالكها")
+        try:
+            # Deliberately lazy: dry-run and runs without the explicit flag never import PyMySQL.
+            pymysql = __import__("pymysql")
+        except ImportError:
+            raise DirectDBProbeFailure(
+                "dependency_missing",
+                "تعذر تشغيل مجس DB التجريبية: مكتبة PyMySQL غير متاحة",
+            ) from None
+
+        try:
+            tls_context = ssl.create_default_context()
+            if hasattr(ssl, "TLSVersion"):
+                tls_context.minimum_version = ssl.TLSVersion.TLSv1_2
+        except Exception:  # noqa: BLE001 - never expose local TLS configuration details.
+            raise DirectDBProbeFailure(
+                "tls_context_failed",
+                "تعذر إنشاء سياق TLS متحقق لمجس DB التجريبية",
+            ) from None
+        if not tls_context.check_hostname or tls_context.verify_mode != ssl.CERT_REQUIRED:
+            raise DirectDBProbeFailure(
+                "tls_verification_unavailable",
+                "تعذر إنشاء سياق TLS متحقق لمجس DB التجريبية",
+            )
+
+        try:
+            connection = pymysql.connect(
+                host=self.config.host,
+                port=self.config.port,
+                user=self.config.user,
+                password=self.config.password,
+                database=self.config.database,
+                charset="utf8mb4",
+                autocommit=False,
+                connect_timeout=self.config.timeout,
+                read_timeout=self.config.timeout,
+                write_timeout=self.config.timeout,
+                ssl=tls_context,
+                cursorclass=pymysql.cursors.DictCursor,
+            )
+        except Exception:  # noqa: BLE001 - raw driver errors are intentionally discarded.
+            raise DirectDBProbeFailure(
+                "connection_failed",
+                "تعذر اتصال مجس DB التجريبية؛ حُجبت تفاصيل الاتصال والخطأ الخام",
+            ) from None
+
+        row: dict[str, Any] | None = None
+        query_failed = False
+        rollback_failed = False
+        close_failed = False
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("START TRANSACTION READ ONLY")
+                cursor.execute(DIRECT_DB_SELECT_SQL, (thread_name, owner))
+                fetched = cursor.fetchone()
+                row = dict(fetched) if isinstance(fetched, dict) else None
+        except Exception:  # noqa: BLE001 - do not persist or print raw DB exceptions.
+            query_failed = True
+        finally:
+            try:
+                connection.rollback()
+            except Exception:  # noqa: BLE001
+                rollback_failed = True
+            try:
+                connection.close()
+            except Exception:  # noqa: BLE001
+                close_failed = True
+
+        if query_failed:
+            raise DirectDBProbeFailure(
+                "read_failed",
+                "فشلت قراءة مجس DB التجريبية؛ حُجب الخطأ الخام",
+            )
+        if rollback_failed or close_failed:
+            raise DirectDBProbeFailure(
+                "cleanup_failed",
+                "تعذر إنهاء اتصال مجس DB التجريبية بأمان",
+            )
+        return row
 
 
 class FrappeClient:
@@ -587,12 +838,14 @@ class SmokeRunner:
         manifest: dict[str, Any],
         manifest_path: Path,
         user: str,
+        direct_db_probe: DirectTestDBProbe | None = None,
     ):
         self.client = client
         self.config = config
         self.manifest = manifest
         self.manifest_path = manifest_path
         self.user = user
+        self.direct_db_probe = direct_db_probe
         self.run_id = normalize_text(manifest.get("run_id"))
         self.marker = normalize_text(manifest.get("marker"))
         self.reference_name = normalize_text(manifest.get("reference_name"))
@@ -618,6 +871,7 @@ class SmokeRunner:
         config: SmokeConfig,
         user: str,
         state_dir: Path,
+        direct_db_probe: DirectTestDBProbe | None = None,
     ) -> "SmokeRunner":
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         run_id = f"MISMK-{timestamp}-{uuid4().hex[:6]}"
@@ -638,6 +892,14 @@ class SmokeRunner:
             "warnings": [],
             "http_transcript": [],
             "seen_state_observations": [],
+            "direct_test_db_observations": [],
+            "direct_test_db_probe": {
+                "enabled": direct_db_probe is not None,
+                "connection_scope": "new_per_observation",
+                "transaction": "START TRANSACTION READ ONLY",
+                "tls": "verified_default_context",
+                "credentials_persisted": False,
+            },
             "contains_secrets": False,
         }
         runner = cls(
@@ -646,6 +908,7 @@ class SmokeRunner:
             manifest=manifest,
             manifest_path=manifest_path,
             user=user,
+            direct_db_probe=direct_db_probe,
         )
         runner.save_manifest()
         return runner
@@ -721,6 +984,101 @@ class SmokeRunner:
         # Persist before validation or sleeping so the first discrepant response is retained.
         self.save_manifest()
         return observed_item
+
+    def record_direct_db_observation(
+        self,
+        *,
+        label: str,
+        expected_event_key: str,
+        api_states: dict[str, dict[str, Any] | None] | None = None,
+        raise_on_error: bool = True,
+    ) -> dict[str, Any] | None:
+        if self.direct_db_probe is None:
+            return None
+
+        observations = self.manifest.setdefault("direct_test_db_observations", [])
+        ensure(
+            len(observations) < MAX_DIRECT_DB_OBSERVATIONS,
+            "تجاوز transcript مجس DB الحد الآمن",
+        )
+        observation: dict[str, Any] = {
+            "seq": len(observations) + 1,
+            "observed_at_utc": datetime.now(timezone.utc).isoformat(),
+            "http_seq": self.client.last_request_seq,
+            "label": label,
+            "source": "direct_test_db",
+            "expected_event_key": expected_event_key,
+            "connection_scope": "new_connection",
+            "transaction_policy": "START TRANSACTION READ ONLY ثم rollback",
+            "tls_policy": "verified_default_context",
+        }
+        try:
+            row = self.direct_db_probe.read_thread(
+                thread_name=self.thread_name,
+                owner=self.user,
+            )
+        except DirectDBProbeFailure as exc:
+            observation.update(
+                {
+                    "status": "error",
+                    "error_category": exc.category,
+                    "row_found": None,
+                    "item": None,
+                }
+            )
+            observations.append(observation)
+            self.save_manifest()
+            if raise_on_error:
+                raise
+            return None
+
+        direct_state = direct_db_mention_state(row)
+        safe_api_states = {
+            source: mention_state(state)
+            for source, state in (api_states or {}).items()
+        }
+        observation.update(
+            {
+                "status": "ok",
+                "transaction": "read_only_rolled_back",
+                "tls_verified": True,
+                "row_found": direct_state is not None,
+                "item": direct_state,
+                "api_states": safe_api_states,
+                "matches_api": compare_mention_states(direct_state, safe_api_states),
+            }
+        )
+        observations.append(observation)
+        self.save_manifest()
+        return direct_state
+
+    def record_final_failure_db_observation(self) -> None:
+        if self.direct_db_probe is None or not self.thread_name:
+            return
+        observations = self.manifest.get("direct_test_db_observations") or []
+        if any(
+            isinstance(row, dict) and row.get("label") == "final_failure"
+            for row in observations
+        ):
+            return
+
+        latest_api_states: dict[str, dict[str, Any] | None] = {}
+        expected_event_key = ""
+        for row in reversed(self.manifest.get("seen_state_observations") or []):
+            if not isinstance(row, dict):
+                continue
+            state = row.get("item") if isinstance(row.get("item"), dict) else None
+            source = normalize_text(row.get("source"))
+            if source and source not in latest_api_states:
+                latest_api_states[source] = state
+            if not expected_event_key:
+                expected_event_key = normalize_text(row.get("expected_event_key"))
+        self.record_direct_db_observation(
+            label="final_failure",
+            expected_event_key=expected_event_key,
+            api_states=latest_api_states,
+            raise_on_error=False,
+        )
 
     def check(self, title: str, detail: str = "تم") -> None:
         self.manifest.setdefault("checks", []).append(
@@ -1112,6 +1470,16 @@ class SmokeRunner:
             "broken_variants": broken_variants,
         }
         self.save_manifest()
+        self.record_direct_db_observation(
+            label="post_mark_after_variants",
+            expected_event_key=expected_event_key,
+            api_states={
+                "detail": detail_item,
+                "get_exact": exact_item,
+                "get_padded_no_cache": padded_item,
+                "post": post_item,
+            },
+        )
         if broken_variants:
             raise SmokeFailure(
                 "get_mentions(bucket=unread) أعاد عنصرًا unread=false ومفاتيحه متساوية؛ "
@@ -1640,6 +2008,11 @@ class SmokeRunner:
             attempt=0,
             item=mention,
         )
+        self.record_direct_db_observation(
+            label="pre_mark",
+            expected_event_key=expected_event_key,
+            api_states={"detail": mention, "unread_list": unread_item},
+        )
         seen_response = self.client.call(
             "mark_mention_seen",
             http_method="POST",
@@ -1657,6 +2030,11 @@ class SmokeRunner:
             expected_event_key=expected_event_key,
             attempt=0,
             item=seen_mention,
+        )
+        self.record_direct_db_observation(
+            label="post_mark_immediate",
+            expected_event_key=expected_event_key,
+            api_states={"mark_response": seen_mention},
         )
         ensure(
             normalize_text(seen_mention.get("last_event_key")) == expected_event_key,
@@ -2138,6 +2516,15 @@ def dry_run_summary(args: argparse.Namespace, env_file: Path, state_dir: Path) -
         "direct_thread_fixture": False,
         "internal_event_cleanup": "Thread.on_trash cascade؛ بلا REST read/delete لـEvent",
         "include_self_reply": bool(args.include_self_reply),
+        "include_db_read_probe": bool(args.include_db_read_probe),
+        "db_probe_network_requests": False,
+        "db_probe_live_requirements": [
+            "--run",
+            "--include-db-read-probe",
+            "FRAPPE_TEST_DB_* فقط",
+            "FRAPPE_TEST_DB_READ_ONLY=truthy",
+            "FRAPPE_TEST_DB_SSL=truthy",
+        ],
         "self_reply_recipient_policy": "مستخدم FRAPPE_TEST_TOKEN فقط؛ لا موظف خارجي",
         "cleanup_manifest": str(args.cleanup_manifest) if args.cleanup_manifest else None,
         "state_dir": str(state_dir),
@@ -2168,7 +2555,10 @@ def parse_args() -> argparse.Namespace:
         "--env-file",
         type=Path,
         default=default_env_file(),
-        help="ملف البيئة المحلي؛ لا يقرأ إلا FRAPPE_TEST_SITE/FRAPPE_TEST_TOKEN للتشغيل.",
+        help=(
+            "ملف البيئة المحلي؛ يستخدم FRAPPE_TEST_SITE/FRAPPE_TEST_TOKEN، "
+            "ومع مجس DB الصريح يستخدم FRAPPE_TEST_DB_* فقط."
+        ),
     )
     parser.add_argument(
         "--state-dir",
@@ -2185,6 +2575,14 @@ def parse_args() -> argparse.Namespace:
         "--include-self-reply",
         action="store_true",
         help="يختبر reply_mention بمنشن مستخدم التوكن نفسه فقط؛ لا يذكر موظفًا آخر.",
+    )
+    parser.add_argument(
+        "--include-db-read-probe",
+        action="store_true",
+        help=(
+            "تشخيص اختياري حي: يقرأ صف Thread من DB التجريبية باتصال TLS جديد "
+            "ومعاملة READ ONLY لكل عينة؛ لا يعمل دون --run."
+        ),
     )
     parser.add_argument(
         "--cleanup-manifest",
@@ -2206,6 +2604,15 @@ def main() -> int:
         return 0
 
     config = validate_run_config(args)
+    ensure(
+        not (args.include_db_read_probe and args.cleanup_manifest),
+        "--include-db-read-probe لا يستخدم مع --cleanup-manifest",
+    )
+    direct_db_probe = (
+        DirectTestDBProbe(validate_direct_test_db_config(config.timeout))
+        if args.include_db_read_probe
+        else None
+    )
     client = FrappeClient(config)
     user = client.get_logged_user()
     ensure(user and user != "Guest", "FRAPPE_TEST_TOKEN لا يمثل مستخدمًا مسجلًا")
@@ -2235,7 +2642,13 @@ def main() -> int:
         )
         return 1 if runner.cleanup() else 0
 
-    runner = SmokeRunner.new(client, config, user, state_dir)
+    runner = SmokeRunner.new(
+        client,
+        config,
+        user,
+        state_dir,
+        direct_db_probe=direct_db_probe,
+    )
     smoke_error: Exception | None = None
     cleanup_errors: list[str] = []
     summary: dict[str, Any] | None = None
@@ -2243,6 +2656,7 @@ def main() -> int:
         summary = runner.run()
     except Exception as exc:  # noqa: BLE001
         smoke_error = exc
+        runner.record_final_failure_db_observation()
         runner.manifest["status"] = "checks_failed"
         runner.manifest["failure"] = str(exc)
         runner.save_manifest()
