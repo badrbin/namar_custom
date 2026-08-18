@@ -39,6 +39,11 @@ class NamarMyFollowups {
 			action_busy: false,
 		};
 		this.selected_by_source = { mentions: null, followups: null, approvals: null };
+		this.source_counts = { mentions: null, followups: null, approvals: null };
+		this.source_count_status = { mentions: "idle", followups: "idle", approvals: "idle" };
+		this.source_count_loaded_at = { mentions: 0, followups: 0, approvals: 0 };
+		this.source_count_sequence = { mentions: 0, followups: 0, approvals: 0 };
+		this.source_count_requests = {};
 		this.pending_thread = deep_link.source === "mentions" ? deep_link.thread : "";
 		this.list_sequence = 0;
 		this.detail_sequence = 0;
@@ -52,6 +57,7 @@ class NamarMyFollowups {
 
 	show() {
 		const deep_link = this.read_deep_link();
+		this.load_source_summaries({ exclude_source: deep_link.source });
 		if (deep_link.source !== this.state.source) {
 			this.pending_thread = deep_link.source === "mentions" ? deep_link.thread : "";
 			this.change_source(deep_link.source, { update_url: false });
@@ -85,15 +91,18 @@ class NamarMyFollowups {
 					<div class="mf-source-switch" role="tablist" aria-label="${this.escape(__("مصدر قائمة العمل"))}">
 						<button type="button" class="mf-source-btn ${this.state.source === "mentions" ? "is-active" : ""}" data-source="mentions" role="tab" aria-selected="${this.state.source === "mentions"}">
 							${this.icon("mail", "sm")}
-							<span>${this.escape(__("الوارد"))}</span>
+							<span class="mf-source-label">${this.escape(__("الوارد"))}</span>
+							<strong class="mf-source-count is-loading" data-source-count="mentions" aria-live="polite">…</strong>
 						</button>
 						<button type="button" class="mf-source-btn ${this.state.source === "followups" ? "is-active" : ""}" data-source="followups" role="tab" aria-selected="${this.state.source === "followups"}">
 							${this.icon("clipboard", "sm")}
-							<span>${this.escape(__("المتابعات"))}</span>
+							<span class="mf-source-label">${this.escape(__("المتابعات"))}</span>
+							<strong class="mf-source-count is-loading" data-source-count="followups" aria-live="polite">…</strong>
 						</button>
 						<button type="button" class="mf-source-btn ${this.state.source === "approvals" ? "is-active" : ""}" data-source="approvals" role="tab" aria-selected="${this.state.source === "approvals"}">
 							${this.icon("review", "sm")}
-							<span>${this.escape(__("الموافقات"))}</span>
+							<span class="mf-source-label">${this.escape(__("الموافقات"))}</span>
+							<strong class="mf-source-count is-loading" data-source-count="approvals" aria-live="polite">…</strong>
 						</button>
 					</div>
 				</header>
@@ -134,8 +143,137 @@ class NamarMyFollowups {
 		this.$search = this.$root.find(".mf-search-input");
 		this.$clear_search = this.$root.find(".mf-clear-search");
 		this.$root.find(".mf-filter-button").prop("hidden", this.state.source !== "followups");
+		this.render_source_counts();
 		this.render_filters();
 		this.render_detail_empty();
+	}
+
+	load_source_summaries({ exclude_source = "", force = false } = {}) {
+		const requests = ["mentions", "followups", "approvals"]
+			.filter((source) => source !== exclude_source)
+			.map((source) => this.load_source_count(source, { force }));
+		return Promise.allSettled(requests);
+	}
+
+	load_source_count(source, { force = false } = {}) {
+		if (!["mentions", "followups", "approvals"].includes(source)) {
+			return Promise.resolve(null);
+		}
+		const is_fresh = Date.now() - this.source_count_loaded_at[source] <= 60 * 1000;
+		if (!force && this.source_count_status[source] === "ready" && is_fresh) {
+			return Promise.resolve(this.source_counts[source]);
+		}
+		if (!force && this.source_count_requests[source]) {
+			return this.source_count_requests[source];
+		}
+
+		const sequence = ++this.source_count_sequence[source];
+		this.source_count_status[source] = "loading";
+		this.render_source_counts();
+		const request = Promise.resolve()
+			.then(() => this.fetch_source_summary(source))
+			.then((response) => {
+				if (sequence !== this.source_count_sequence[source]) return null;
+				const count = this.open_count_from_response(response);
+				this.set_source_count(source, count);
+				return count;
+			})
+			.catch((error) => {
+				if (sequence !== this.source_count_sequence[source]) return null;
+				this.source_count_status[source] = "error";
+				this.render_source_counts();
+				this.log_error(`load_source_count:${source}`, error);
+				return null;
+			});
+		this.source_count_requests[source] = request;
+		request.then(() => {
+			if (this.source_count_requests[source] === request) {
+				delete this.source_count_requests[source];
+			}
+		});
+		return request;
+	}
+
+	fetch_source_summary(source) {
+		const args = { search: "", limit_start: 0, page_length: 1 };
+		if (source === "mentions") {
+			args.bucket = "open";
+			return this.call("get_mentions", args, this.mentions_api);
+		}
+		if (source === "followups") {
+			args.bucket = "all";
+			args.priority = "";
+			return this.call("get_followups", args);
+		}
+		return this.call("get_approvals", args);
+	}
+
+	open_count_from_response(response) {
+		const value = response?.counts?.open;
+		const count = Number(value);
+		if (
+			value === undefined
+			|| value === null
+			|| typeof value === "boolean"
+			|| !Number.isInteger(count)
+			|| count < 0
+		) {
+			throw new Error("Missing open source count");
+		}
+		return count;
+	}
+
+	set_source_count(source, count) {
+		this.source_counts[source] = Math.max(0, Math.trunc(Number(count) || 0));
+		this.source_count_status[source] = "ready";
+		this.source_count_loaded_at[source] = Date.now();
+		this.render_source_counts();
+	}
+
+	sync_source_count_from_list(source, payload) {
+		if (source === "followups" && this.state.priority) {
+			this.load_source_count("followups");
+			return false;
+		}
+		const value = payload?.counts?.open;
+		const count = Number(value);
+		if (
+			value === undefined
+			|| value === null
+			|| typeof value === "boolean"
+			|| !Number.isInteger(count)
+			|| count < 0
+		) return false;
+		this.source_count_sequence[source] += 1;
+		delete this.source_count_requests[source];
+		this.set_source_count(source, count);
+		return true;
+	}
+
+	render_source_counts() {
+		if (!this.$root) return;
+		const labels = {
+			mentions: __("الوارد"),
+			followups: __("المتابعات"),
+			approvals: __("الموافقات"),
+		};
+		Object.keys(labels).forEach((source) => {
+			const status = this.source_count_status[source];
+			const count = this.source_counts[source];
+			const has_count = count !== null && count !== undefined && Number.isFinite(Number(count));
+			const text = has_count ? this.number(count) : status === "error" ? "—" : "…";
+			const aria_label = status === "ready"
+				? __("{0}: {1} مفتوحة", [labels[source], text])
+				: status === "error"
+					? __("تعذّر تحديث عدد {0}", [labels[source]])
+					: __("جارٍ تحميل عدد {0}", [labels[source]]);
+			this.$root.find(`[data-source-count="${source}"]`)
+				.text(text)
+				.toggleClass("is-loading", status === "loading" || status === "idle")
+				.toggleClass("is-error", status === "error")
+				.attr("aria-label", aria_label)
+				.attr("title", aria_label);
+		});
 	}
 
 	bind_events() {
@@ -304,6 +442,7 @@ class NamarMyFollowups {
 
 	async load_list({ preserve_selection = false, append = false } = {}) {
 		const sequence = ++this.list_sequence;
+		const source = this.state.source;
 		const previous_selection = preserve_selection ? this.state.selected_name : null;
 		const keep_mobile_detail = preserve_selection && this.state.mobile_detail;
 		const limit_start = append ? this.state.next_start ?? this.state.items.length : 0;
@@ -312,6 +451,10 @@ class NamarMyFollowups {
 			this.state.loading_more = true;
 			this.render_pagination();
 		} else {
+			if (this.source_counts[source] === null) {
+				this.source_count_status[source] = "loading";
+				this.render_source_counts();
+			}
 			if (!preserve_selection) {
 				this.detail_sequence += 1;
 				this.state.selected_name = null;
@@ -354,6 +497,15 @@ class NamarMyFollowups {
 			this.state.list_status = "ready";
 			this.state.loading_more = false;
 			this.last_loaded_at = Date.now();
+			const source_count_synced = this.sync_source_count_from_list(source, payload);
+			if (
+				!source_count_synced
+				&& this.source_counts[source] === null
+				&& this.source_count_status[source] !== "loading"
+			) {
+				this.source_count_status[source] = "error";
+				this.render_source_counts();
+			}
 			this.render_filters();
 			this.render_list();
 
@@ -389,6 +541,10 @@ class NamarMyFollowups {
 			if (sequence !== this.list_sequence) return;
 			this.state.list_status = "error";
 			this.state.loading_more = false;
+			if (this.source_counts[source] === null) {
+				this.source_count_status[source] = "error";
+				this.render_source_counts();
+			}
 			this.render_list_error();
 			this.log_error("load_list", error);
 		}
@@ -1327,6 +1483,7 @@ class NamarMyFollowups {
 						this.selected_by_source.mentions = null;
 						this.sync_url_state("mentions");
 						await this.load_list();
+						await this.load_source_count("followups", { force: true });
 					}
 				} catch (error) {
 					if (this.is_mention_conflict_error(error)) {

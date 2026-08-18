@@ -300,6 +300,19 @@ def _approval_search_filters(search: str) -> list[list[str]]:
     ]
 
 
+def _approval_counts() -> dict[str, int]:
+    # get_list تُبقي Permission Query القياسي لـ Workflow Action مطبقًا حتى
+    # مع حقل تجميعي؛ لذلك يطابق العدد نفس نطاق العناصر المرئية للمستخدم.
+    rows = frappe.get_list(
+        "Workflow Action",
+        fields=["count(name) as count"],
+        filters={"status": "Open"},
+        limit_page_length=1,
+    )
+    open_count = rows[0].get("count") if rows else 0
+    return {"open": int(open_count or 0)}
+
+
 def _followup_counts(user: str, current_date: str, priority: str = "") -> dict[str, int]:
     counts = {
         bucket: frappe.db.count(
@@ -617,6 +630,7 @@ def get_approvals(
         length,
     )
     result["search"] = normalized_search
+    result["counts"] = _approval_counts()
     return result
 
 
