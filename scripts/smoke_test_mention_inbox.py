@@ -11,8 +11,9 @@ manifest محلي قبل متابعة الاختبارات. التنظيف لا 
 البصمة الحية والمرجع المعزول مع الـmanifest.
 
 لا تختبر الأداة الرد حيًا افتراضيًا. يمكن تفعيله صراحة عبر
-``--include-self-reply``؛ عندها تختبر منشن مستخدم التوكن نفسه فقط، وidempotency
-لـ``reply_mention`` واختلاف المستلمين، ثم ``reply_and_close`` وإعادة الفتح.
+``--include-self-reply``؛ عندها تختبر ردًا حيًا واحدًا يذكر مستخدم التوكن نفسه،
+وتنتظر التقاط المنشن مرة واحدة، ثم تختبر ``reply_and_close`` وإعادة الفتح.
+تبقى idempotency واختلاف المستلمين ضمن اختبارات الوحدة غير المؤثرة.
 لا تُدخل الأداة بريد أي موظف آخر في حمولة الرد ولا ترسل إليه إشعارًا.
 
 Thread وEvent نوعان داخليان بلا قراءة REST. تتحقق الأداة منهما عبر API المنتج،
@@ -1830,59 +1831,29 @@ class SmokeRunner:
             "Comment الناتجة لم تثبت أن المنشن لمستخدم وليس مجموعة",
         )
 
-        repeated_response = self.client.call(
-            "reply_mention",
-            http_method="POST",
-            args={
-                "thread_name": self.thread_name,
-                "reply": reply,
-                "reply_html": reply_html,
-                "request_id": request_id,
-                "expected_last_event_key": expected_event_key,
-            },
-        )
-        ensure(isinstance(repeated_response, dict), "إعادة reply_mention لم ترجع كائنًا")
-        repeated_reply = repeated_response.get("reply") or {}
-        repeated_comment = repeated_response.get("comment") or {}
-        ensure(
-            repeated_reply.get("event_key") == first_reply.get("event_key"),
-            "idempotency أنشأت event_key ثانية",
-        )
-        ensure(
-            repeated_comment.get("name") == first_comment.get("name"),
-            "idempotency أنشأت Comment ثانية",
-        )
-        detail = self.detail(self.thread_name)
-        messages = detail.get("messages") or []
-        ensure(
-            sum(1 for row in messages if row.get("request_id") == request_id) == 1,
-            "reply_mention idempotent يجب أن يظهر مرة واحدة فقط",
-        )
-        comments_before_mismatch = self.marker_comment_names()
-        try:
-            self.client.call(
-                "reply_mention",
-                http_method="POST",
-                args={
-                    "thread_name": self.thread_name,
-                    "reply": reply,
-                    "reply_html": f"<p>{html.escape(self.marker)} SELF-REPLY</p>",
-                    "request_id": request_id,
-                    "expected_last_event_key": expected_event_key,
-                },
-            )
-        except HttpFailure as exc:
-            ensure(
-                exc.status_code == 417 and "مستلمين مختلفين" in exc.server_message,
-                f"رفض اختلاف المستلمين لم يكن ValidationError المتوقع: {exc}",
-            )
+        self.record_marker_comments()
+        for attempt in range(1, POLL_ATTEMPTS + 1):
+            detail = self.detail(self.thread_name)
+            mention = detail_mention(detail)
+            messages = detail.get("messages") or []
+            reply_events = [
+                row for row in messages if row.get("request_id") == request_id
+            ]
+            if (
+                normalize_text(mention.get("last_event_key")) != expected_event_key
+                and len(reply_events) == 1
+            ):
+                self.check(
+                    "reply_mention بمنشن ذاتي والتقاط وارد واحد",
+                    f"{request_id}; attempt={attempt}",
+                )
+                break
+            if attempt < POLL_ATTEMPTS:
+                time.sleep(POLL_INTERVAL_SECONDS)
         else:
-            raise SmokeFailure("قُبل request_id نفسه مع مستلمين مختلفين")
-        ensure(
-            self.marker_comment_names() == comments_before_mismatch,
-            "اختلاف مستلمي idempotency أنشأ Comment إضافية",
-        )
-        self.check("reply_mention بمنشن ذاتي + idempotency + recipient mismatch", request_id)
+            raise SmokeFailure(
+                "لم يلتقط الرد الذاتي كمنشن واحد ضمن مهلة polling"
+            )
 
         close_request_id = f"{self.run_id}-REPLY-CLOSE"
         close_reply = f"{self.marker} SELF-REPLY-CLOSE بلا mention"
