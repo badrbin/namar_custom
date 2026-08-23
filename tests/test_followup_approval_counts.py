@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+from copy import deepcopy
 import importlib.util
 import sys
 from pathlib import Path
@@ -19,6 +21,68 @@ SERVICE_PATH = (
 class FakeFrappeDict(dict):
     def __getattr__(self, key):
         return self.get(key)
+
+    def __setattr__(self, key, value):
+        self[key] = value
+
+
+class FakeLifecycleTodo(FakeFrappeDict):
+    def __init__(self, values, on_save=None):
+        super().__init__(values)
+        self._on_save = on_save
+
+    def as_dict(self):
+        return self
+
+    def save(self, **kwargs):
+        if self._on_save:
+            self._on_save(self)
+        return self
+
+
+class FakeLifecycleDatabase:
+    def __init__(self, todos, thread, comments):
+        self.todos = todos
+        self.thread = thread
+        self.comments = comments
+        self.snapshot = None
+        self.rolled_back = False
+        self.released = False
+
+    def get_value(self, doctype, filters, fieldname="name", **kwargs):
+        if doctype != "ToDo" or not isinstance(filters, dict):
+            return None
+        for todo in self.todos.values():
+            matched = True
+            for key, expected in filters.items():
+                actual = todo.get(key)
+                if isinstance(expected, list) and expected[:1] == ["!="]:
+                    matched = matched and actual != expected[1]
+                else:
+                    matched = matched and actual == expected
+            if matched:
+                return todo.get(fieldname)
+        return None
+
+    def savepoint(self, name):
+        self.snapshot = (
+            deepcopy(self.todos),
+            deepcopy(self.thread),
+            deepcopy(self.comments),
+        )
+
+    def rollback(self, save_point=None):
+        self.rolled_back = True
+        todos, thread, comments = self.snapshot
+        self.todos.clear()
+        self.todos.update(todos)
+        self.thread.clear()
+        self.thread.update(thread)
+        self.comments.clear()
+        self.comments.extend(comments)
+
+    def release_savepoint(self, name):
+        self.released = True
 
 
 def load_service(*, action_rows=None, count_rows=None):
@@ -99,7 +163,220 @@ def workflow_action(name: str) -> FakeFrappeDict:
     )
 
 
+def run_complete_and_schedule_next(*, fail_transfer: bool = False):
+    module, fake_frappe = load_service()
+    current = FakeFrappeDict(
+        name="TODO-1",
+        description="متابعة المورد",
+        status="Open",
+        priority="Medium",
+        date="2026-08-23",
+        allocated_to="employee@example.com",
+        assigned_by="employee@example.com",
+        reference_type="Purchase Invoice",
+        reference_name="PINV-1",
+    )
+    todos = {current.name: current}
+    thread = FakeFrappeDict(
+        status="Converted",
+        converted_to_todo=current.name,
+    )
+    comments = []
+    database = FakeLifecycleDatabase(todos, thread, comments)
+    fake_frappe.db = database
+    fake_frappe.get_doc = lambda doctype, name: todos[name]
+
+    active_suppression = set()
+    mention_events = ModuleType("namar_test.mentions.events")
+
+    @contextmanager
+    def suppress_todo_mention_sync(todo_name):
+        active_suppression.add(todo_name)
+        try:
+            yield
+        finally:
+            active_suppression.remove(todo_name)
+
+    def transfer_linked_mentions_to_next_todo(previous, next_todo):
+        thread.converted_to_todo = next_todo.name
+        if fail_transfer:
+            raise fake_frappe.ValidationError("تعذر نقل رابط المتابعة")
+        return 1
+
+    mention_events.suppress_todo_mention_sync = suppress_todo_mention_sync
+    mention_events.transfer_linked_mentions_to_next_todo = (
+        transfer_linked_mentions_to_next_todo
+    )
+    mention_package = ModuleType("namar_test.mentions")
+    mention_package.events = mention_events
+
+    def close_exact_todo(todo):
+        if todo.name not in active_suppression:
+            raise AssertionError("أُغلقت المتابعة القديمة خارج نطاق suppression")
+        todo.status = "Closed"
+
+    def add_assignment(args):
+        todos["TODO-2"] = FakeFrappeDict(
+            name="TODO-2",
+            description=args["description"],
+            status="Open",
+            priority=args["priority"],
+            date=args["date"],
+            allocated_to="employee@example.com",
+            assigned_by=args["assigned_by"],
+            reference_type=args["doctype"],
+            reference_name=args["name"],
+        )
+
+    def add_result_comment(*args, **kwargs):
+        comment = FakeFrappeDict(name="COMMENT-RESULT", content="تم الإنجاز")
+        comments.append(comment)
+        return comment
+
+    module.assign_to.add = add_assignment
+    result = None
+    caught = None
+    with (
+        patch.object(module, "_get_owned_todo", return_value=current),
+        patch.object(module, "_get_reference_doc", return_value=FakeFrappeDict()),
+        patch.object(module, "_add_timeline_comment", side_effect=add_result_comment),
+        patch.object(module, "_close_exact_todo", side_effect=close_exact_todo),
+        patch.object(module, "_serialize_todo", side_effect=lambda todo: {"name": todo.name}),
+        patch.object(
+            module,
+            "_serialize_comment",
+            side_effect=lambda comment: {"name": comment.name},
+        ),
+        patch.dict(
+            sys.modules,
+            {
+                "namar_test.mentions": mention_package,
+                "namar_test.mentions.events": mention_events,
+            },
+        ),
+    ):
+        try:
+            result = module.complete_and_schedule_next(
+                "TODO-1",
+                "تم الإنجاز",
+                "2026-08-24",
+            )
+        except Exception as error:
+            caught = error
+
+    return (
+        result,
+        caught,
+        database,
+        todos,
+        thread,
+        comments,
+        active_suppression,
+    )
+
+
 class ApprovalCountsTestCase(unittest.TestCase):
+    def test_complete_followup_uses_exact_close_and_preserves_mention_unread(self):
+        module, fake_frappe = load_service()
+        thread = FakeFrappeDict(
+            status="Converted",
+            converted_to_todo="TODO-1",
+            closed_via_followup=0,
+            last_event_key="event-new",
+            last_seen_event_key="event-old",
+        )
+
+        def sync_linked_thread(todo):
+            thread.status = "Closed"
+            thread.closed_via_followup = 1
+
+        todo = FakeLifecycleTodo(
+            {
+                "name": "TODO-1",
+                "description": "متابعة المورد",
+                "status": "Open",
+                "priority": "Medium",
+                "allocated_to": "employee@example.com",
+                "assigned_by": "employee@example.com",
+                "reference_type": "Purchase Invoice",
+                "reference_name": "PINV-1",
+            },
+            on_save=sync_linked_thread,
+        )
+        fake_frappe.get_doc = lambda doctype, name: todo
+
+        def set_status(**kwargs):
+            self.assertEqual(kwargs["todo"], "TODO-1")
+            self.assertEqual(kwargs["status"], "Closed")
+            todo.status = kwargs["status"]
+            todo.save(ignore_permissions=True)
+
+        module.assign_to.set_status = set_status
+        comment = FakeFrappeDict(name="COMMENT-RESULT", content="تم الإنجاز")
+        with (
+            patch.object(module, "_get_owned_todo", return_value=todo),
+            patch.object(module, "_get_reference_doc", return_value=FakeFrappeDict()),
+            patch.object(module, "_add_timeline_comment", return_value=comment),
+            patch.object(module, "_serialize_todo", side_effect=lambda row: {"name": row.name}),
+            patch.object(
+                module,
+                "_serialize_comment",
+                side_effect=lambda row: {"name": row.name},
+            ),
+        ):
+            result = module.complete_followup("TODO-1", "تم الإنجاز")
+
+        self.assertEqual(result["followup"], {"name": "TODO-1"})
+        self.assertEqual(todo.status, "Closed")
+        self.assertEqual(thread.status, "Closed")
+        self.assertEqual(thread.closed_via_followup, 1)
+        self.assertEqual(thread.last_event_key, "event-new")
+        self.assertEqual(thread.last_seen_event_key, "event-old")
+
+    def test_complete_and_schedule_next_transfers_inside_one_savepoint(self):
+        (
+            result,
+            caught,
+            database,
+            todos,
+            thread,
+            comments,
+            active_suppression,
+        ) = run_complete_and_schedule_next()
+
+        self.assertIsNone(caught)
+        self.assertEqual(result["completed_followup"], {"name": "TODO-1"})
+        self.assertEqual(result["next_followup"], {"name": "TODO-2"})
+        self.assertEqual(todos["TODO-1"].status, "Closed")
+        self.assertEqual(todos["TODO-2"].status, "Open")
+        self.assertEqual(thread.converted_to_todo, "TODO-2")
+        self.assertEqual([comment.name for comment in comments], ["COMMENT-RESULT"])
+        self.assertTrue(database.released)
+        self.assertFalse(database.rolled_back)
+        self.assertEqual(active_suppression, set())
+
+    def test_complete_and_schedule_next_rolls_everything_back_when_transfer_fails(self):
+        (
+            result,
+            caught,
+            database,
+            todos,
+            thread,
+            comments,
+            active_suppression,
+        ) = run_complete_and_schedule_next(fail_transfer=True)
+
+        self.assertIsNone(result)
+        self.assertIsNotNone(caught)
+        self.assertRegex(str(caught), "تعذر نقل رابط المتابعة")
+        self.assertEqual(set(todos), {"TODO-1"})
+        self.assertEqual(todos["TODO-1"].status, "Open")
+        self.assertEqual(thread.converted_to_todo, "TODO-1")
+        self.assertEqual(comments, [])
+        self.assertTrue(database.rolled_back)
+        self.assertFalse(database.released)
+        self.assertEqual(active_suppression, set())
+
     def test_get_approvals_returns_permission_aware_open_count(self):
         module, fake_frappe = load_service(
             action_rows=[workflow_action("WA-1")],

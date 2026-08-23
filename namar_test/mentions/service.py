@@ -60,6 +60,7 @@ THREAD_FIELDS = (
     "converted_by",
     "closed_at",
     "closed_by",
+    "closed_via_followup",
     "last_replied_at",
     "last_replied_by",
     "last_reply_comment",
@@ -240,7 +241,7 @@ def _thread_permissions(thread) -> dict[str, bool]:
     is_closed = thread.status == "Closed"
     return {
         "can_reply": not is_closed,
-        "can_close": not is_closed,
+        "can_close": thread.status == "Open",
         "can_reopen": is_closed,
         "can_convert": thread.status == "Open",
     }
@@ -549,11 +550,17 @@ def _append_state_event(thread, event_type: str, content: str):
 def _close_in_memory(thread, expected_event_key: str) -> bool:
     if thread.status == "Closed":
         return False
+    if thread.status == "Converted":
+        frappe.throw(
+            "أكمل المتابعة المرتبطة أو ألغها قبل إغلاق الرسالة",
+            frappe.ValidationError,
+        )
     user = _assert_authenticated()
     _append_state_event(thread, "Closed", "أُغلقت الإشارة")
     thread.status = "Closed"
     thread.closed_at = now_datetime()
     thread.closed_by = user
+    thread.closed_via_followup = 0
     thread.last_seen_event_key = expected_event_key
     return True
 
@@ -855,33 +862,67 @@ def reopen_mention(thread_name: str, expected_last_event_key: str) -> dict[str, 
         thread.status = "Open"
         thread.closed_at = None
         thread.closed_by = None
+        thread.closed_via_followup = 0
         thread.last_seen_event_key = expected_event_key
         thread.save(ignore_permissions=True)
     return {"mention": _serialize_thread(thread)}
 
 
-def _valid_linked_todo(thread):
-    if not thread.converted_to_todo:
-        return None
-    todo = frappe.db.get_value(
-        "ToDo",
-        thread.converted_to_todo,
-        [
-            "name",
-            "status",
-            "allocated_to",
-            "reference_type",
-            "reference_name",
-        ],
-        as_dict=True,
+def _lock_open_todos(thread) -> list[Any]:
+    """Lock matching ToDos before the thread to keep one global lock order."""
+
+    return list(
+        frappe.db.get_values(
+            "ToDo",
+            {
+                "reference_type": thread.reference_doctype,
+                "reference_name": thread.reference_name,
+                "allocated_to": thread.for_user,
+                "status": "Open",
+            },
+            [
+                "name",
+                "status",
+                "allocated_to",
+                "reference_type",
+                "reference_name",
+            ],
+            as_dict=True,
+            order_by="creation desc",
+            for_update=True,
+        )
+        or []
     )
-    if not todo or (
-        todo.allocated_to != thread.for_user
-        or todo.reference_type != thread.reference_doctype
-        or todo.reference_name != thread.reference_name
-    ):
+
+
+def _select_locked_todo(thread, todos: list[Any]):
+    for todo in todos:
+        if todo.name == thread.converted_to_todo:
+            return todo
+    return todos[0] if todos else None
+
+
+def _same_thread_identity(current, snapshot) -> bool:
+    return all(
+        current.get(fieldname) == snapshot.get(fieldname)
+        for fieldname in ("for_user", "reference_doctype", "reference_name")
+    )
+
+
+def _locked_todo_is_valid(todo, thread) -> bool:
+    return bool(
+        todo
+        and todo.status == "Open"
+        and todo.allocated_to == thread.for_user
+        and todo.reference_type == thread.reference_doctype
+        and todo.reference_name == thread.reference_name
+    )
+
+
+def _todo_document(todo):
+    if not todo:
         return None
-    return todo
+    return frappe.get_doc("ToDo", todo.name)
 
 
 def convert_mention_to_followup(
@@ -897,11 +938,24 @@ def convert_mention_to_followup(
     normalized_priority = _logic(normalize_priority, priority)
 
     with _savepoint("mention_convert"):
+        thread_snapshot = _get_owned_thread(thread_name)
+        _get_reference_doc(thread_snapshot)
+        if thread_snapshot.status == "Closed":
+            frappe.throw("أعد فتح الإشارة قبل تحويلها إلى متابعة", frappe.ValidationError)
+
+        # SELECT ... FOR UPDATE هنا يسبق قفل الخيط. يغلق هذا نافذة ربط ToDo
+        # أُغلقت/حُذفت بالتزامن، ويحافظ على ترتيب واحد مع hook: ToDo ثم Thread.
+        locked_todos = _lock_open_todos(thread_snapshot)
         thread = _get_owned_thread(thread_name, for_update=True)
         _get_reference_doc(thread)
         expected_event_key = _assert_expected_event(thread, expected_last_event_key)
         if thread.status == "Closed":
             frappe.throw("أعد فتح الإشارة قبل تحويلها إلى متابعة", frappe.ValidationError)
+        if not _same_thread_identity(thread, thread_snapshot):
+            frappe.throw(
+                "تغيّر مرجع الرسالة أثناء التحويل؛ أعد المحاولة",
+                frappe.ValidationError,
+            )
 
         description_text = (
             _plain_required(description, "وصف المتابعة", MAX_DESCRIPTION_LENGTH)
@@ -913,38 +967,28 @@ def convert_mention_to_followup(
             )
         )
 
-        todo = _valid_linked_todo(thread) if thread.status == "Converted" else None
+        todo = _select_locked_todo(thread, locked_todos)
+        todo = _todo_document(todo) if _locked_todo_is_valid(todo, thread) else None
         if not todo:
-            todo_name = frappe.db.get_value(
-                "ToDo",
-                {
-                    "reference_type": thread.reference_doctype,
-                    "reference_name": thread.reference_name,
-                    "allocated_to": user,
-                    "status": "Open",
-                },
-                "name",
-                order_by="creation desc",
-                for_update=True,
+            created = followup_service.create_followup(
+                thread.reference_doctype,
+                thread.reference_name,
+                description_text,
+                normalized_date,
+                priority=normalized_priority,
+                allocated_to=user,
             )
-            if todo_name:
-                todo = frappe.get_doc("ToDo", todo_name)
-            else:
-                created = followup_service.create_followup(
-                    thread.reference_doctype,
-                    thread.reference_name,
-                    description_text,
-                    normalized_date,
-                    priority=normalized_priority,
-                    allocated_to=user,
-                )
-                todo = frappe.get_doc("ToDo", created["followup"]["name"])
+            todo = frappe.get_doc("ToDo", created["followup"]["name"])
 
+        if thread.status != "Converted" or thread.converted_to_todo != todo.name:
             _append_state_event(thread, "Converted", "حُوّلت الإشارة إلى متابعة")
             thread.status = "Converted"
             thread.converted_to_todo = todo.name
             thread.converted_at = now_datetime()
             thread.converted_by = user
+            thread.closed_at = None
+            thread.closed_by = None
+            thread.closed_via_followup = 0
             thread.last_seen_event_key = expected_event_key
             thread.save(ignore_permissions=True)
 

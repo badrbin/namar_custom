@@ -27,6 +27,7 @@
   "converted_by",
   "closed_at",
   "closed_by",
+  "closed_via_followup",
   "reply_section",
   "last_replied_at",
   "last_replied_by",
@@ -181,6 +182,13 @@
    "fieldtype": "Link",
    "label": "Closed By",
    "options": "User",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "closed_via_followup",
+   "fieldtype": "Check",
+   "label": "Closed via Follow-up",
    "read_only": 1
   },
   {

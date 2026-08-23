@@ -463,6 +463,9 @@ def complete_and_schedule_next(
     description: str | None = None,
     priority: str | None = None,
 ) -> dict[str, Any]:
+    # Import محلي لتجنب دوران mentions.service -> followups.service.
+    from namar_test.mentions import events as mention_events
+
     result_text = _required(result, "نتيجة المتابعة", MAX_RESULT_LENGTH)
     normalized_next_date = _logic(normalize_date, next_date, "تاريخ المتابعة القادمة")
     todo = _get_owned_todo(
@@ -512,7 +515,8 @@ def complete_and_schedule_next(
             result_text,
             MAX_RESULT_LENGTH,
         )
-        _close_exact_todo(todo)
+        with mention_events.suppress_todo_mention_sync(todo.name):
+            _close_exact_todo(todo)
 
         args = _logic(
             assignment_args,
@@ -545,6 +549,7 @@ def complete_and_schedule_next(
                 frappe.ValidationError,
             )
         next_todo = frappe.get_doc("ToDo", next_name)
+        mention_events.transfer_linked_mentions_to_next_todo(todo, next_todo)
     except Exception:
         frappe.db.rollback(save_point=savepoint)
         raise

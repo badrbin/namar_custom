@@ -119,6 +119,14 @@ override_whitelisted_methods = {
 }
 
 doc_events = {
+    "ToDo": {
+        "on_change": [
+            "namar_test.mentions.events.sync_linked_mentions_on_todo_change"
+        ],
+        "on_trash": [
+            "namar_test.mentions.events.sync_linked_mentions_on_todo_trash"
+        ],
+    },
     "Comment": {
         "after_insert": ["namar_test.mentions.events.capture_mentions_after_insert"],
         "on_update": [

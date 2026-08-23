@@ -652,7 +652,7 @@ class NamarMyFollowups {
 			const filters = [
 				{ key: "open", label: __("تحتاج قرارًا") },
 				{ key: "unread", label: __("غير مقروءة") },
-				{ key: "converted", label: __("محوّلة") },
+				{ key: "converted", label: __("قيد المتابعة") },
 				{ key: "closed", label: __("مغلقة") },
 			];
 			this.$filters.html(filters.map((filter) => {
@@ -814,7 +814,7 @@ class NamarMyFollowups {
 		const count = Math.max(1, this.number(item.mention_count));
 		const unread = Boolean(item.unread);
 		const is_active = String(name) === String(this.state.selected_name);
-		const status = this.mention_status(item.status);
+		const status = this.mention_status(item);
 		const time = this.format_relative_datetime(item.latest_mentioned_at);
 		const aria_label = this.mention_aria_label(item, sender, preview, reference_title);
 
@@ -902,7 +902,6 @@ class NamarMyFollowups {
 		const detail = this.state.detail || {};
 		const messages = this.first_array(detail.messages);
 		const permissions = detail.permissions || {};
-		const status = this.mention_status(detail.status);
 		const latest_comment = this.first(detail.latest_comment);
 		const latest_message = messages.find((message) => (
 			message.comment === latest_comment || message.event_key === latest_comment
@@ -923,6 +922,11 @@ class NamarMyFollowups {
 		const can_reopen = permissions.can_reopen === true;
 		const can_convert = permissions.can_convert === true;
 		const converted_to_todo = this.first(detail.converted_to_todo, detail.followup_name);
+		const status = this.mention_status(detail);
+		const closed_via_followup = Boolean(this.number(detail.closed_via_followup));
+		const show_followup_card = closed_via_followup || (
+			Boolean(converted_to_todo) && status.key === "converted"
+		);
 		const has_actions = can_close || can_reopen || can_convert;
 
 		this.$detail.html(`
@@ -970,17 +974,19 @@ class NamarMyFollowups {
 						${this.render_mention_messages(messages, detail)}
 					</section>
 
-					${converted_to_todo ? `
+					${show_followup_card ? `
 						<section class="mf-section mf-converted-followup-card">
 							<span class="mf-converted-followup-icon">${this.icon("clipboard", "sm")}</span>
 							<div>
-								<strong>${this.escape(__("حُوّلت إلى متابعة"))}</strong>
-								<span>${this.escape(converted_to_todo)}</span>
+								<strong>${this.escape(closed_via_followup ? __("أُنجزت عبر متابعة") : __("قيد المتابعة"))}</strong>
+								<span>${this.escape(converted_to_todo || __("سجل المتابعة غير متاح"))}</span>
 							</div>
-							<button type="button" class="mf-link-button mf-open-converted-followup" data-todo-name="${this.escape_attr(converted_to_todo)}">
-								${this.icon("external-link", "xs")}
-								<span>${this.escape(__("فتح المتابعة"))}</span>
-							</button>
+							${converted_to_todo ? `
+								<button type="button" class="mf-link-button mf-open-converted-followup" data-todo-name="${this.escape_attr(converted_to_todo)}">
+									${this.icon("external-link", "xs")}
+									<span>${this.escape(__("فتح المتابعة"))}</span>
+								</button>
+							` : ""}
 						</section>
 					` : ""}
 
@@ -1016,7 +1022,7 @@ class NamarMyFollowups {
 						${can_reopen ? `
 							<button type="button" class="mf-action-btn is-secondary mf-mention-reopen">
 								${this.icon("refresh", "sm")}
-								<span>${this.escape(__("إعادة فتح"))}</span>
+								<span>${this.escape(__("إعادة فتح الرسالة"))}</span>
 							</button>
 						` : ""}
 						${can_close ? `
@@ -1980,15 +1986,19 @@ class NamarMyFollowups {
 		const messages = {
 			open: __("لا توجد رسائل تحتاج قرارًا حاليًا."),
 			unread: __("اطلعت على كل الرسائل الواردة."),
-			converted: __("لم تُحوّل أي رسالة إلى متابعة بعد."),
+			converted: __("لا توجد رسائل قيد المتابعة حاليًا."),
 			closed: __("لا توجد رسائل مغلقة حاليًا."),
 		};
 		return messages[this.state.bucket] || messages.open;
 	}
 
 	mention_status(value) {
-		const status = String(value || "Open").toLowerCase();
-		if (status === "converted") return { key: "converted", label: __("محوّلة لمتابعة") };
+		const item = value && typeof value === "object" ? value : { status: value };
+		const status = String(item.status || "Open").toLowerCase();
+		if (status === "converted") return { key: "converted", label: __("قيد المتابعة") };
+		if (status === "closed" && Boolean(this.number(item.closed_via_followup))) {
+			return { key: "closed", label: __("أُنجزت عبر متابعة") };
+		}
 		if (status === "closed") return { key: "closed", label: __("مغلقة") };
 		return { key: "open", label: __("تحتاج قرارًا") };
 	}
@@ -1999,6 +2009,7 @@ class NamarMyFollowups {
 		const display_reference = reference_title || this.first(item.reference_title, item.reference_name);
 		return [
 			item.unread ? __("غير مقروءة") : __("مقروءة"),
+			this.mention_status(item).label,
 			display_sender,
 			display_preview,
 			display_reference,
