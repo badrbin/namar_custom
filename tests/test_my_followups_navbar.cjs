@@ -99,6 +99,8 @@ async function main() {
   );
 
   assert.match(source, /toolbar_setup\$\{EVENT_NAMESPACE\}/);
+  assert.match(source, /\$\("\.navbar"\)\.find\("\.dropdown-notifications"\)\.first\(\)/);
+  assert.doesNotMatch(source, /header \.navbar \.dropdown-notifications/);
   assert.match(source, /href="\/app\/my-followups"/);
   assert.match(source, /namar:my-followups:count-changed/);
   assert.match(source, /جار تحديث العداد/);
