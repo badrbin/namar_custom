@@ -101,7 +101,7 @@
 		}
 
 		update_active_state() {
-			const active = frappe.get_route_str?.() === "my-followups";
+			const active = frappe.router?.current_route?.[0] === "my-followups";
 			const $link = $("#namar-my-followups-nav .namar-my-followups-link");
 			$link.toggleClass("is-active", active);
 			if (active) $link.attr("aria-current", "page");
