@@ -835,6 +835,14 @@
 	box-shadow: 0 0 0 2px rgb(36 144 239 / 8%);
 }
 
+[data-theme="dark"] .mf-mention-message.is-current .mf-message-card {
+	background: var(--mf-soft);
+}
+
+[data-theme="dark"] .mf-message-meta span {
+	color: var(--blue-300, var(--mf-ink));
+}
+
 .mf-message-card header {
 	align-items: flex-start;
 	display: flex;

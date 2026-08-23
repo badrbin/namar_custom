@@ -279,6 +279,8 @@ assert.match(source, /class="mf-search-scope"/);
 assert.match(source, /search_scope: this\.state\.search_scope/);
 assert.match(css, /\.mf-search-scope-field \{[\s\S]*?direction: rtl;/);
 assert.match(css, /@media \(min-width: 992px\) and \(max-width: 1279px\)[\s\S]*?\.mf-search-controls \{[\s\S]*?flex-direction: column;/);
+assert.match(css, /\[data-theme="dark"\] \.mf-mention-message\.is-current \.mf-message-card \{[\s\S]*?background: var\(--mf-soft\);/);
+assert.match(css, /\[data-theme="dark"\] \.mf-message-meta span \{[\s\S]*?color: var\(--blue-300, var\(--mf-ink\)\);/);
 }
 
 main().catch((error) => {
