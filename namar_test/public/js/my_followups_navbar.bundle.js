@@ -71,7 +71,9 @@
 
 		ensure_node() {
 			if (this.destroyed) return null;
-			const $notifications = $("header .navbar .dropdown-notifications").first();
+			// Frappe v15 renders the header itself as `.navbar`; mirror the
+			// framework's notifications lookup so the anchor is found reliably.
+			const $notifications = $(".navbar").find(".dropdown-notifications").first();
 			if (!$notifications.length) return null;
 
 			let $node = $("#namar-my-followups-nav");
