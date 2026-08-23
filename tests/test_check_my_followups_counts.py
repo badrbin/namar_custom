@@ -31,14 +31,9 @@ def load_script():
 
 
 class FakeResponse:
-    def __init__(self, count: int, *, secret: str):
+    def __init__(self, message: dict, *, secret: str):
         self.status_code = 200
-        self._payload = {
-            "message": {
-                "counts": {"open": count},
-                "items": [{"description": secret, "content": secret}],
-            }
-        }
+        self._payload = {"message": message}
 
     def json(self):
         return self._payload
@@ -50,6 +45,7 @@ class FakeSession:
         self.counts = list(counts)
         self.secret = secret
         self.calls: list[dict] = []
+        self.source_counts: list[int] = []
 
     def get(self, url, *, params, timeout, allow_redirects):
         self.calls.append(
@@ -61,7 +57,24 @@ class FakeSession:
                 "allow_redirects": allow_redirects,
             }
         )
-        return FakeResponse(self.counts.pop(0), secret=self.secret)
+        if url.endswith("get_my_followups_counts"):
+            mentions, followups, approvals = self.source_counts
+            message = {
+                "counts": {
+                    "mentions": mentions,
+                    "followups": followups,
+                    "approvals": approvals,
+                    "total": mentions + followups + approvals,
+                }
+            }
+        else:
+            count = self.counts.pop(0)
+            self.source_counts.append(count)
+            message = {
+                "counts": {"open": count},
+                "items": [{"description": self.secret, "content": self.secret}],
+            }
+        return FakeResponse(message, secret=self.secret)
 
 
 class ConfigGuardTestCase(unittest.TestCase):
@@ -110,7 +123,7 @@ class ReadOnlyContractTestCase(unittest.TestCase):
     def setUp(self):
         self.module = load_script()
 
-    def test_only_three_gets_are_sent_and_transcript_is_redacted(self):
+    def test_only_four_gets_are_sent_and_transcript_is_redacted(self):
         token = "token key:never-persist-this"
         content_secret = "PRIVATE-DOCUMENT-CONTENT"
         config = self.module.RunConfig(
@@ -125,11 +138,12 @@ class ReadOnlyContractTestCase(unittest.TestCase):
 
         counts = checker.check(transcript)
 
-        self.assertEqual(counts, {"mentions": 2, "followups": 4, "approvals": 6})
-        self.assertEqual(len(session.calls), 3)
+        self.assertEqual(counts, {"mentions": 2, "followups": 4, "approvals": 6, "total": 12})
+        self.assertEqual(len(session.calls), 4)
         self.assertTrue(all(call["method"] == "GET" for call in session.calls))
         self.assertTrue(all(call["allow_redirects"] is False for call in session.calls))
-        self.assertTrue(all(call["params"]["page_length"] == 1 for call in session.calls))
+        self.assertTrue(all(call["params"]["page_length"] == 1 for call in session.calls[:3]))
+        self.assertEqual(session.calls[3]["params"], {})
         self.assertEqual(
             [call["url"].removeprefix(config.base_url) for call in session.calls],
             [path for _, path, _ in self.module.ENDPOINTS],
@@ -146,6 +160,12 @@ class ReadOnlyContractTestCase(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaises(self.module.CheckFailure):
                     self.module.validate_open_count("approvals", {"counts": {"open": value}})
+
+    def test_unified_count_contract_requires_exact_sum(self):
+        with self.assertRaises(self.module.CheckFailure):
+            self.module.validate_unified_counts(
+                {"counts": {"mentions": 2, "followups": 4, "approvals": 6, "total": 11}}
+            )
 
     def test_transcript_is_written_mode_0600_outside_repository(self):
         transcript = {

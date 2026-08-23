@@ -15,6 +15,9 @@ MAX_LIMIT_START = 1_000_000
 FOLLOWUP_BUCKETS = ("all", "open", "overdue", "today", "upcoming", "recent")
 PRIORITIES = ("High", "Medium", "Low")
 MENTION_BUCKETS = ("open", "unread", "converted", "closed")
+FOLLOWUP_SEARCH_SCOPES = ("all", "document", "doctype", "employee", "content")
+APPROVAL_SEARCH_SCOPES = ("all", "document", "doctype", "state")
+MENTION_SEARCH_SCOPES = ("all", "document", "title", "employee", "content")
 
 MAX_SEARCH_LENGTH = 140
 MAX_DESCRIPTION_LENGTH = 4_000
@@ -208,6 +211,13 @@ def normalize_date(value: Any, label: str = "التاريخ") -> str:
 
 def normalize_search(value: Any) -> str:
     return clean_text(value, MAX_SEARCH_LENGTH)
+
+
+def normalize_search_scope(value: Any, allowed: tuple[str, ...]) -> str:
+    scope = clean_text(value, 30).lower() or "all"
+    if scope not in allowed:
+        raise ValueError("نطاق البحث غير صحيح")
+    return scope
 
 
 def plain_text(value: Any, max_length: int | None = None) -> str:

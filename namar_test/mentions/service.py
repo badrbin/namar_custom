@@ -10,6 +10,7 @@ from frappe.utils import get_absolute_url, now_datetime
 
 from namar_test.followups import service as followup_service
 from namar_test.followups.logic import (
+    MENTION_SEARCH_SCOPES,
     MAX_DESCRIPTION_LENGTH,
     MAX_NOTE_LENGTH,
     MAX_REFERENCE_LENGTH,
@@ -21,6 +22,7 @@ from namar_test.followups.logic import (
     normalize_priority,
     normalize_request_id,
     normalize_search,
+    normalize_search_scope,
     normalize_seen,
     parse_non_negative_int,
     parse_positive_int,
@@ -281,6 +283,29 @@ def _safe_threads(user: str) -> list[Any]:
     return safe_rows
 
 
+def get_open_mention_count() -> int:
+    """Return only readable open threads without loading details or marking them seen."""
+
+    user = _assert_authenticated()
+    rows = frappe.db.get_values(
+        THREAD_DOCTYPE,
+        {"for_user": user, "status": "Open"},
+        ["reference_doctype", "reference_name"],
+        as_dict=True,
+    ) or []
+    permission_cache: dict[tuple[str, str], bool] = {}
+    count = 0
+    for row in rows:
+        key = (row.reference_doctype, row.reference_name)
+        allowed = permission_cache.get(key)
+        if allowed is None:
+            allowed = _can_read_reference(row, user)
+            permission_cache[key] = allowed
+        if allowed:
+            count += 1
+    return count
+
+
 def _mention_counts(rows: list[Any]) -> dict[str, int]:
     counts = {"all": len(rows), "open": 0, "unread": 0, "converted": 0, "closed": 0}
     for row in rows:
@@ -298,18 +323,25 @@ def _matches_bucket(row, bucket: str) -> bool:
     return clean_text(row.status, 20).lower() == bucket
 
 
-def _matches_search(row, search: str, title: str) -> bool:
+def _matches_search(row, search: str, title: str, search_scope: str = "all") -> bool:
     if not search:
         return True
     needle = search.casefold()
-    values = (
-        row.reference_doctype,
-        row.reference_name,
-        title,
-        row.latest_preview_plain,
-        row.latest_from_user,
-        _user_full_name(row.latest_from_user),
-    )
+    values_by_scope = {
+        "document": (row.reference_name,),
+        "title": (title,),
+        "employee": (row.latest_from_user, _user_full_name(row.latest_from_user)),
+        "content": (row.latest_preview_plain,),
+        "all": (
+            row.reference_doctype,
+            row.reference_name,
+            title,
+            row.latest_preview_plain,
+            row.latest_from_user,
+            _user_full_name(row.latest_from_user),
+        ),
+    }
+    values = values_by_scope[search_scope]
     return any(needle in clean_text(value).casefold() for value in values if value)
 
 
@@ -318,10 +350,16 @@ def get_mentions(
     search: str = "",
     limit_start: int | str = 0,
     page_length: int | str = DEFAULT_MENTION_PAGE_LENGTH,
+    search_scope: str = "all",
 ) -> dict[str, Any]:
     user = _assert_authenticated()
     normalized_bucket = _logic(normalize_mention_bucket, bucket)
     normalized_search = normalize_search(search)
+    normalized_search_scope = _logic(
+        normalize_search_scope,
+        search_scope,
+        MENTION_SEARCH_SCOPES,
+    )
     start = parse_non_negative_int(limit_start, 0, 1_000_000)
     length = parse_positive_int(
         page_length,
@@ -336,7 +374,7 @@ def get_mentions(
         if not _matches_bucket(row, normalized_bucket):
             continue
         title = _reference_title(row)
-        if _matches_search(row, normalized_search, title):
+        if _matches_search(row, normalized_search, title, normalized_search_scope):
             matching.append((row, title))
 
     visible = matching[start : start + length]
@@ -345,6 +383,7 @@ def get_mentions(
         "items": [_serialize_thread(row, reference_title=title) for row, title in visible],
         "bucket": normalized_bucket,
         "search": normalized_search,
+        "search_scope": normalized_search_scope,
         "counts": counts,
         "total": len(matching),
         "limit_start": start,

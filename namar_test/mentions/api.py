@@ -11,10 +11,12 @@ def get_mentions(
     search: str = "",
     limit_start: int | str = 0,
     page_length: int | str = 25,
+    search_scope: str = "all",
 ):
     return service.get_mentions(
         bucket=bucket,
         search=search,
+        search_scope=search_scope,
         limit_start=limit_start,
         page_length=page_length,
     )

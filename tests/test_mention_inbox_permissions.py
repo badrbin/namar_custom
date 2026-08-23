@@ -48,12 +48,20 @@ class FakeMentionDatabase:
 
     def get_values(self, doctype, filters=None, fieldname="name", **kwargs):
         self.get_values_calls.append((doctype, filters, fieldname, kwargs))
-        owner = filters.get("for_user") if isinstance(filters, dict) else None
-        return [
-            FakeFrappeDict(row)
+        normalized_filters = filters if isinstance(filters, dict) else {}
+        rows = [
+            row
             for row in self.thread_rows
-            if row.get("for_user") == owner
+            if all(row.get(key) == value for key, value in normalized_filters.items())
         ]
+        if fieldname == "*":
+            return [FakeFrappeDict(row) for row in rows]
+        if isinstance(fieldname, (list, tuple)):
+            return [
+                FakeFrappeDict({key: row.get(key) for key in fieldname})
+                for row in rows
+            ]
+        return [row.get(fieldname) for row in rows]
 
 
 def load_controller(
@@ -365,6 +373,52 @@ class MentionInboxPermissionTestCase(unittest.TestCase):
                 )
             ],
         )
+
+    def test_open_count_reads_minimal_fields_and_never_counts_closed_threads(self):
+        module, fake_frappe = load_mention_service(
+            [
+                mention_thread("THREAD-OPEN", reference_name="TODO-SHARED"),
+                mention_thread("THREAD-OPEN-2", reference_name="TODO-SHARED"),
+                mention_thread("THREAD-CLOSED", status="Closed", reference_name="TODO-CLOSED"),
+                mention_thread("THREAD-HIDDEN", reference_name="TODO-HIDDEN"),
+            ],
+            readable_references={("ToDo", "TODO-SHARED")},
+        )
+
+        self.assertEqual(module.get_open_mention_count(), 2)
+        self.assertEqual(
+            fake_frappe.db.get_values_calls,
+            [
+                (
+                    "Namar Mention Thread",
+                    {"for_user": "employee@example.com", "status": "Open"},
+                    ["reference_doctype", "reference_name"],
+                    {"as_dict": True},
+                )
+            ],
+        )
+        self.assertEqual(
+            fake_frappe.permission_calls,
+            [
+                ("ToDo", "read", "TODO-SHARED", "employee@example.com"),
+                ("ToDo", "read", "TODO-HIDDEN", "employee@example.com"),
+            ],
+        )
+
+    def test_mention_search_scopes_are_explicit(self):
+        module, _ = load_mention_service([])
+        row = FakeFrappeDict(
+            reference_doctype="Purchase Invoice",
+            reference_name="PINV260115",
+            latest_preview_plain="تأكيد موعد الوصول",
+            latest_from_user="buyer@example.com",
+        )
+
+        self.assertTrue(module._matches_search(row, "260115", "HANGZHOU OUFEI", "document"))
+        self.assertFalse(module._matches_search(row, "HANGZHOU", "HANGZHOU OUFEI", "document"))
+        self.assertTrue(module._matches_search(row, "HANGZHOU", "HANGZHOU OUFEI", "title"))
+        self.assertTrue(module._matches_search(row, "موعد", "HANGZHOU OUFEI", "content"))
+        self.assertTrue(module._matches_search(row, "buyer@", "HANGZHOU OUFEI", "employee"))
 
 
 if __name__ == "__main__":

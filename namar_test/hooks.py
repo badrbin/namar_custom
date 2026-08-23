@@ -188,6 +188,7 @@ doctype_list_js = {
 
 app_include_js = [
     "comment_history.bundle.js",
+    "my_followups_navbar.bundle.js",
     "/assets/namar_test/js/doctype/cutting_template_form.js",
     "/assets/namar_test/js/doctype/delivery_note_form.js",
     "/assets/namar_test/js/doctype/installation_note_form.js",
@@ -202,6 +203,7 @@ app_include_js = [
 
 app_include_css = [
     "comment_history.bundle.css",
+    "my_followups_navbar.bundle.css",
 ]
 
 web_include_js = [

@@ -19,6 +19,7 @@ const context = {
   frappe: {
     pages: { "my-followups": {} },
     utils: {},
+    show_alert: () => {},
   },
   __: (text) => text,
   console,
@@ -38,7 +39,9 @@ function makePage() {
   page.mentions_api = "namar_test.mentions.api";
   page.state = {
     source: "mentions",
+    bucket: "open",
     priority: "",
+    search_scope: "all",
     counts: { unread: 7 },
   };
   page.source_counts = { mentions: null, followups: null, approvals: null };
@@ -177,11 +180,105 @@ async function main() {
   assert.equal(page.source_counts.followups, 9);
 }
 
+{
+  const page = makePage();
+  const events = [];
+  page.state.bucket = "closed";
+  page.state.selected_name = "THREAD-1";
+  page.state.mobile_detail = true;
+  page.selected_by_source = { mentions: "THREAD-1", followups: null, approvals: null };
+  page.set_action_busy = (value) => events.push(["busy", value]);
+  page.call = async () => ({});
+  page.render_filters = () => events.push(["filters"]);
+  page.sync_url_state = () => events.push(["sync"]);
+  page.show_mobile_queue = () => {
+    page.state.mobile_detail = false;
+    events.push(["queue"]);
+  };
+  page.load_list = async () => events.push(["list"]);
+  page.handle_mention_conflict = async () => false;
+  page.show_action_error = (error) => {
+    throw error;
+  };
+
+  const success = await page.run_mention_action({
+    method: "reopen_mention",
+    args: { thread_name: "THREAD-1" },
+    success_message: "تمت إعادة فتح الرسالة",
+    next_bucket: "open",
+  });
+
+  assert.equal(success, true);
+  assert.equal(page.state.bucket, "open");
+  assert.equal(page.state.mobile_detail, false);
+  assert.equal(page.state.selected_name, null);
+  assert.deepEqual(events, [["busy", true], ["filters"], ["sync"], ["queue"], ["list"], ["busy", false]]);
+}
+
+{
+  const page = makePage();
+  let action = null;
+  page.state.source = "mentions";
+  page.state.selected_name = "THREAD-2";
+  page.state.detail = { last_event_key: "EVENT-9" };
+  page.run_mention_action = async (options) => {
+    action = options;
+    return true;
+  };
+
+  await page.reopen_mention();
+
+  assert.equal(action.method, "reopen_mention");
+  assert.equal(action.next_bucket, "open");
+  assert.deepEqual({ ...action.args }, {
+    thread_name: "THREAD-2",
+    expected_last_event_key: "EVENT-9",
+  });
+}
+
+{
+  const page = makePage();
+  assert.deepEqual(
+    Array.from(page.search_scope_options(), ([value]) => String(value)),
+    ["all", "document", "title", "employee", "content"]
+  );
+  page.state.source = "followups";
+  assert.deepEqual(
+    Array.from(page.search_scope_options(), ([value]) => String(value)),
+    ["all", "document", "doctype", "employee", "content"]
+  );
+  page.state.source = "approvals";
+  assert.deepEqual(
+    Array.from(page.search_scope_options(), ([value]) => String(value)),
+    ["all", "document", "doctype", "state"]
+  );
+}
+
+{
+  const page = makePage();
+  page.state.source = "followups";
+  page.state.bucket = "all";
+  page.state.search = "PINV260115";
+  const payload = page.normalize_list_response({
+    items: [{ name: "TODO-1" }],
+    counts: { all: 3897 },
+    has_more: true,
+    next_start: 1,
+  });
+  assert.equal(payload.total, null);
+  assert.equal(payload.has_more, true);
+  assert.equal(payload.next_start, 1);
+}
+
 assert.match(source, /data-source-count="mentions"/);
 assert.match(source, /data-source-count="followups"/);
 assert.match(source, /data-source-count="approvals"/);
 assert.match(css, /@media \(max-width: 620px\)[\s\S]*?\.mf-source-btn \{[\s\S]*?min-width: 0;/);
 assert.match(css, /@media \(max-width: 620px\)[\s\S]*?\.mf-source-btn \.icon \{\s*display: none;/);
+assert.match(source, /class="mf-search-scope"/);
+assert.match(source, /search_scope: this\.state\.search_scope/);
+assert.match(css, /\.mf-search-scope-field \{[\s\S]*?direction: rtl;/);
+assert.match(css, /@media \(min-width: 992px\) and \(max-width: 1279px\)[\s\S]*?\.mf-search-controls \{[\s\S]*?flex-direction: column;/);
 }
 
 main().catch((error) => {
