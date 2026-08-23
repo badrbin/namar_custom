@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 import importlib.util
 import json
 import sys
@@ -39,6 +40,15 @@ class FakeDatabase:
 class FakeFrappeDict(dict):
     def __getattr__(self, key):
         return self.get(key)
+
+
+class MutableMentionThread(FakeFrappeDict):
+    def __setattr__(self, key, value):
+        self[key] = value
+
+    def save(self, **kwargs):
+        self["save_count"] = int(self.get("save_count") or 0) + 1
+        return self
 
 
 class FakeMentionDatabase:
@@ -188,6 +198,181 @@ def mention_thread(
 
 
 class MentionInboxPermissionTestCase(unittest.TestCase):
+    def test_unread_depends_only_on_event_keys_not_lifecycle_status(self):
+        module, _ = load_mention_service([])
+        for status in ("Open", "Converted", "Closed"):
+            with self.subTest(status=status, unread=False):
+                row = FakeFrappeDict(
+                    status=status,
+                    last_event_key="event-1",
+                    last_seen_event_key="event-1",
+                )
+                self.assertFalse(module._is_unread(row))
+            with self.subTest(status=status, unread=True):
+                row = FakeFrappeDict(
+                    status=status,
+                    last_event_key="event-2",
+                    last_seen_event_key="event-1",
+                )
+                self.assertTrue(module._is_unread(row))
+
+    def test_converted_thread_cannot_be_closed_outside_its_followup(self):
+        module, _ = load_mention_service([])
+        thread = FakeFrappeDict(status="Converted")
+        permissions = module._thread_permissions(thread)
+
+        self.assertTrue(permissions["can_reply"])
+        self.assertFalse(permissions["can_close"])
+        self.assertFalse(permissions["can_convert"])
+        with self.assertRaisesRegex(
+            module.frappe.ValidationError,
+            "أكمل المتابعة المرتبطة",
+        ):
+            module._close_in_memory(thread, "event-1")
+
+    def test_conversion_locks_all_matching_open_todos_before_thread_selection(self):
+        module, fake_frappe = load_mention_service([])
+        calls = []
+
+        def get_values(doctype, filters=None, fieldname="name", **kwargs):
+            calls.append((doctype, filters, fieldname, kwargs))
+            return [
+                FakeFrappeDict(name="TODO-NEW"),
+                FakeFrappeDict(name="TODO-LINKED"),
+            ]
+
+        fake_frappe.db.get_values = get_values
+        thread = FakeFrappeDict(
+            for_user="employee@example.com",
+            reference_doctype="Sales Order",
+            reference_name="SO-1",
+            converted_to_todo="TODO-LINKED",
+        )
+
+        todos = module._lock_open_todos(thread)
+        selected = module._select_locked_todo(thread, todos)
+
+        self.assertEqual(selected.name, "TODO-LINKED")
+        self.assertEqual(calls[0][0], "ToDo")
+        self.assertEqual(
+            calls[0][1],
+            {
+                "reference_type": "Sales Order",
+                "reference_name": "SO-1",
+                "allocated_to": "employee@example.com",
+                "status": "Open",
+            },
+        )
+        self.assertTrue(calls[0][3]["for_update"])
+        self.assertTrue(calls[0][3]["as_dict"])
+
+    def test_conversion_reuses_existing_locked_todo_and_links_open_thread(self):
+        module, _ = load_mention_service([])
+        snapshot = MutableMentionThread(
+            name="THREAD-1",
+            for_user="employee@example.com",
+            status="Open",
+            reference_doctype="Sales Order",
+            reference_name="SO-1",
+            latest_preview_plain="راجع الطلب",
+            last_event_key="event-1",
+            converted_to_todo=None,
+        )
+        thread = MutableMentionThread(snapshot)
+        locked_todo = FakeFrappeDict(
+            name="TODO-EXISTING",
+            status="Open",
+            allocated_to="employee@example.com",
+            reference_type="Sales Order",
+            reference_name="SO-1",
+        )
+        todo_doc = FakeFrappeDict(locked_todo)
+        state_events = []
+
+        with (
+            patch.object(module, "_savepoint", side_effect=lambda *args: nullcontext()),
+            patch.object(
+                module,
+                "_get_owned_thread",
+                side_effect=[snapshot, thread],
+            ),
+            patch.object(module, "_get_reference_doc", return_value=FakeFrappeDict()),
+            patch.object(module, "_assert_expected_event", return_value="event-1"),
+            patch.object(module, "_lock_open_todos", return_value=[locked_todo]),
+            patch.object(module, "_todo_document", return_value=todo_doc),
+            patch.object(
+                module,
+                "_append_state_event",
+                side_effect=lambda *args: state_events.append(args[1:]),
+            ),
+            patch.object(
+                module,
+                "_serialize_thread",
+                side_effect=lambda row: {"status": row.status, "todo": row.converted_to_todo},
+            ),
+        ):
+            result = module.convert_mention_to_followup(
+                "THREAD-1",
+                "2026-08-24",
+                expected_last_event_key="event-1",
+            )
+
+        self.assertEqual(thread.status, "Converted")
+        self.assertEqual(thread.converted_to_todo, "TODO-EXISTING")
+        self.assertEqual(thread.last_seen_event_key, "event-1")
+        self.assertEqual(thread.save_count, 1)
+        self.assertEqual(state_events, [("Converted", "حُوّلت الإشارة إلى متابعة")])
+        self.assertEqual(
+            result["mention"],
+            {"status": "Converted", "todo": "TODO-EXISTING"},
+        )
+
+    def test_conversion_is_idempotent_when_locked_todo_is_already_linked(self):
+        module, _ = load_mention_service([])
+        snapshot = MutableMentionThread(
+            name="THREAD-1",
+            for_user="employee@example.com",
+            status="Converted",
+            reference_doctype="Sales Order",
+            reference_name="SO-1",
+            latest_preview_plain="راجع الطلب",
+            last_event_key="event-1",
+            converted_to_todo="TODO-EXISTING",
+        )
+        thread = MutableMentionThread(snapshot)
+        locked_todo = FakeFrappeDict(
+            name="TODO-EXISTING",
+            status="Open",
+            allocated_to="employee@example.com",
+            reference_type="Sales Order",
+            reference_name="SO-1",
+        )
+
+        with (
+            patch.object(module, "_savepoint", side_effect=lambda *args: nullcontext()),
+            patch.object(module, "_get_owned_thread", side_effect=[snapshot, thread]),
+            patch.object(module, "_get_reference_doc", return_value=FakeFrappeDict()),
+            patch.object(module, "_assert_expected_event", return_value="event-1"),
+            patch.object(module, "_lock_open_todos", return_value=[locked_todo]),
+            patch.object(module, "_todo_document", return_value=locked_todo),
+            patch.object(module, "_append_state_event") as append_event,
+            patch.object(
+                module,
+                "_serialize_thread",
+                side_effect=lambda row: {"status": row.status, "todo": row.converted_to_todo},
+            ),
+        ):
+            module.convert_mention_to_followup(
+                "THREAD-1",
+                "2026-08-24",
+                expected_last_event_key="event-1",
+            )
+
+        append_event.assert_not_called()
+        self.assertEqual(thread.get("save_count"), None)
+        self.assertEqual(thread.status, "Converted")
+        self.assertEqual(thread.converted_to_todo, "TODO-EXISTING")
+
     def test_doctypes_have_no_rest_read_permission(self):
         thread_schema = json.loads(THREAD_SCHEMA.read_text(encoding="utf-8"))
         event_schema = json.loads(EVENT_SCHEMA.read_text(encoding="utf-8"))

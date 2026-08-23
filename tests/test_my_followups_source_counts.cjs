@@ -56,6 +56,31 @@ function makePage() {
   return page;
 }
 
+function renderMentionDetail(detail) {
+  const page = makePage();
+  let html = "";
+  page.state.detail = {
+    reference_doctype: "Sales Order",
+    reference_name: "SO-1",
+    messages: [],
+    ...detail,
+  };
+  page.$detail = {
+    html: (value) => {
+      html = value;
+    },
+  };
+  page.icon = () => "";
+  page.escape = (value) => String(value ?? "");
+  page.escape_attr = (value) => String(value ?? "");
+  page.user_display = () => "";
+  page.mention_avatar = () => "";
+  page.render_mention_messages = () => "";
+  page.init_mention_reply_editor = () => {};
+  page.render_mention_detail();
+  return html;
+}
+
 async function main() {
 {
   const page = makePage();
@@ -270,6 +295,92 @@ async function main() {
   assert.equal(payload.next_start, 1);
 }
 
+{
+  const page = makePage();
+  assert.equal(page.mention_status({ status: "Open" }).label, "تحتاج قرارًا");
+  assert.equal(page.mention_status({ status: "Converted" }).label, "قيد المتابعة");
+  assert.equal(page.mention_status({ status: "Closed" }).label, "مغلقة");
+  assert.equal(
+    page.mention_status({ status: "Closed", closed_via_followup: 1 }).label,
+    "أُنجزت عبر متابعة"
+  );
+
+  page.state.bucket = "converted";
+  assert.equal(page.mention_empty_message(), "لا توجد رسائل قيد المتابعة حاليًا.");
+  assert.match(
+    page.mention_aria_label(
+      { status: "Converted", unread: true },
+      "خالد",
+      "راجع الطلب",
+      "SO-1"
+    ),
+    /^غير مقروءة، قيد المتابعة،/
+  );
+}
+
+{
+  const convertedHtml = renderMentionDetail({
+    status: "Converted",
+    converted_to_todo: "TODO-1",
+    permissions: {
+      can_reply: true,
+      can_close: false,
+      can_reopen: false,
+      can_convert: false,
+    },
+  });
+  assert.match(convertedHtml, /قيد المتابعة/);
+  assert.match(convertedHtml, /data-todo-name="TODO-1"/);
+  assert.match(convertedHtml, /إرسال الرد/);
+  assert.doesNotMatch(convertedHtml, /إرسال وإغلاق/);
+  assert.doesNotMatch(convertedHtml, /إغلاق الرسالة/);
+
+  const directClosedHtml = renderMentionDetail({
+    status: "Closed",
+    converted_to_todo: "TODO-OLD",
+    permissions: { can_reopen: true },
+  });
+  assert.match(directClosedHtml, /مغلقة/);
+  assert.match(directClosedHtml, /إعادة فتح الرسالة/);
+  assert.doesNotMatch(directClosedHtml, /أُنجزت عبر متابعة/);
+  assert.doesNotMatch(directClosedHtml, /data-todo-name=/);
+
+  const completedHtml = renderMentionDetail({
+    status: "Closed",
+    closed_via_followup: 1,
+    converted_to_todo: "TODO-2",
+    permissions: { can_reopen: true },
+  });
+  assert.match(completedHtml, /أُنجزت عبر متابعة/);
+  assert.match(completedHtml, /data-todo-name="TODO-2"/);
+
+  const deletedCompletedHtml = renderMentionDetail({
+    status: "Closed",
+    closed_via_followup: 1,
+    converted_to_todo: null,
+    permissions: { can_reopen: true },
+  });
+  assert.match(deletedCompletedHtml, /أُنجزت عبر متابعة/);
+  assert.match(deletedCompletedHtml, /سجل المتابعة غير متاح/);
+  assert.doesNotMatch(deletedCompletedHtml, /data-todo-name=/);
+}
+
+{
+  const page = makePage();
+  let route = null;
+  page.state.detail = { converted_to_todo: "TODO-3" };
+  page.$detail = {
+    find: () => ({ data: () => "TODO-3" }),
+  };
+  context.frappe.set_route = (...parts) => {
+    route = parts;
+  };
+
+  page.open_converted_followup();
+
+  assert.deepEqual(route, ["Form", "ToDo", "TODO-3"]);
+}
+
 assert.match(source, /data-source-count="mentions"/);
 assert.match(source, /data-source-count="followups"/);
 assert.match(source, /data-source-count="approvals"/);
@@ -281,6 +392,9 @@ assert.match(css, /\.mf-search-scope-field \{[\s\S]*?direction: rtl;/);
 assert.match(css, /@media \(min-width: 992px\) and \(max-width: 1279px\)[\s\S]*?\.mf-search-controls \{[\s\S]*?flex-direction: column;/);
 assert.match(css, /\[data-theme="dark"\] \.mf-mention-message\.is-current \.mf-message-card \{[\s\S]*?background: var\(--mf-soft\);/);
 assert.match(css, /\[data-theme="dark"\] \.mf-message-meta span \{[\s\S]*?color: var\(--blue-300, var\(--mf-ink\)\);/);
+assert.match(source, /\{ key: "unread", label: __\("غير مقروءة"\) \}/);
+assert.match(source, /\{ key: "converted", label: __\("قيد المتابعة"\) \}/);
+assert.doesNotMatch(source, /__\("محوّلة"\)/);
 }
 
 main().catch((error) => {
