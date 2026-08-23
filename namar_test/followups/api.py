@@ -6,16 +6,23 @@ from namar_test.followups import service
 
 
 @frappe.whitelist()
+def get_my_followups_counts():
+    return service.get_my_followups_counts()
+
+
+@frappe.whitelist()
 def get_followups(
     bucket: str = "all",
     search: str = "",
     limit_start: int | str = 0,
     page_length: int | str = 50,
     priority: str = "",
+    search_scope: str = "all",
 ):
     return service.get_followups(
         bucket=bucket,
         search=search,
+        search_scope=search_scope,
         priority=priority,
         limit_start=limit_start,
         page_length=page_length,
@@ -83,9 +90,11 @@ def get_approvals(
     search: str = "",
     limit_start: int | str = 0,
     page_length: int | str = 50,
+    search_scope: str = "all",
 ):
     return service.get_approvals(
         search=search,
+        search_scope=search_scope,
         limit_start=limit_start,
         page_length=page_length,
     )

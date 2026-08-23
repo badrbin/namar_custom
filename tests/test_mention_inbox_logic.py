@@ -3,6 +3,9 @@ from __future__ import annotations
 import unittest
 
 from namar_test.followups.logic import (
+    APPROVAL_SEARCH_SCOPES,
+    FOLLOWUP_SEARCH_SCOPES,
+    MENTION_SEARCH_SCOPES,
     mention_event_key,
     mention_reply_event_key,
     mention_state_event_key,
@@ -10,6 +13,7 @@ from namar_test.followups.logic import (
     normalize_mention_bucket,
     normalize_request_id,
     normalize_seen,
+    normalize_search_scope,
     validate_expected_mention_event_key,
 )
 
@@ -112,6 +116,14 @@ class MentionInboxLogicTestCase(unittest.TestCase):
             validate_expected_mention_event_key(event_key, "f" * 64)
         with self.assertRaisesRegex(ValueError, "رمز نسخة الإشارة غير صحيح"):
             validate_expected_mention_event_key("not-a-key", event_key)
+
+    def test_search_scope_is_allowlisted_per_source(self):
+        self.assertEqual(normalize_search_scope("", FOLLOWUP_SEARCH_SCOPES), "all")
+        self.assertEqual(normalize_search_scope(" employee ", FOLLOWUP_SEARCH_SCOPES), "employee")
+        self.assertEqual(normalize_search_scope("title", MENTION_SEARCH_SCOPES), "title")
+        self.assertEqual(normalize_search_scope("state", APPROVAL_SEARCH_SCOPES), "state")
+        with self.assertRaisesRegex(ValueError, "نطاق البحث غير صحيح"):
+            normalize_search_scope("title", FOLLOWUP_SEARCH_SCOPES)
 
 
 if __name__ == "__main__":

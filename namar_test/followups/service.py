@@ -9,6 +9,8 @@ from frappe.model.workflow import get_transitions, get_workflow_name, get_workfl
 from frappe.utils import get_absolute_url, nowdate
 
 from namar_test.followups.logic import (
+    APPROVAL_SEARCH_SCOPES,
+    FOLLOWUP_SEARCH_SCOPES,
     MAX_DESCRIPTION_LENGTH,
     MAX_NOTE_LENGTH,
     MAX_REFERENCE_LENGTH,
@@ -22,6 +24,7 @@ from namar_test.followups.logic import (
     normalize_priority,
     normalize_priority_filter,
     normalize_search,
+    normalize_search_scope,
     page_window,
     pagination,
     plain_text,
@@ -277,26 +280,39 @@ def _close_exact_todo(todo) -> None:
     todo.save()
 
 
-def _followup_search_filters(search: str) -> list[list[str]]:
+def _followup_search_filters(search: str, search_scope: str = "all") -> list[list[str]]:
     if not search:
         return []
     pattern = f"%{search}%"
-    return [
-        ["ToDo", "description", "like", pattern],
-        ["ToDo", "reference_type", "like", pattern],
-        ["ToDo", "reference_name", "like", pattern],
-        ["ToDo", "assigned_by", "like", pattern],
-    ]
+    fields = {
+        "document": ("reference_name",),
+        "doctype": ("reference_type",),
+        "employee": ("assigned_by", "assigned_by_full_name"),
+        "content": ("description",),
+        "all": (
+            "description",
+            "reference_type",
+            "reference_name",
+            "assigned_by",
+            "assigned_by_full_name",
+        ),
+    }
+    return [["ToDo", fieldname, "like", pattern] for fieldname in fields[search_scope]]
 
 
-def _approval_search_filters(search: str) -> list[list[str]]:
+def _approval_search_filters(search: str, search_scope: str = "all") -> list[list[str]]:
     if not search:
         return []
     pattern = f"%{search}%"
+    fields = {
+        "document": ("reference_name",),
+        "doctype": ("reference_doctype",),
+        "state": ("workflow_state",),
+        "all": ("reference_doctype", "reference_name", "workflow_state"),
+    }
     return [
-        ["Workflow Action", "reference_doctype", "like", pattern],
-        ["Workflow Action", "reference_name", "like", pattern],
-        ["Workflow Action", "workflow_state", "like", pattern],
+        ["Workflow Action", fieldname, "like", pattern]
+        for fieldname in fields[search_scope]
     ]
 
 
@@ -311,6 +327,33 @@ def _approval_counts() -> dict[str, int]:
     )
     open_count = rows[0].get("count") if rows else 0
     return {"open": int(open_count or 0)}
+
+
+def _followup_open_count(user: str) -> int:
+    # get_list مقصودة حتى يبقى Permission Query مطبقًا، إضافة إلى قيد المكلّف.
+    rows = frappe.get_list(
+        "ToDo",
+        fields=["count(name) as count"],
+        filters={"allocated_to": user, "status": "Open"},
+        limit_page_length=1,
+    )
+    open_count = rows[0].get("count") if rows else 0
+    return int(open_count or 0)
+
+
+def get_my_followups_counts() -> dict[str, dict[str, int]]:
+    user = _assert_authenticated()
+
+    # Import محلي لتجنب الدوران؛ mentions.service يعتمد أصلًا على هذه الخدمة.
+    from namar_test.mentions import service as mention_service
+
+    counts = {
+        "mentions": int(mention_service.get_open_mention_count()),
+        "followups": _followup_open_count(user),
+        "approvals": int(_approval_counts()["open"]),
+    }
+    counts["total"] = sum(counts.values())
+    return {"counts": counts}
 
 
 def _followup_counts(user: str, current_date: str, priority: str = "") -> dict[str, int]:
@@ -331,10 +374,16 @@ def get_followups(
     limit_start: int | str = 0,
     page_length: int | str = 50,
     priority: str = "",
+    search_scope: str = "all",
 ) -> dict[str, Any]:
     user = _assert_authenticated()
     normalized_bucket = _logic(normalize_bucket, bucket)
     normalized_search = normalize_search(search)
+    normalized_search_scope = _logic(
+        normalize_search_scope,
+        search_scope,
+        FOLLOWUP_SEARCH_SCOPES,
+    )
     normalized_priority = _logic(normalize_priority_filter, priority)
     start, length, query_length = page_window(limit_start, page_length)
     current_date = nowdate()
@@ -345,7 +394,7 @@ def get_followups(
         "ToDo",
         fields=list(TODO_FIELDS),
         filters=filters,
-        or_filters=_followup_search_filters(normalized_search),
+        or_filters=_followup_search_filters(normalized_search, normalized_search_scope),
         order_by=order_by,
         limit_start=start,
         limit_page_length=query_length,
@@ -360,6 +409,7 @@ def get_followups(
         {
             "bucket": normalized_bucket,
             "search": normalized_search,
+            "search_scope": normalized_search_scope,
             "priority": normalized_priority,
             "today": current_date,
             "counts": _followup_counts(user, current_date, normalized_priority),
@@ -608,9 +658,15 @@ def get_approvals(
     search: str = "",
     limit_start: int | str = 0,
     page_length: int | str = 50,
+    search_scope: str = "all",
 ) -> dict[str, Any]:
     _assert_authenticated()
     normalized_search = normalize_search(search)
+    normalized_search_scope = _logic(
+        normalize_search_scope,
+        search_scope,
+        APPROVAL_SEARCH_SCOPES,
+    )
     start, length, query_length = page_window(limit_start, page_length)
 
     # get_list مقصودة هنا: فهي تطبق Permission Query القياسي لـ Workflow Action.
@@ -618,7 +674,7 @@ def get_approvals(
         "Workflow Action",
         fields=list(WORKFLOW_ACTION_FIELDS),
         filters={"status": "Open"},
-        or_filters=_approval_search_filters(normalized_search),
+        or_filters=_approval_search_filters(normalized_search, normalized_search_scope),
         order_by="modified desc",
         limit_start=start,
         limit_page_length=query_length,
@@ -630,6 +686,7 @@ def get_approvals(
         length,
     )
     result["search"] = normalized_search
+    result["search_scope"] = normalized_search_scope
     result["counts"] = _approval_counts()
     return result
 

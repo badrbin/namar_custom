@@ -3,7 +3,7 @@
 
 الوضع الافتراضي dry-run محلي بلا قراءة لملف البيئة وبلا اتصال. التشغيل الحي
 يتطلب ``--run`` و``--confirm-site`` مطابقًا لـ ``FRAPPE_TEST_SITE``، ويستدعي
-ثلاث دوال قراءة فقط بصفحة طولها عنصر واحد. لا يحفظ transcript التوكن أو
+ثلاث دوال المصادر ونقطة التجميع الموحدة عبر GET فقط. لا يحفظ transcript التوكن أو
 محتوى العناصر أو نص الاستجابة.
 """
 
@@ -42,6 +42,11 @@ ENDPOINTS = (
         "approvals",
         "/api/method/namar_test.followups.api.get_approvals",
         {"search": "", "limit_start": 0, "page_length": 1},
+    ),
+    (
+        "unified",
+        "/api/method/namar_test.followups.api.get_my_followups_counts",
+        {},
     ),
 )
 
@@ -158,6 +163,22 @@ def validate_open_count(endpoint: str, payload: Any) -> int:
     return value
 
 
+def validate_unified_counts(payload: Any) -> dict[str, int]:
+    if not isinstance(payload, dict) or not isinstance(payload.get("counts"), dict):
+        raise CheckFailure("عقد unified لا يعيد counts")
+    raw = payload["counts"]
+    keys = ("mentions", "followups", "approvals", "total")
+    counts: dict[str, int] = {}
+    for key in keys:
+        value = raw.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise CheckFailure(f"counts.{key} في unified يجب أن يكون عددًا صحيحًا غير سالب")
+        counts[key] = value
+    if counts["total"] != counts["mentions"] + counts["followups"] + counts["approvals"]:
+        raise CheckFailure("counts.total في unified لا يساوي مجموع المصادر")
+    return counts
+
+
 class CountsChecker:
     def __init__(
         self,
@@ -177,13 +198,14 @@ class CountsChecker:
 
     def check(self, transcript: dict[str, Any]) -> dict[str, int]:
         counts: dict[str, int] = {}
+        unified_counts: dict[str, int] | None = None
         for name, path, params in ENDPOINTS:
             entry: dict[str, Any] = {
                 "endpoint": name,
                 "method": "GET",
                 "path": path,
                 "argument_keys": sorted(params),
-                "page_length": 1,
+                "page_length": params.get("page_length"),
                 "started_at_utc": datetime.now(timezone.utc).isoformat(),
             }
             transcript["requests"].append(entry)
@@ -215,14 +237,24 @@ class CountsChecker:
                 entry["error_category"] = "invalid_envelope"
                 raise CheckFailure(f"غلاف استجابة {name} غير صحيح")
             try:
-                open_count = validate_open_count(name, envelope["message"])
+                if name == "unified":
+                    unified_counts = validate_unified_counts(envelope["message"])
+                    open_count = unified_counts["total"]
+                else:
+                    open_count = validate_open_count(name, envelope["message"])
             except CheckFailure:
                 entry["error_category"] = "invalid_counts_contract"
                 raise
             entry["counts_open"] = open_count
             entry["contract"] = "ok"
             counts[name] = open_count
-        return counts
+        source_counts = {name: counts[name] for name in ("mentions", "followups", "approvals")}
+        if unified_counts is None:
+            raise CheckFailure("لم تُقرأ نقطة التجميع unified")
+        if any(unified_counts[name] != value for name, value in source_counts.items()):
+            raise CheckFailure("العداد الموحد لا يطابق عدادات المصادر")
+        source_counts["total"] = unified_counts["total"]
+        return source_counts
 
 
 def new_transcript(config: RunConfig) -> dict[str, Any]:
@@ -279,8 +311,8 @@ def dry_run_summary(args: argparse.Namespace) -> dict[str, Any]:
         "required_to_execute": ["--run", "--confirm-site <FRAPPE_TEST_SITE>"],
         "endpoints": [name for name, _, _ in ENDPOINTS],
         "http_method": "GET",
-        "page_length": 1,
-        "contract": "counts.open integer >= 0",
+        "source_page_length": 1,
+        "contract": "source counts.open >= 0; unified total = sum(sources)",
     }
 
 
@@ -288,7 +320,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="تحقق قراءة فقط من عدادات متابعاتي؛ الافتراضي dry-run بلا اتصال.",
     )
-    parser.add_argument("--run", action="store_true", help="ينفذ استدعاءات القراءة الثلاثة.")
+    parser.add_argument("--run", action="store_true", help="ينفذ أربعة استدعاءات قراءة GET.")
     parser.add_argument(
         "--confirm-site",
         default="",

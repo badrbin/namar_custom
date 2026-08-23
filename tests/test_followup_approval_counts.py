@@ -139,6 +139,89 @@ class ApprovalCountsTestCase(unittest.TestCase):
 
         self.assertEqual(result["counts"], {"open": 0})
 
+    def test_search_scopes_limit_fields_to_the_selected_meaning(self):
+        module, _ = load_service()
+
+        self.assertEqual(
+            module._followup_search_filters("PINV", "document"),
+            [["ToDo", "reference_name", "like", "%PINV%"]],
+        )
+        self.assertEqual(
+            module._followup_search_filters("خالد", "employee"),
+            [
+                ["ToDo", "assigned_by", "like", "%خالد%"],
+                ["ToDo", "assigned_by_full_name", "like", "%خالد%"],
+            ],
+        )
+        self.assertEqual(
+            module._approval_search_filters("اعتماد", "state"),
+            [["Workflow Action", "workflow_state", "like", "%اعتماد%"]],
+        )
+
+    def test_approval_search_scope_reaches_the_query_and_response_contract(self):
+        module, fake_frappe = load_service(
+            action_rows=[workflow_action("WA-1")],
+            count_rows=[FakeFrappeDict(count=1)],
+        )
+
+        result = module.get_approvals(
+            search="اعتماد",
+            search_scope="state",
+            page_length=2,
+        )
+
+        self.assertEqual(result["search_scope"], "state")
+        self.assertEqual(
+            fake_frappe.get_list_calls[0][1]["or_filters"],
+            [["Workflow Action", "workflow_state", "like", "%اعتماد%"]],
+        )
+
+    def test_followup_open_count_uses_permission_aware_aggregate(self):
+        module, fake_frappe = load_service(count_rows=[FakeFrappeDict(count=4)])
+
+        self.assertEqual(module._followup_open_count("employee@example.com"), 4)
+        doctype, options = fake_frappe.get_list_calls[-1]
+        self.assertEqual(doctype, "ToDo")
+        self.assertEqual(options["fields"], ["count(name) as count"])
+        self.assertEqual(
+            options["filters"],
+            {"allocated_to": "employee@example.com", "status": "Open"},
+        )
+        self.assertEqual(options["limit_page_length"], 1)
+
+    def test_unified_counts_are_open_only_and_total_is_the_sum(self):
+        module, _ = load_service()
+        mention_service = ModuleType("namar_test.mentions.service")
+        mention_service.get_open_mention_count = lambda: 2
+        mention_package = ModuleType("namar_test.mentions")
+        mention_package.service = mention_service
+
+        with (
+            patch.object(module, "_followup_open_count", return_value=4),
+            patch.object(module, "_approval_counts", return_value={"open": 6}),
+            patch.dict(
+                sys.modules,
+                {
+                    "namar_test.mentions": mention_package,
+                    "namar_test.mentions.service": mention_service,
+                },
+            ),
+        ):
+            result = module.get_my_followups_counts()
+
+        self.assertEqual(
+            result,
+            {"counts": {"mentions": 2, "followups": 4, "approvals": 6, "total": 12}},
+        )
+        self.assertNotIn("items", result)
+
+    def test_unified_counts_reject_guest_before_loading_mentions(self):
+        module, fake_frappe = load_service()
+        fake_frappe.session.user = "Guest"
+
+        with self.assertRaisesRegex(fake_frappe.PermissionError, "يلزم تسجيل الدخول"):
+            module.get_my_followups_counts()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -21,6 +21,7 @@ class NamarMyFollowups {
 			source: deep_link.source,
 			bucket: deep_link.source === "mentions" ? "open" : "all",
 			search: "",
+			search_scope: "all",
 			priority: "",
 			items: [],
 			counts: {},
@@ -114,13 +115,19 @@ class NamarMyFollowups {
 
 					<aside class="mf-queue-panel" aria-label="${this.escape(__("قائمة العمل"))}">
 						<div class="mf-queue-tools">
-							<div class="mf-search-box" role="search">
-								<span class="mf-search-icon">${this.icon("search", "sm")}</span>
-								<label class="sr-only" for="mf-followups-search">${this.escape(__("البحث في قائمة العمل"))}</label>
-								<input id="mf-followups-search" type="search" class="mf-search-input" placeholder="${this.escape(this.search_placeholder())}" autocomplete="off" />
-								<button type="button" class="mf-clear-search" aria-label="${this.escape(__("مسح البحث"))}" hidden>
-									${this.icon("close", "xs")}
-								</button>
+							<div class="mf-search-controls">
+								<label class="mf-search-scope-field" for="mf-followups-search-scope">
+									<span>${this.escape(__("البحث حسب"))}</span>
+									<select id="mf-followups-search-scope" class="mf-search-scope"></select>
+								</label>
+								<div class="mf-search-box" role="search">
+									<span class="mf-search-icon">${this.icon("search", "sm")}</span>
+									<label class="sr-only" for="mf-followups-search">${this.escape(__("البحث في قائمة العمل"))}</label>
+									<input id="mf-followups-search" type="search" class="mf-search-input" placeholder="${this.escape(this.search_placeholder())}" autocomplete="off" />
+									<button type="button" class="mf-clear-search" aria-label="${this.escape(__("مسح البحث"))}" hidden>
+										${this.icon("close", "xs")}
+									</button>
+								</div>
 							</div>
 							<button type="button" class="mf-icon-button mf-filter-button" aria-label="${this.escape(__("تصفية حسب الأولوية"))}" title="${this.escape(__("تصفية حسب الأولوية"))}">
 								${this.icon("filter", "sm")}
@@ -141,8 +148,10 @@ class NamarMyFollowups {
 		this.$filters = this.$root.find(".mf-filter-bar");
 		this.$pagination = this.$root.find(".mf-pagination");
 		this.$search = this.$root.find(".mf-search-input");
+		this.$search_scope = this.$root.find(".mf-search-scope");
 		this.$clear_search = this.$root.find(".mf-clear-search");
 		this.$root.find(".mf-filter-button").prop("hidden", this.state.source !== "followups");
+		this.render_search_scope();
 		this.render_source_counts();
 		this.render_filters();
 		this.render_detail_empty();
@@ -228,6 +237,13 @@ class NamarMyFollowups {
 		this.source_count_status[source] = "ready";
 		this.source_count_loaded_at[source] = Date.now();
 		this.render_source_counts();
+		if (typeof $ === "function" && typeof document !== "undefined") {
+			$(document).trigger("namar:my-followups:count-changed", [{
+				source,
+				count: this.source_counts[source],
+				force: Boolean(this.state.action_busy),
+			}]);
+		}
 	}
 
 	sync_source_count_from_list(source, payload) {
@@ -300,6 +316,13 @@ class NamarMyFollowups {
 			}, 350);
 		});
 
+		this.$search_scope.on("change", (event) => {
+			if (this.state.action_busy) return;
+			this.state.search_scope = String(event.currentTarget.value || "all");
+			this.$search.attr("placeholder", this.search_placeholder());
+			if (this.state.search) this.load_list();
+		});
+
 		this.$root.on("click", ".mf-clear-search", () => {
 			window.clearTimeout(this.search_timer);
 			this.$search.val("").trigger("focus");
@@ -348,11 +371,13 @@ class NamarMyFollowups {
 			return;
 		}
 
+		window.clearTimeout(this.search_timer);
 		this.selected_by_source[this.state.source] = this.state.selected_name;
 		this.state.source = source;
 		if (source !== "mentions" || update_url) this.pending_thread = "";
 		this.state.bucket = source === "mentions" ? "open" : "all";
 		this.state.search = "";
+		this.state.search_scope = "all";
 		this.state.priority = "";
 		this.state.selected_name = this.selected_by_source[source];
 		this.state.detail = null;
@@ -366,6 +391,7 @@ class NamarMyFollowups {
 		this.detail_sequence += 1;
 		this.$search.val("");
 		this.$clear_search.prop("hidden", true);
+		this.render_search_scope();
 		this.$root.find(".mf-filter-button")
 			.prop("hidden", source !== "followups")
 			.removeClass("is-active");
@@ -469,6 +495,7 @@ class NamarMyFollowups {
 		try {
 			const args = {
 				search: this.state.search,
+				search_scope: this.state.search_scope,
 				limit_start,
 				page_length: this.state.page_length,
 			};
@@ -1423,6 +1450,7 @@ class NamarMyFollowups {
 		if (this.state.source !== "mentions" || !this.state.selected_name) return;
 		await this.run_mention_action({
 			method: "reopen_mention",
+			next_bucket: "open",
 			args: {
 				thread_name: this.state.selected_name,
 				expected_last_event_key: this.state.detail?.last_event_key,
@@ -1482,6 +1510,7 @@ class NamarMyFollowups {
 						this.state.selected_name = null;
 						this.selected_by_source.mentions = null;
 						this.sync_url_state("mentions");
+						this.show_mobile_queue();
 						await this.load_list();
 						await this.load_source_count("followups", { force: true });
 					}
@@ -1500,7 +1529,13 @@ class NamarMyFollowups {
 		this.prepare_dialog_rtl(dialog);
 	}
 
-	async run_mention_action({ method, args, success_message, preserve_selection = false }) {
+	async run_mention_action({
+		method,
+		args,
+		success_message,
+		preserve_selection = false,
+		next_bucket = "",
+	}) {
 		this.set_action_busy(true);
 		try {
 			await this.call(method, args, this.mentions_api);
@@ -1508,7 +1543,12 @@ class NamarMyFollowups {
 			if (!preserve_selection) {
 				this.state.selected_name = null;
 				this.selected_by_source.mentions = null;
+				if (next_bucket) {
+					this.state.bucket = next_bucket;
+					this.render_filters();
+				}
 				this.sync_url_state("mentions");
+				this.show_mobile_queue();
 			}
 			await this.load_list({ preserve_selection });
 			return true;
@@ -1654,6 +1694,7 @@ class NamarMyFollowups {
 			if (!preserve_selection) {
 				this.state.selected_name = null;
 				this.selected_by_source.followups = null;
+				this.show_mobile_queue();
 			}
 			await this.load_list({ preserve_selection });
 			return true;
@@ -1668,8 +1709,10 @@ class NamarMyFollowups {
 	set_action_busy(busy) {
 		this.state.action_busy = busy;
 		if (busy) {
+			// إذا بدأ إجراء أثناء مهلة البحث، اجعل القائمة التالية تطابق النص الظاهر.
+			this.state.search = String(this.$search?.val?.() || "").trim();
 			window.clearTimeout(this.search_timer);
-			this.$root.find("button:not(:disabled), input:not(:disabled), textarea:not(:disabled)")
+			this.$root.find("button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled)")
 				.attr("data-mf-busy-disabled", "1")
 				.prop("disabled", true);
 		} else {
@@ -1760,7 +1803,7 @@ class NamarMyFollowups {
 		const bucket_total = ["mentions", "followups"].includes(this.state.source)
 			? counts[this.state.bucket]
 			: counts.all;
-		const total_value = payload.total ?? bucket_total;
+		const total_value = this.state.search ? payload.total : (payload.total ?? bucket_total);
 		const total = total_value === undefined || total_value === null ? null : this.number(total_value);
 		const has_more = Boolean(payload.has_more ?? (total !== null && items.length < total));
 		const next_start = payload.next_start ?? (has_more ? this.state.limit_start + items.length : null);
@@ -1875,9 +1918,62 @@ class NamarMyFollowups {
 	}
 
 	search_placeholder() {
-		if (this.state.source === "mentions") return __("ابحث في الوارد");
-		if (this.state.source === "approvals") return __("ابحث في الموافقات");
-		return __("ابحث في المتابعات");
+		const placeholders = {
+			document: __("اكتب رقم المستند"),
+			doctype: __("اكتب نوع المستند"),
+			title: __("اكتب العنوان أو اسم الجهة"),
+			employee: __("اكتب اسم الموظف أو بريده"),
+			content: this.state.source === "mentions"
+				? __("اكتب كلمة من نص الرسالة")
+				: __("اكتب كلمة من نص المهمة"),
+			state: __("اكتب حالة الموافقة"),
+		};
+		if (this.state.search_scope !== "all") {
+			return placeholders[this.state.search_scope] || __("اكتب عبارة البحث");
+		}
+		if (this.state.source === "mentions") return __("ابحث في كل بيانات الوارد");
+		if (this.state.source === "approvals") return __("ابحث في كل بيانات الموافقات");
+		return __("ابحث في كل بيانات المتابعات");
+	}
+
+	search_scope_options() {
+		if (this.state.source === "mentions") {
+			return [
+				["all", __("كل الحقول")],
+				["document", __("رقم المستند")],
+				["title", __("العنوان أو الجهة")],
+				["employee", __("آخر موظف مرسل")],
+				["content", __("نص آخر رسالة")],
+			];
+		}
+		if (this.state.source === "approvals") {
+			return [
+				["all", __("كل الحقول")],
+				["document", __("رقم المستند")],
+				["doctype", __("نوع المستند")],
+				["state", __("حالة الموافقة")],
+			];
+		}
+		return [
+			["all", __("كل الحقول")],
+			["document", __("رقم المستند")],
+			["doctype", __("نوع المستند")],
+			["employee", __("الموظف الطالب")],
+			["content", __("نص المهمة")],
+		];
+	}
+
+	render_search_scope() {
+		if (!this.$search_scope?.length) return;
+		const options = this.search_scope_options();
+		if (!options.some(([value]) => value === this.state.search_scope)) {
+			this.state.search_scope = "all";
+		}
+		this.$search_scope.html(options.map(([value, label]) => (
+			`<option value="${this.escape_attr(value)}">${this.escape(label)}</option>`
+		)).join(""));
+		this.$search_scope.val(this.state.search_scope);
+		this.$search.attr("placeholder", this.search_placeholder());
 	}
 
 	mention_empty_message() {
