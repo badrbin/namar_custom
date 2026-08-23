@@ -14,6 +14,21 @@ const hooks = fs.readFileSync(hooksPath, "utf8");
 const testHooks = { skip_auto_start: true };
 const calls = [];
 const pendingResolvers = [];
+const linkState = { active: null, ariaCurrent: null };
+const linkStub = {
+  toggleClass: (_name, active) => {
+    linkState.active = active;
+    return linkStub;
+  },
+  attr: (_name, value) => {
+    linkState.ariaCurrent = value;
+    return linkStub;
+  },
+  removeAttr: () => {
+    linkState.ariaCurrent = null;
+    return linkStub;
+  },
+};
 const context = {
   console,
   Date,
@@ -27,6 +42,7 @@ const context = {
       });
     },
   },
+  $: () => linkStub,
   __namar_my_followups_navbar_test__: testHooks,
 };
 context.window = context;
@@ -59,6 +75,18 @@ async function main() {
 
   const controller = new NamarMyFollowupsNavbar();
   controller.render = () => {};
+  context.frappe.router = { current_route: null };
+  assert.doesNotThrow(() => controller.update_active_state());
+  assert.equal(linkState.active, false);
+  assert.equal(linkState.ariaCurrent, null);
+  context.frappe.router.current_route = ["my-followups"];
+  controller.update_active_state();
+  assert.equal(linkState.active, true);
+  assert.equal(linkState.ariaCurrent, "page");
+  context.frappe.router.current_route = ["Form", "Material Request", "MREQ-05408"];
+  controller.update_active_state();
+  assert.equal(linkState.active, false);
+  assert.equal(linkState.ariaCurrent, null);
   assert.equal(controller.load_failed, false);
   const first = controller.refresh(true);
   const duplicate = controller.refresh();
@@ -99,6 +127,7 @@ async function main() {
   );
 
   assert.match(source, /toolbar_setup\$\{EVENT_NAMESPACE\}/);
+  assert.doesNotMatch(source, /get_route_str/);
   assert.match(source, /\$\("\.navbar"\)\.find\("\.dropdown-notifications"\)\.first\(\)/);
   assert.doesNotMatch(source, /header \.navbar \.dropdown-notifications/);
   assert.match(source, /href="\/app\/my-followups"/);
