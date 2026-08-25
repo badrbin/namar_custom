@@ -51,6 +51,7 @@ vm.runInNewContext(source, context, { filename: assetPath });
 const {
   NamarMyFollowupsNavbar,
   badge_text,
+  badge_view,
   normalize_counts,
   valid_count,
 } = testHooks;
@@ -66,12 +67,30 @@ async function main() {
   assert.equal(badge_text(99), "99");
   assert.equal(badge_text(100), "99+");
   assert.deepEqual(
-    { ...normalize_counts({ message: { counts: { mentions: 2, followups: 4, approvals: 6, total: 12 } } }) },
+    { ...normalize_counts({ message: {
+      counts: { mentions: 2, followups: 9, approvals: 6, total: 17 },
+      attention_counts: { mentions: 2, followups: 4, approvals: 6, total: 12, unread: 999 },
+    } }) },
     { mentions: 2, followups: 4, approvals: 6, total: 12 }
   );
-  assert.equal(normalize_counts({ counts: { mentions: 2, followups: 4, approvals: 6, total: 11 } }), null);
-  assert.equal(normalize_counts({ counts: { mentions: true, followups: 4, approvals: 6, total: 11 } }), null);
-  assert.equal(normalize_counts({ counts: { mentions: 2, followups: -1, approvals: 6, total: 7 } }), null);
+  assert.equal(normalize_counts({ counts: { mentions: 2, followups: 4, approvals: 6, total: 12 } }), null);
+  assert.equal(normalize_counts({ attention_counts: { mentions: 2, followups: 4, approvals: 6, total: 11 } }), null);
+  assert.equal(normalize_counts({ attention_counts: { mentions: true, followups: 4, approvals: 6, total: 11 } }), null);
+  assert.equal(normalize_counts({ attention_counts: { mentions: 2, followups: -1, approvals: 6, total: 7 } }), null);
+
+  const view = badge_view({ mentions: 0, followups: 5, approvals: 100, total: 105 });
+  assert.equal(view.visible, true);
+  assert.equal(view.sources[0].visible, false);
+  assert.equal(view.sources[0].text, "");
+  assert.equal(view.sources[0].label, "الوارد الذي يحتاج قرارًا: 0");
+  assert.equal(view.sources[1].visible, true);
+  assert.equal(view.sources[1].text, "5");
+  assert.equal(view.sources[1].href, "/app/my-followups?source=followups&bucket=overdue");
+  assert.equal(view.sources[2].text, "99+");
+  assert.equal(view.sources[2].label, "الموافقات المعلقة: 100");
+  assert.match(view.status_label, /المتابعات المتأخرة: 5/);
+  assert.equal(badge_view({ mentions: 0, followups: 0, approvals: 0, total: 0 }).visible, false);
+  assert.equal(badge_view(null), null);
 
   const controller = new NamarMyFollowupsNavbar();
   controller.render = () => {};
@@ -96,7 +115,10 @@ async function main() {
   assert.equal(calls[0].method, "namar_test.followups.api.get_my_followups_counts");
   assert.equal(calls[0].type, "GET");
   assert.deepEqual({ ...calls[0].args }, {});
-  pendingResolvers.shift()({ message: { counts: { mentions: 1, followups: 3, approvals: 5, total: 9 } } });
+  pendingResolvers.shift()({ message: {
+    counts: { mentions: 1, followups: 7, approvals: 5, total: 13 },
+    attention_counts: { mentions: 1, followups: 3, approvals: 5, total: 9 },
+  } });
   await first;
   assert.equal(controller.load_failed, false);
   assert.deepEqual({ ...controller.counts }, { mentions: 1, followups: 3, approvals: 5, total: 9 });
@@ -114,23 +136,64 @@ async function main() {
   await Promise.resolve();
   raceController.merge_source_count({ source: "mentions", count: 8, force: true });
   assert.equal(raceController.force_after_pending, true);
-  pendingResolvers.shift()({ message: { counts: { mentions: 2, followups: 2, approvals: 2, total: 6 } } });
+  pendingResolvers.shift()({ message: {
+    counts: { mentions: 2, followups: 9, approvals: 2, total: 13 },
+    attention_counts: { mentions: 2, followups: 2, approvals: 2, total: 6 },
+  } });
   await staleRequest;
   await Promise.resolve();
   assert.equal(calls.length, 3);
   const latestRequest = raceController.pending;
-  pendingResolvers.shift()({ message: { counts: { mentions: 8, followups: 4, approvals: 6, total: 18 } } });
+  pendingResolvers.shift()({ message: {
+    counts: { mentions: 8, followups: 10, approvals: 6, total: 24 },
+    attention_counts: { mentions: 8, followups: 4, approvals: 6, total: 18 },
+  } });
   await latestRequest;
   assert.deepEqual(
     { ...raceController.counts },
     { mentions: 8, followups: 4, approvals: 6, total: 18 }
   );
 
+  const followupEventController = new NamarMyFollowupsNavbar();
+  followupEventController.render = () => {};
+  followupEventController.counts = { mentions: 1, followups: 2, approvals: 3, total: 6 };
+  let forcedRefreshes = 0;
+  followupEventController.refresh = (force) => {
+    assert.equal(force, true);
+    forcedRefreshes += 1;
+    return Promise.resolve(null);
+  };
+  followupEventController.merge_source_count({ source: "followups", count: 99 });
+  assert.equal(forcedRefreshes, 0);
+  followupEventController.merge_source_count({ source: "followups", count: 99, force: true });
+  assert.equal(forcedRefreshes, 1);
+  assert.deepEqual(
+    { ...followupEventController.counts },
+    { mentions: 1, followups: 2, approvals: 3, total: 6 }
+  );
+
+  const pendingFollowupController = new NamarMyFollowupsNavbar();
+  pendingFollowupController.render = () => {};
+  pendingFollowupController.counts = { mentions: 1, followups: 2, approvals: 3, total: 6 };
+  pendingFollowupController.pending = Promise.resolve(null);
+  pendingFollowupController.merge_source_count({ source: "followups", count: 99, force: true });
+  assert.equal(pendingFollowupController.force_after_pending, true);
+  assert.equal(pendingFollowupController.counts.followups, 2);
+
   assert.match(source, /toolbar_setup\$\{EVENT_NAMESPACE\}/);
   assert.doesNotMatch(source, /get_route_str/);
   assert.match(source, /\$\("\.navbar"\)\.find\("\.dropdown-notifications"\)\.first\(\)/);
   assert.doesNotMatch(source, /header \.navbar \.dropdown-notifications/);
   assert.match(source, /href="\/app\/my-followups"/);
+  assert.match(source, /href="\$\{meta\.href\}"/);
+  assert.match(source, /data-source-badge="\$\{source\}"/);
+  assert.match(source, /attention_counts/);
+  assert.match(source, /الوارد/);
+  assert.match(source, /الوارد الذي يحتاج قرارًا/);
+  assert.match(source, /المتابعات/);
+  assert.match(source, /متأخرة/);
+  assert.match(source, /الموافقات/);
+  assert.match(source, /معلقة/);
   assert.match(source, /namar:my-followups:count-changed/);
   assert.match(source, /جار تحديث العداد/);
   assert.match(source, /تعذر تحديث العداد/);
@@ -138,8 +201,12 @@ async function main() {
   assert.match(hooks, /"my_followups_navbar\.bundle\.js"/);
   assert.match(hooks, /"my_followups_navbar\.bundle\.css"/);
   assert.match(css, /direction:\s*rtl/);
-  assert.match(css, /\.namar-my-followups-badge[\s\S]*?direction:\s*ltr/);
+  assert.match(css, /\.namar-my-followups-source-badge[\s\S]*?direction:\s*ltr/);
+  assert.match(css, /\.namar-my-followups-source-badge\.is-mentions[\s\S]*?--red-600/);
+  assert.match(css, /\.namar-my-followups-source-badge\.is-followups[\s\S]*?--orange-700/);
+  assert.match(css, /\.namar-my-followups-source-badge\.is-approvals[\s\S]*?--purple-600/);
   assert.match(css, /@media \(max-width: 767px\)[\s\S]*?\.namar-my-followups-label \{[\s\S]*?display:\s*none/);
+  assert.doesNotMatch(css, /\.namar-my-followups-source-badge[^{]*\{[^}]*position:\s*absolute/);
 }
 
 main().catch((error) => {

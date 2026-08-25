@@ -40,10 +40,21 @@ class FakeResponse:
 
 
 class FakeSession:
-    def __init__(self, counts: list[int], *, secret: str):
+    def __init__(
+        self,
+        counts: list[int],
+        *,
+        secret: str,
+        followups_overdue: int = 3,
+        attention_followups: int | None = None,
+    ):
         self.headers: dict[str, str] = {}
         self.counts = list(counts)
         self.secret = secret
+        self.followups_overdue = followups_overdue
+        self.attention_followups = (
+            followups_overdue if attention_followups is None else attention_followups
+        )
         self.calls: list[dict] = []
         self.source_counts: list[int] = []
 
@@ -65,13 +76,22 @@ class FakeSession:
                     "followups": followups,
                     "approvals": approvals,
                     "total": mentions + followups + approvals,
+                },
+                "attention_counts": {
+                    "mentions": mentions,
+                    "followups": self.attention_followups,
+                    "approvals": approvals,
+                    "total": mentions + self.attention_followups + approvals,
                 }
             }
         else:
             count = self.counts.pop(0)
             self.source_counts.append(count)
+            source_counts = {"open": count}
+            if url.endswith("get_followups"):
+                source_counts["overdue"] = self.followups_overdue
             message = {
-                "counts": {"open": count},
+                "counts": source_counts,
                 "items": [{"description": self.secret, "content": self.secret}],
             }
         return FakeResponse(message, secret=self.secret)
@@ -138,7 +158,23 @@ class ReadOnlyContractTestCase(unittest.TestCase):
 
         counts = checker.check(transcript)
 
-        self.assertEqual(counts, {"mentions": 2, "followups": 4, "approvals": 6, "total": 12})
+        self.assertEqual(
+            counts,
+            {
+                "counts": {
+                    "mentions": 2,
+                    "followups": 4,
+                    "approvals": 6,
+                    "total": 12,
+                },
+                "attention_counts": {
+                    "mentions": 2,
+                    "followups": 3,
+                    "approvals": 6,
+                    "total": 11,
+                },
+            },
+        )
         self.assertEqual(len(session.calls), 4)
         self.assertTrue(all(call["method"] == "GET" for call in session.calls))
         self.assertTrue(all(call["allow_redirects"] is False for call in session.calls))
@@ -154,6 +190,7 @@ class ReadOnlyContractTestCase(unittest.TestCase):
         self.assertNotIn(content_secret, serialized)
         self.assertNotIn("items", serialized)
         self.assertTrue(all(row["contract"] == "ok" for row in transcript["requests"]))
+        self.assertEqual(transcript["requests"][1]["counts_overdue"], 3)
 
     def test_counts_open_must_be_a_non_negative_integer(self):
         for value in (-1, True, "3", None):
@@ -164,8 +201,52 @@ class ReadOnlyContractTestCase(unittest.TestCase):
     def test_unified_count_contract_requires_exact_sum(self):
         with self.assertRaises(self.module.CheckFailure):
             self.module.validate_unified_counts(
-                {"counts": {"mentions": 2, "followups": 4, "approvals": 6, "total": 11}}
+                {
+                    "counts": {
+                        "mentions": 2,
+                        "followups": 4,
+                        "approvals": 6,
+                        "total": 11,
+                    },
+                    "attention_counts": {
+                        "mentions": 2,
+                        "followups": 3,
+                        "approvals": 6,
+                        "total": 11,
+                    },
+                }
             )
+
+    def test_unified_count_contract_requires_attention_counts(self):
+        with self.assertRaisesRegex(self.module.CheckFailure, "attention_counts"):
+            self.module.validate_unified_counts(
+                {
+                    "counts": {
+                        "mentions": 2,
+                        "followups": 4,
+                        "approvals": 6,
+                        "total": 12,
+                    }
+                }
+            )
+
+    def test_checker_rejects_attention_followup_that_differs_from_overdue(self):
+        config = self.module.RunConfig(
+            base_url="https://test.example.com",
+            host="test.example.com",
+            token="token key:redacted",
+            timeout=20,
+        )
+        session = FakeSession(
+            [2, 4, 6],
+            secret="PRIVATE",
+            followups_overdue=3,
+            attention_followups=4,
+        )
+        checker = self.module.CountsChecker(config, session=session)
+
+        with self.assertRaisesRegex(self.module.CheckFailure, "عدادات الانتباه"):
+            checker.check(self.module.new_transcript(config))
 
     def test_transcript_is_written_mode_0600_outside_repository(self):
         transcript = {

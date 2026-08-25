@@ -153,30 +153,45 @@ def validate_run_config(args: argparse.Namespace, env: dict[str, str]) -> RunCon
     )
 
 
-def validate_open_count(endpoint: str, payload: Any) -> int:
+def validate_named_count(endpoint: str, payload: Any, key: str) -> int:
     if not isinstance(payload, dict):
         raise CheckFailure(f"عقد {endpoint} لا يعيد كائنًا")
     counts = payload.get("counts")
-    value = counts.get("open") if isinstance(counts, dict) else None
+    value = counts.get(key) if isinstance(counts, dict) else None
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise CheckFailure(f"counts.open في {endpoint} يجب أن يكون عددًا صحيحًا غير سالب")
+        raise CheckFailure(
+            f"counts.{key} في {endpoint} يجب أن يكون عددًا صحيحًا غير سالب"
+        )
     return value
 
 
-def validate_unified_counts(payload: Any) -> dict[str, int]:
-    if not isinstance(payload, dict) or not isinstance(payload.get("counts"), dict):
-        raise CheckFailure("عقد unified لا يعيد counts")
-    raw = payload["counts"]
+def validate_open_count(endpoint: str, payload: Any) -> int:
+    return validate_named_count(endpoint, payload, "open")
+
+
+def validate_count_group(payload: Any, group: str) -> dict[str, int]:
+    if not isinstance(payload, dict) or not isinstance(payload.get(group), dict):
+        raise CheckFailure(f"عقد unified لا يعيد {group}")
+    raw = payload[group]
     keys = ("mentions", "followups", "approvals", "total")
     counts: dict[str, int] = {}
     for key in keys:
         value = raw.get(key)
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            raise CheckFailure(f"counts.{key} في unified يجب أن يكون عددًا صحيحًا غير سالب")
+            raise CheckFailure(
+                f"{group}.{key} في unified يجب أن يكون عددًا صحيحًا غير سالب"
+            )
         counts[key] = value
     if counts["total"] != counts["mentions"] + counts["followups"] + counts["approvals"]:
-        raise CheckFailure("counts.total في unified لا يساوي مجموع المصادر")
+        raise CheckFailure(f"{group}.total في unified لا يساوي مجموع المصادر")
     return counts
+
+
+def validate_unified_counts(payload: Any) -> dict[str, dict[str, int]]:
+    return {
+        "counts": validate_count_group(payload, "counts"),
+        "attention_counts": validate_count_group(payload, "attention_counts"),
+    }
 
 
 class CountsChecker:
@@ -196,9 +211,10 @@ class CountsChecker:
             }
         )
 
-    def check(self, transcript: dict[str, Any]) -> dict[str, int]:
+    def check(self, transcript: dict[str, Any]) -> dict[str, dict[str, int]]:
         counts: dict[str, int] = {}
-        unified_counts: dict[str, int] | None = None
+        followups_overdue: int | None = None
+        unified_groups: dict[str, dict[str, int]] | None = None
         for name, path, params in ENDPOINTS:
             entry: dict[str, Any] = {
                 "endpoint": name,
@@ -238,10 +254,17 @@ class CountsChecker:
                 raise CheckFailure(f"غلاف استجابة {name} غير صحيح")
             try:
                 if name == "unified":
-                    unified_counts = validate_unified_counts(envelope["message"])
-                    open_count = unified_counts["total"]
+                    unified_groups = validate_unified_counts(envelope["message"])
+                    open_count = unified_groups["counts"]["total"]
                 else:
                     open_count = validate_open_count(name, envelope["message"])
+                    if name == "followups":
+                        followups_overdue = validate_named_count(
+                            name,
+                            envelope["message"],
+                            "overdue",
+                        )
+                        entry["counts_overdue"] = followups_overdue
             except CheckFailure:
                 entry["error_category"] = "invalid_counts_contract"
                 raise
@@ -249,12 +272,26 @@ class CountsChecker:
             entry["contract"] = "ok"
             counts[name] = open_count
         source_counts = {name: counts[name] for name in ("mentions", "followups", "approvals")}
-        if unified_counts is None:
+        if unified_groups is None:
             raise CheckFailure("لم تُقرأ نقطة التجميع unified")
-        if any(unified_counts[name] != value for name, value in source_counts.items()):
+        unified_open = unified_groups["counts"]
+        if any(unified_open[name] != value for name, value in source_counts.items()):
             raise CheckFailure("العداد الموحد لا يطابق عدادات المصادر")
-        source_counts["total"] = unified_counts["total"]
-        return source_counts
+        if followups_overdue is None:
+            raise CheckFailure("لم يُقرأ عدد المتابعات المتأخرة")
+        expected_attention = {
+            "mentions": source_counts["mentions"],
+            "followups": followups_overdue,
+            "approvals": source_counts["approvals"],
+        }
+        expected_attention["total"] = sum(expected_attention.values())
+        if unified_groups["attention_counts"] != expected_attention:
+            raise CheckFailure("عدادات الانتباه لا تطابق الوارد والمتأخر والموافقات")
+        source_counts["total"] = unified_open["total"]
+        return {
+            "counts": source_counts,
+            "attention_counts": unified_groups["attention_counts"],
+        }
 
 
 def new_transcript(config: RunConfig) -> dict[str, Any]:
@@ -312,7 +349,10 @@ def dry_run_summary(args: argparse.Namespace) -> dict[str, Any]:
         "endpoints": [name for name, _, _ in ENDPOINTS],
         "http_method": "GET",
         "source_page_length": 1,
-        "contract": "source counts.open >= 0; unified total = sum(sources)",
+        "contract": (
+            "source counts.open >= 0; followups counts.overdue >= 0; "
+            "unified counts and attention_counts match sources"
+        ),
     }
 
 

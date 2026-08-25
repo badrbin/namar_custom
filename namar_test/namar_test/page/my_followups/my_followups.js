@@ -19,7 +19,7 @@ class NamarMyFollowups {
 		this.mentions_api = "namar_test.mentions.api";
 		this.state = {
 			source: deep_link.source,
-			bucket: deep_link.source === "mentions" ? "open" : "all",
+			bucket: deep_link.bucket,
 			search: "",
 			search_scope: "all",
 			priority: "",
@@ -61,7 +61,15 @@ class NamarMyFollowups {
 		this.load_source_summaries({ exclude_source: deep_link.source });
 		if (deep_link.source !== this.state.source) {
 			this.pending_thread = deep_link.source === "mentions" ? deep_link.thread : "";
-			this.change_source(deep_link.source, { update_url: false });
+			this.change_source(deep_link.source, {
+				update_url: false,
+				bucket: deep_link.bucket,
+			});
+			return;
+		}
+
+		if (deep_link.bucket && deep_link.bucket !== this.state.bucket) {
+			this.change_bucket(deep_link.bucket, { update_url: false });
 			return;
 		}
 
@@ -365,7 +373,7 @@ class NamarMyFollowups {
 		this.$root.on("click", ".mf-open-converted-followup", () => this.open_converted_followup());
 	}
 
-	change_source(source, { update_url = true } = {}) {
+	change_source(source, { update_url = true, bucket = "" } = {}) {
 		if (this.state.action_busy) return;
 		if (!["mentions", "followups", "approvals"].includes(source) || source === this.state.source) {
 			return;
@@ -375,7 +383,14 @@ class NamarMyFollowups {
 		this.selected_by_source[this.state.source] = this.state.selected_name;
 		this.state.source = source;
 		if (source !== "mentions" || update_url) this.pending_thread = "";
-		this.state.bucket = source === "mentions" ? "open" : "all";
+		const allowed_buckets = source === "mentions"
+			? ["open", "unread", "converted", "closed"]
+			: source === "followups"
+				? ["all", "overdue", "today", "upcoming"]
+				: ["all"];
+		this.state.bucket = allowed_buckets.includes(bucket)
+			? bucket
+			: source === "mentions" ? "open" : "all";
 		this.state.search = "";
 		this.state.search_scope = "all";
 		this.state.priority = "";
@@ -451,7 +466,7 @@ class NamarMyFollowups {
 		dialog.show();
 	}
 
-	change_bucket(bucket) {
+	change_bucket(bucket, { update_url = true } = {}) {
 		if (this.state.action_busy) return;
 		const allowed = this.state.source === "mentions"
 			? ["open", "unread", "converted", "closed"]
@@ -462,6 +477,7 @@ class NamarMyFollowups {
 			return;
 		}
 		this.state.bucket = bucket;
+		if (update_url) this.sync_url_state(this.state.source);
 		this.render_filters();
 		this.load_list();
 	}
@@ -2019,21 +2035,37 @@ class NamarMyFollowups {
 	read_deep_link() {
 		let source = "followups";
 		let thread = "";
+		let bucket = "all";
 		try {
 			const params = new URLSearchParams(window.location.search || "");
 			const requested_source = params.get("source");
 			if (["mentions", "followups", "approvals"].includes(requested_source)) source = requested_source;
+			const requested_bucket = params.get("bucket");
+			const allowed_buckets = source === "mentions"
+				? ["open", "unread", "converted", "closed"]
+				: source === "followups"
+					? ["all", "overdue", "today", "upcoming"]
+					: ["all"];
+			const default_bucket = source === "mentions" ? "open" : "all";
+			bucket = allowed_buckets.includes(requested_bucket)
+				? requested_bucket
+				: default_bucket;
 			thread = source === "mentions" ? String(params.get("thread") || "").trim() : "";
 		} catch (error) {
 			this.log_error("read_deep_link", error);
 		}
-		return { source, thread };
+		return { source, bucket, thread };
 	}
 
 	sync_url_state(source, thread = "") {
 		try {
 			const url = new URL(window.location.href);
 			url.searchParams.set("source", source);
+			if (source === "followups" && this.state.bucket !== "all") {
+				url.searchParams.set("bucket", this.state.bucket);
+			} else {
+				url.searchParams.delete("bucket");
+			}
 			if (source === "mentions" && thread) url.searchParams.set("thread", thread);
 			else url.searchParams.delete("thread");
 			window.history.replaceState(window.history.state, "", url.toString());

@@ -25,6 +25,20 @@ const context = {
   console,
   Date,
   Promise,
+  URL,
+  URLSearchParams,
+  window: {
+    clearTimeout,
+    setTimeout,
+    location: {
+      href: "https://test.example.com/app/my-followups",
+      search: "",
+    },
+    history: {
+      state: null,
+      replaceState: () => {},
+    },
+  },
 };
 vm.runInNewContext(
   `${source}\nglobalThis.__NamarMyFollowupsTest = NamarMyFollowups;`,
@@ -82,6 +96,53 @@ function renderMentionDetail(detail) {
 }
 
 async function main() {
+{
+  const page = makePage();
+  context.window.location.search = "?source=followups&bucket=overdue";
+  assert.deepEqual(
+    { ...page.read_deep_link() },
+    { source: "followups", bucket: "overdue", thread: "" }
+  );
+  context.window.location.search = "?source=followups&bucket=invalid";
+  assert.deepEqual(
+    { ...page.read_deep_link() },
+    { source: "followups", bucket: "all", thread: "" }
+  );
+  context.window.location.search = "?source=mentions&bucket=unread&thread=THREAD-1";
+  assert.deepEqual(
+    { ...page.read_deep_link() },
+    { source: "mentions", bucket: "unread", thread: "THREAD-1" }
+  );
+  context.window.location.search = "";
+}
+
+{
+  const page = makePage();
+  let replaced = "";
+  page.state.source = "followups";
+  page.state.bucket = "overdue";
+  context.window.location.href = "https://test.example.com/app/my-followups?source=followups";
+  context.window.history.replaceState = (_state, _title, value) => {
+    replaced = String(value);
+  };
+  page.sync_url_state("followups");
+  assert.equal(new URL(replaced).searchParams.get("bucket"), "overdue");
+}
+
+{
+  const page = makePage();
+  const events = [];
+  page.state.source = "followups";
+  page.state.bucket = "all";
+  page.state.action_busy = false;
+  page.sync_url_state = (source) => events.push(["sync", source]);
+  page.render_filters = () => events.push(["filters"]);
+  page.load_list = () => events.push(["list"]);
+  page.change_bucket("overdue");
+  assert.equal(page.state.bucket, "overdue");
+  assert.deepEqual(events, [["sync", "followups"], ["filters"], ["list"]]);
+}
+
 {
   const page = makePage();
   const calls = [];

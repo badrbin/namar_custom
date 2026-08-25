@@ -341,6 +341,19 @@ def _followup_open_count(user: str) -> int:
     return int(open_count or 0)
 
 
+def _followup_overdue_count(user: str, current_date: str) -> int:
+    # الشارة العلوية تعرض المتأخر فقط، مع نفس Permission Query المستخدم
+    # لعداد المفتوح، حتى لا يتسع نطاق العدد عن العناصر المرئية للمستخدم.
+    rows = frappe.get_list(
+        "ToDo",
+        fields=["count(name) as count"],
+        filters=_logic(todo_filters, "overdue", user, current_date),
+        limit_page_length=1,
+    )
+    overdue_count = rows[0].get("count") if rows else 0
+    return int(overdue_count or 0)
+
+
 def get_my_followups_counts() -> dict[str, dict[str, int]]:
     user = _assert_authenticated()
 
@@ -353,7 +366,16 @@ def get_my_followups_counts() -> dict[str, dict[str, int]]:
         "approvals": int(_approval_counts()["open"]),
     }
     counts["total"] = sum(counts.values())
-    return {"counts": counts}
+
+    # نحافظ على counts بوصفها كل المفتوح حتى لا يتغير عقد عدادات الصفحة.
+    # attention_counts هي العقد المخصص للشارات الملونة في الشريط العلوي.
+    attention_counts = {
+        "mentions": counts["mentions"],
+        "followups": _followup_overdue_count(user, nowdate()),
+        "approvals": counts["approvals"],
+    }
+    attention_counts["total"] = sum(attention_counts.values())
+    return {"counts": counts, "attention_counts": attention_counts}
 
 
 def _followup_counts(user: str, current_date: str, priority: str = "") -> dict[str, int]:
