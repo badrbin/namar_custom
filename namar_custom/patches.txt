@@ -1,1 +1,2 @@
 # Patches for namar_custom. Keep this file present for Frappe app compatibility.
+namar_custom.delivery_components.patch_delivery_component_status
