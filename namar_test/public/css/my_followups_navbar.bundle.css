@@ -1,7 +1,9 @@
 /*rtl:begin:ignore*/
 #namar-my-followups-nav {
 	align-items: center;
+	direction: rtl;
 	display: flex;
+	gap: 4px;
 }
 
 #namar-my-followups-nav .namar-my-followups-link {
@@ -41,46 +43,96 @@
 	font-weight: 620;
 }
 
-#namar-my-followups-nav .namar-my-followups-badge {
+#namar-my-followups-nav .namar-my-followups-counts {
 	align-items: center;
-	background: var(--red-500, #e24c4c);
-	border: 2px solid var(--navbar-bg, #fff);
+	direction: rtl;
+	display: inline-flex;
+	gap: 3px;
+	white-space: nowrap;
+}
+
+#namar-my-followups-nav .namar-my-followups-counts[hidden],
+#namar-my-followups-nav .namar-my-followups-source-badge[hidden] {
+	display: none;
+}
+
+#namar-my-followups-nav .namar-my-followups-source-badge {
+	align-items: center;
 	border-radius: 999px;
 	color: #fff;
 	direction: ltr;
 	display: inline-flex;
+	gap: 2px;
 	font-size: 9px;
 	font-variant-numeric: tabular-nums;
 	font-weight: 750;
-	height: 20px;
+	height: 24px;
 	justify-content: center;
 	line-height: 1;
-	min-width: 20px;
-	padding-inline: 4px;
+	min-width: 28px;
+	padding-inline: 5px;
+	text-decoration: none;
 }
 
-#namar-my-followups-nav .namar-my-followups-badge[hidden] {
-	display: none;
+#namar-my-followups-nav .namar-my-followups-source-badge.is-mentions {
+	background: var(--red-600, #c92a2a);
+}
+
+#namar-my-followups-nav .namar-my-followups-source-badge.is-followups {
+	background: var(--orange-700, #b45309);
+}
+
+#namar-my-followups-nav .namar-my-followups-source-badge.is-approvals {
+	background: var(--purple-600, #7c3aed);
+}
+
+#namar-my-followups-nav .namar-my-followups-source-badge:hover,
+#namar-my-followups-nav .namar-my-followups-source-badge:focus-visible {
+	color: #fff;
+	filter: brightness(0.9);
+	text-decoration: none;
+}
+
+#namar-my-followups-nav .namar-my-followups-source-badge:focus-visible {
+	outline: 2px solid var(--primary, #2490ef);
+	outline-offset: 1px;
+}
+
+#namar-my-followups-nav .namar-my-followups-source-symbol {
+	font-size: 8px;
+	font-weight: 800;
+	opacity: 0.92;
 }
 
 @media (max-width: 767px) {
 	#namar-my-followups-nav .namar-my-followups-link {
 		gap: 0;
 		justify-content: center;
-		min-width: 38px;
-		padding-inline: 7px;
+		min-width: 34px;
+		padding-inline: 5px;
 	}
 
 	#namar-my-followups-nav .namar-my-followups-label {
 		display: none;
 	}
 
-	#namar-my-followups-nav .namar-my-followups-badge {
-		height: 18px;
-		inset-inline-start: 20px;
-		min-width: 18px;
-		position: absolute;
-		top: 0;
+	#namar-my-followups-nav.has-visible-counts .namar-my-followups-link {
+		display: none;
+	}
+
+	#namar-my-followups-nav .namar-my-followups-counts {
+		gap: 2px;
+	}
+
+	#namar-my-followups-nav .namar-my-followups-source-badge {
+		font-size: 8px;
+		height: 24px;
+		min-width: 24px;
+		padding-inline: 4px;
+	}
+
+	#namar-my-followups-nav .namar-my-followups-source-symbol {
+		font-size: 7px;
 	}
 }
 /*rtl:end:ignore*/

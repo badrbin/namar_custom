@@ -466,7 +466,27 @@ class ApprovalCountsTestCase(unittest.TestCase):
         )
         self.assertEqual(options["limit_page_length"], 1)
 
-    def test_unified_counts_are_open_only_and_total_is_the_sum(self):
+    def test_followup_overdue_count_uses_permission_aware_aggregate(self):
+        module, fake_frappe = load_service(count_rows=[FakeFrappeDict(count=3)])
+
+        self.assertEqual(
+            module._followup_overdue_count("employee@example.com", "2026-08-19"),
+            3,
+        )
+        doctype, options = fake_frappe.get_list_calls[-1]
+        self.assertEqual(doctype, "ToDo")
+        self.assertEqual(options["fields"], ["count(name) as count"])
+        self.assertEqual(
+            options["filters"],
+            {
+                "allocated_to": "employee@example.com",
+                "status": "Open",
+                "date": ["<", "2026-08-19"],
+            },
+        )
+        self.assertEqual(options["limit_page_length"], 1)
+
+    def test_unified_counts_keep_open_totals_and_add_attention_totals(self):
         module, _ = load_service()
         mention_service = ModuleType("namar_test.mentions.service")
         mention_service.get_open_mention_count = lambda: 2
@@ -475,6 +495,7 @@ class ApprovalCountsTestCase(unittest.TestCase):
 
         with (
             patch.object(module, "_followup_open_count", return_value=4),
+            patch.object(module, "_followup_overdue_count", return_value=3),
             patch.object(module, "_approval_counts", return_value={"open": 6}),
             patch.dict(
                 sys.modules,
@@ -488,7 +509,20 @@ class ApprovalCountsTestCase(unittest.TestCase):
 
         self.assertEqual(
             result,
-            {"counts": {"mentions": 2, "followups": 4, "approvals": 6, "total": 12}},
+            {
+                "counts": {
+                    "mentions": 2,
+                    "followups": 4,
+                    "approvals": 6,
+                    "total": 12,
+                },
+                "attention_counts": {
+                    "mentions": 2,
+                    "followups": 3,
+                    "approvals": 6,
+                    "total": 11,
+                },
+            },
         )
         self.assertNotIn("items", result)
 

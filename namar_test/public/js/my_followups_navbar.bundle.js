@@ -5,6 +5,26 @@
 	const EVENT_NAMESPACE = ".namarMyFollowupsNavbar";
 	const COUNT_METHOD = "namar_test.followups.api.get_my_followups_counts";
 	const SOURCE_KEYS = ["mentions", "followups", "approvals"];
+	const SOURCE_META = {
+		mentions: {
+			label: "الوارد",
+			attention_label: "الوارد الذي يحتاج قرارًا",
+			symbol: "و",
+			href: "/app/my-followups?source=mentions",
+		},
+		followups: {
+			label: "المتابعات",
+			attention_label: "المتابعات المتأخرة",
+			symbol: "ت",
+			href: "/app/my-followups?source=followups&bucket=overdue",
+		},
+		approvals: {
+			label: "الموافقات",
+			attention_label: "الموافقات المعلقة",
+			symbol: "م",
+			href: "/app/my-followups?source=approvals",
+		},
+	};
 	const REFRESH_TTL_MS = 2 * 60 * 1000;
 	const POLL_INTERVAL_MS = 3 * 60 * 1000;
 
@@ -14,7 +34,7 @@
 
 	function normalize_counts(response) {
 		const message = response?.message ?? response;
-		const raw = message?.counts;
+		const raw = message?.attention_counts;
 		if (!raw || typeof raw !== "object") return null;
 		if (!SOURCE_KEYS.every((key) => valid_count(raw[key]))) return null;
 		if (!valid_count(raw.total)) return null;
@@ -30,6 +50,31 @@
 
 	function badge_text(total) {
 		return total > 99 ? "99+" : String(total);
+	}
+
+	function source_status_label(source, count) {
+		const meta = SOURCE_META[source];
+		return `${meta.attention_label}: ${count}`;
+	}
+
+	function badge_view(counts) {
+		if (!counts) return null;
+		const sources = SOURCE_KEYS.map((source) => {
+			const count = counts[source];
+			return {
+				source,
+				count,
+				visible: valid_count(count) && count > 0,
+				text: valid_count(count) && count > 0 ? badge_text(count) : "",
+				label: source_status_label(source, count),
+				href: SOURCE_META[source].href,
+			};
+		});
+		return {
+			sources,
+			visible: sources.some((source) => source.visible),
+			status_label: `متابعاتي، ${sources.map((source) => source.label).join("، ")}`,
+		};
 	}
 
 	class NamarMyFollowupsNavbar {
@@ -82,6 +127,16 @@
 				$node = $node.first();
 			}
 			if (!$node.length) {
+				const source_badges = SOURCE_KEYS.map((source) => {
+					const meta = SOURCE_META[source];
+					return `<a class="namar-my-followups-source-badge is-${source}"
+						href="${meta.href}"
+						data-source-badge="${source}"
+						hidden>
+						<span class="namar-my-followups-source-symbol" aria-hidden="true">${meta.symbol}</span>
+						<bdi class="namar-my-followups-source-value" dir="ltr"></bdi>
+					</a>`;
+				}).join("");
 				$node = $(
 					`<li id="namar-my-followups-nav" class="nav-item namar-my-followups-nav">
 						<a class="nav-link namar-my-followups-link" href="/app/my-followups" dir="rtl" aria-label="متابعاتي">
@@ -89,8 +144,10 @@
 								<svg class="es-icon icon-sm"><use href="#es-line-inbox"></use></svg>
 							</span>
 							<span class="namar-my-followups-label">متابعاتي</span>
-							<bdi class="namar-my-followups-badge" dir="ltr" hidden aria-hidden="true"></bdi>
 						</a>
+						<span class="namar-my-followups-counts" dir="rtl" role="group" aria-label="عدادات الانتباه" hidden>
+							${source_badges}
+						</span>
 					</li>`
 				);
 				$notifications.after($node);
@@ -112,6 +169,17 @@
 			const source = payload?.source;
 			const count = payload?.count;
 			if (!SOURCE_KEYS.includes(source) || !valid_count(count)) return;
+			// حدث المتابعات يحمل إجمالي المفتوح، بينما الشارة الصفراء تعرض
+			// المتأخر فقط؛ لذلك نعيد قراءة العقد الموحد بدل دمج رقم مختلف المعنى.
+			if (source === "followups") {
+				if (!payload?.force) return;
+				if (this.pending) {
+					this.force_after_pending = true;
+					return this.pending;
+				}
+				this.last_loaded_at = 0;
+				return this.refresh(true);
+			}
 			if (!this.counts) {
 				if (this.pending) {
 					if (payload?.force) this.force_after_pending = true;
@@ -175,20 +243,27 @@
 		}
 
 		render() {
+			const $node = $("#namar-my-followups-nav");
 			const $link = $("#namar-my-followups-nav .namar-my-followups-link");
-			if (!$link.length) return;
-			const total = this.counts?.total;
-			const visible = valid_count(total) && total > 0;
-			const status_label = this.counts
-				? (visible ? `متابعاتي، ${total} عناصر مفتوحة` : "متابعاتي، لا توجد عناصر مفتوحة")
+			const $group = $node.find(".namar-my-followups-counts");
+			if (!$link.length || !$group.length) return;
+			const view = badge_view(this.counts);
+			view?.sources.forEach(({ source, visible, text, label }) => {
+				const $badge = $group.find(`[data-source-badge="${source}"]`);
+				$badge
+					.prop("hidden", !visible)
+					.attr("aria-label", label)
+					.attr("title", label)
+					.find(".namar-my-followups-source-value")
+					.text(text);
+			});
+			$node.toggleClass("has-visible-counts", Boolean(view?.visible));
+			$group.prop("hidden", !view?.visible);
+
+			const status_label = view
+				? view.status_label
 				: (this.load_failed ? "متابعاتي، تعذر تحديث العداد" : "متابعاتي، جار تحديث العداد");
-			$link.attr(
-				"aria-label",
-				status_label
-			);
-			$link.find(".namar-my-followups-badge")
-				.prop("hidden", !visible)
-				.text(visible ? badge_text(total) : "");
+			$link.attr("aria-label", status_label).attr("title", status_label);
 		}
 
 		destroy() {
@@ -204,6 +279,7 @@
 	if (test_hooks && typeof test_hooks === "object") {
 		Object.assign(test_hooks, {
 			NamarMyFollowupsNavbar,
+			badge_view,
 			badge_text,
 			normalize_counts,
 			valid_count,
