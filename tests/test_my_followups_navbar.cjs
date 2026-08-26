@@ -14,6 +14,7 @@ const hooks = fs.readFileSync(hooksPath, "utf8");
 const testHooks = { skip_auto_start: true };
 const calls = [];
 const pendingResolvers = [];
+const assignedHrefs = [];
 const linkState = { active: null, ariaCurrent: null };
 const linkStub = {
   toggleClass: (_name, active) => {
@@ -34,6 +35,7 @@ const context = {
   Date,
   Promise,
   document: { hidden: false },
+  location: { assign: (href) => assignedHrefs.push(href) },
   frappe: {
     call: (options) => {
       calls.push(options);
@@ -99,6 +101,35 @@ async function main() {
 
   const controller = new NamarMyFollowupsNavbar();
   controller.render = () => {};
+  const navigationHandlers = {};
+  const navigationNode = {
+    off: () => navigationNode,
+    on: (_eventName, selector, handler) => {
+      navigationHandlers[selector] = handler;
+      return navigationNode;
+    },
+  };
+  controller.bind_navigation(navigationNode);
+  assert.equal(typeof navigationHandlers[".namar-my-followups-link"], "function");
+  assert.equal(typeof navigationHandlers[".namar-my-followups-source-badge"], "function");
+  let prevented = false;
+  let stopped = false;
+  navigationHandlers[".namar-my-followups-link"]({
+    button: 0,
+    currentTarget: { getAttribute: () => "/app/my-followups" },
+    preventDefault: () => { prevented = true; },
+    stopImmediatePropagation: () => { stopped = true; },
+    stopPropagation: () => {},
+  });
+  assert.equal(prevented, true);
+  assert.equal(stopped, true);
+  assert.deepEqual(assignedHrefs, ["/app/my-followups"]);
+  navigationHandlers[".namar-my-followups-link"]({
+    button: 0,
+    ctrlKey: true,
+    currentTarget: { getAttribute: () => "/app/my-followups" },
+  });
+  assert.deepEqual(assignedHrefs, ["/app/my-followups"]);
   context.frappe.router = { current_route: null };
   assert.doesNotThrow(() => controller.update_active_state());
   assert.equal(linkState.active, false);
@@ -192,6 +223,7 @@ async function main() {
   assert.match(source, /href="\/app\/my-followups"/);
   assert.match(source, /href="\$\{meta\.href\}"/);
   assert.match(source, /data-source-badge="\$\{source\}"/);
+  assert.match(source, /\["\.namar-my-followups-link", "\.namar-my-followups-source-badge"\]/);
   assert.doesNotMatch(source, /namar-my-followups-source-symbol/);
   assert.doesNotMatch(source, /symbol:\s*"[وتم]"/);
   assert.match(source, /window\.location\.assign\(href\)/);
