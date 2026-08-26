@@ -119,6 +119,14 @@ override_whitelisted_methods = {
 }
 
 doc_events = {
+    "ToDo": {
+        "on_change": [
+            "namar_test.mentions.events.sync_linked_mentions_on_todo_change"
+        ],
+        "on_trash": [
+            "namar_test.mentions.events.sync_linked_mentions_on_todo_trash"
+        ],
+    },
     "Comment": {
         "after_insert": ["namar_test.mentions.events.capture_mentions_after_insert"],
         "on_update": [
@@ -188,6 +196,7 @@ doctype_list_js = {
 
 app_include_js = [
     "comment_history.bundle.js",
+    "my_followups_navbar.bundle.js",
     "/assets/namar_test/js/doctype/cutting_template_form.js",
     "/assets/namar_test/js/doctype/delivery_note_form.js",
     "/assets/namar_test/js/doctype/installation_note_form.js",
@@ -202,6 +211,7 @@ app_include_js = [
 
 app_include_css = [
     "comment_history.bundle.css",
+    "my_followups_navbar.bundle.css",
 ]
 
 web_include_js = [

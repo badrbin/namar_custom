@@ -48,3 +48,8 @@ def on_doctype_update() -> None:
         ["reference_doctype", "reference_name"],
         "mention_reference",
     )
+    frappe.db.add_index(
+        "Namar Mention Thread",
+        ["converted_to_todo", "status"],
+        "mention_linked_todo_status",
+    )

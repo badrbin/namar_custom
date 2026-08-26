@@ -11,13 +11,18 @@ manifest محلي قبل متابعة الاختبارات. التنظيف لا 
 البصمة الحية والمرجع المعزول مع الـmanifest.
 
 لا تختبر الأداة الرد حيًا افتراضيًا. يمكن تفعيله صراحة عبر
-``--include-self-reply``؛ عندها تختبر idempotency لـ``reply_mention``، ثم
-``reply_and_close`` وإعادة الفتح. الردان نصيان على ToDo الاختبار ولا يحتويان
-@mention، ولذلك لا يرسلان إشعارًا إلى موظف آخر.
+``--include-self-reply``؛ عندها تختبر ردًا حيًا واحدًا يذكر مستخدم التوكن نفسه،
+وتنتظر التقاط المنشن مرة واحدة، ثم تختبر ``reply_and_close`` وإعادة الفتح.
+تبقى idempotency واختلاف المستلمين ضمن اختبارات الوحدة غير المؤثرة.
+لا تُدخل الأداة بريد أي موظف آخر في حمولة الرد ولا ترسل إليه إشعارًا.
 
 Thread وEvent نوعان داخليان بلا قراءة REST. تتحقق الأداة منهما عبر API المنتج،
 وتحذف Thread المملوكة فقط بعد حذف Comments المعزولة؛ on_trash يحذف Events
 المرتبطة كـcascade، ولا تحاول الأداة قراءة Event أو حذفها مباشرة.
+
+يمكن إضافة ``--include-db-read-probe`` في تشغيل حي صريح لتسجيل عينات DB
+التجريبية مباشرة. يستخدم المجس FRAPPE_TEST_DB_* فقط، واتصال TLS متحققًا جديدًا
+ومعاملة ``START TRANSACTION READ ONLY`` لكل عينة، ثم rollback وclose دائمًا.
 """
 
 from __future__ import annotations
@@ -27,12 +32,13 @@ import hashlib
 import html
 import json
 import os
+import ssl
 import sys
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 from urllib.parse import quote, urlparse
 from uuid import uuid4
 
@@ -48,6 +54,54 @@ KNOWN_PRODUCTION_HOSTS = {"erp.namar.net"}
 MAX_RESOURCES = 20
 POLL_ATTEMPTS = 15
 POLL_INTERVAL_SECONDS = 1.0
+MAX_HTTP_TRANSCRIPT_ENTRIES = 250
+MAX_SEEN_OBSERVATIONS = 64
+MAX_DIRECT_DB_OBSERVATIONS = 16
+
+DIRECT_DB_SELECT_SQL = """
+SELECT
+    `name`,
+    `last_event_key`,
+    `last_seen_event_key`,
+    `status`,
+    `modified`
+FROM `tabNamar Mention Thread`
+WHERE `name` = %s AND `for_user` = %s
+LIMIT 1
+"""
+TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
+
+TRANSCRIPT_REQUEST_HEADERS = ("Cache-Control", "Pragma")
+TRANSCRIPT_RESPONSE_HEADERS = (
+    "X-Frappe-Request-Id",
+    "Date",
+    "Age",
+    "Cache-Control",
+    "ETag",
+    "Last-Modified",
+    "Vary",
+    "X-Cache-Status",
+    "X-Proxy-Upstream",
+    "CF-Cache-Status",
+    "Via",
+    "Server",
+)
+TRANSCRIPT_SAFE_ARGUMENTS = {
+    "bucket",
+    "limit_start",
+    "page_length",
+    "thread_name",
+    "expected_last_event_key",
+    "seen",
+}
+MENTION_STATE_FIELDS = (
+    "name",
+    "last_event_key",
+    "last_seen_event_key",
+    "unread",
+    "status",
+    "modified",
+)
 
 THREAD_REQUIRED_FIELDS = {
     "thread_key",
@@ -80,6 +134,7 @@ EVENT_REQUIRED_FIELDS = {
 MENTION_ENDPOINTS = (
     "get_mentions",
     "get_mention_detail",
+    "search_reply_mentions",
     "mark_mention_seen",
     "close_mention",
     "reopen_mention",
@@ -109,6 +164,14 @@ def default_state_dir() -> Path:
 
 class SmokeFailure(RuntimeError):
     pass
+
+
+class DirectDBProbeFailure(SmokeFailure):
+    """Failure with a fixed safe category; raw DB errors must never escape."""
+
+    def __init__(self, category: str, message: str):
+        self.category = category
+        super().__init__(message)
 
 
 class HttpFailure(SmokeFailure):
@@ -179,6 +242,95 @@ def digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def selected_headers(
+    headers: Any,
+    allowed: Iterable[str],
+) -> dict[str, str]:
+    """Return only explicitly allowlisted, bounded HTTP headers."""
+
+    selected: dict[str, str] = {}
+    if not headers:
+        return selected
+    for name in allowed:
+        value = headers.get(name)
+        if value is not None:
+            selected[name] = normalize_text(value)[:500]
+    return selected
+
+
+def safe_request_arguments(
+    params: dict[str, Any] | None,
+    payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Keep diagnostic request shape without persisting free text or credentials."""
+
+    values = params if params is not None else payload or {}
+    safe: dict[str, Any] = {}
+    for key in sorted(TRANSCRIPT_SAFE_ARGUMENTS.intersection(values)):
+        value = values.get(key)
+        if value is None or isinstance(value, (bool, int, float)):
+            safe[key] = value
+        else:
+            safe[key] = normalize_text(value)[:200]
+
+    if "search" in values:
+        raw_search = "" if values.get("search") is None else str(values.get("search"))
+        normalized_search = raw_search.strip()
+        safe["search"] = {
+            "length": len(raw_search),
+            "trailing_whitespace": len(raw_search) - len(raw_search.rstrip()),
+            "sha256": digest(raw_search),
+            "normalized_sha256": digest(normalized_search),
+        }
+    return safe
+
+
+def mention_state(item: Any) -> dict[str, Any] | None:
+    if not isinstance(item, dict):
+        return None
+    return {key: item.get(key) for key in MENTION_STATE_FIELDS}
+
+
+def direct_db_mention_state(row: Any) -> dict[str, Any] | None:
+    if not isinstance(row, dict):
+        return None
+    last_event_key = row.get("last_event_key")
+    last_seen_event_key = row.get("last_seen_event_key")
+    return {
+        "name": row.get("name"),
+        "last_event_key": last_event_key,
+        "last_seen_event_key": last_seen_event_key,
+        "unread": bool(
+            normalize_text(last_event_key)
+            and normalize_text(last_event_key) != normalize_text(last_seen_event_key)
+        ),
+        "status": row.get("status"),
+        "modified": str(row.get("modified")) if row.get("modified") is not None else None,
+    }
+
+
+def compare_mention_states(
+    direct_state: dict[str, Any] | None,
+    api_states: dict[str, dict[str, Any] | None],
+) -> dict[str, dict[str, bool] | None]:
+    comparisons: dict[str, dict[str, bool] | None] = {}
+    for source, raw_api_state in api_states.items():
+        api_state = mention_state(raw_api_state)
+        if direct_state is None or api_state is None:
+            comparisons[source] = None
+            continue
+        comparisons[source] = {
+            field: (
+                bool(direct_state.get(field)) == bool(api_state.get(field))
+                if field == "unread"
+                else normalize_text(direct_state.get(field))
+                == normalize_text(api_state.get(field))
+            )
+            for field in MENTION_STATE_FIELDS
+        }
+    return comparisons
+
+
 def parse_server_message(response: requests.Response) -> str:
     try:
         data = response.json()
@@ -215,10 +367,197 @@ class SmokeConfig:
     include_self_reply: bool = False
 
 
+@dataclass(frozen=True, repr=False)
+class DirectTestDBConfig:
+    """Ephemeral test-only DB credentials; never serialize or print this object."""
+
+    host: str
+    port: int
+    database: str
+    user: str
+    password: str
+    timeout: int
+
+
+def env_is_truthy(name: str) -> bool:
+    return normalize_text(os.environ.get(name)).lower() in TRUTHY_ENV_VALUES
+
+
+def parse_db_port(name: str, *, default: int | None = None) -> int:
+    raw = normalize_text(os.environ.get(name))
+    if not raw and default is not None:
+        return default
+    try:
+        port = int(raw)
+    except (TypeError, ValueError):
+        raise SmokeFailure(f"{name} يجب أن يكون منفذًا صحيحًا") from None
+    ensure(1 <= port <= 65535, f"{name} خارج النطاق المسموح")
+    return port
+
+
+def validate_direct_test_db_config(timeout: int) -> DirectTestDBConfig:
+    """Build a fail-closed config using FRAPPE_TEST_DB_* variables only."""
+
+    required_names = (
+        "FRAPPE_TEST_DB_HOST",
+        "FRAPPE_TEST_DB_PORT",
+        "FRAPPE_TEST_DB_NAME",
+        "FRAPPE_TEST_DB_USER",
+        "FRAPPE_TEST_DB_PASSWORD",
+    )
+    missing = [name for name in required_names if not normalize_text(os.environ.get(name))]
+    ensure(
+        not missing,
+        "مجس DB التجريبية يتطلب المتغيرات: " + ", ".join(missing),
+    )
+    ensure(
+        env_is_truthy("FRAPPE_TEST_DB_READ_ONLY"),
+        "FRAPPE_TEST_DB_READ_ONLY يجب أن يكون truthy لتفعيل المجس",
+    )
+    ensure(
+        env_is_truthy("FRAPPE_TEST_DB_SSL"),
+        "FRAPPE_TEST_DB_SSL يجب أن يكون truthy؛ لا يسمح باتصال DB بلا TLS",
+    )
+
+    host = normalize_text(os.environ.get("FRAPPE_TEST_DB_HOST")).lower().rstrip(".")
+    database = normalize_text(os.environ.get("FRAPPE_TEST_DB_NAME"))
+    user = normalize_text(os.environ.get("FRAPPE_TEST_DB_USER"))
+    password = os.environ.get("FRAPPE_TEST_DB_PASSWORD", "")
+    port = parse_db_port("FRAPPE_TEST_DB_PORT")
+    ensure(host, "FRAPPE_TEST_DB_HOST غير صالح")
+
+    denied_db_hosts = set(KNOWN_PRODUCTION_HOSTS)
+    prod_site_host = host_from_value(os.environ.get("FRAPPE_PROD_SITE", ""))
+    if prod_site_host:
+        denied_db_hosts.add(prod_site_host)
+    ensure(host not in denied_db_hosts, "رفض مجس DB: مضيف قاعدة التجريبي مضيف إنتاج")
+
+    prod_names = (
+        "FRAPPE_PROD_DB_HOST",
+        "FRAPPE_PROD_DB_PORT",
+        "FRAPPE_PROD_DB_NAME",
+        "FRAPPE_PROD_DB_USER",
+    )
+    prod_values = {name: normalize_text(os.environ.get(name)) for name in prod_names}
+    if any(prod_values.values()):
+        ensure(
+            prod_values["FRAPPE_PROD_DB_HOST"]
+            and prod_values["FRAPPE_PROD_DB_NAME"],
+            "حماية DB تتطلب هدف الإنتاج كاملًا عند ضبط أي FRAPPE_PROD_DB_*",
+        )
+        prod_host = prod_values["FRAPPE_PROD_DB_HOST"].lower().rstrip(".")
+        prod_port = parse_db_port("FRAPPE_PROD_DB_PORT", default=3306)
+        prod_database = prod_values["FRAPPE_PROD_DB_NAME"]
+        ensure(
+            (host, port, database) != (prod_host, prod_port, prod_database),
+            "رفض مجس DB: هدف قاعدة التجريبي يطابق هدف قاعدة الإنتاج",
+        )
+
+    return DirectTestDBConfig(
+        host=host,
+        port=port,
+        database=database,
+        user=user,
+        password=password,
+        timeout=min(max(int(timeout), 5), 30),
+    )
+
+
+class DirectTestDBProbe:
+    """One verified-TLS, read-only transaction and connection per observation."""
+
+    def __init__(self, config: DirectTestDBConfig):
+        self.config = config
+
+    def read_thread(self, *, thread_name: str, owner: str) -> dict[str, Any] | None:
+        ensure(thread_name and owner, "مجس DB يتطلب اسم Thread ومالكها")
+        try:
+            # Deliberately lazy: dry-run and runs without the explicit flag never import PyMySQL.
+            pymysql = __import__("pymysql")
+        except ImportError:
+            raise DirectDBProbeFailure(
+                "dependency_missing",
+                "تعذر تشغيل مجس DB التجريبية: مكتبة PyMySQL غير متاحة",
+            ) from None
+
+        try:
+            tls_context = ssl.create_default_context()
+            if hasattr(ssl, "TLSVersion"):
+                tls_context.minimum_version = ssl.TLSVersion.TLSv1_2
+        except Exception:  # noqa: BLE001 - never expose local TLS configuration details.
+            raise DirectDBProbeFailure(
+                "tls_context_failed",
+                "تعذر إنشاء سياق TLS متحقق لمجس DB التجريبية",
+            ) from None
+        if not tls_context.check_hostname or tls_context.verify_mode != ssl.CERT_REQUIRED:
+            raise DirectDBProbeFailure(
+                "tls_verification_unavailable",
+                "تعذر إنشاء سياق TLS متحقق لمجس DB التجريبية",
+            )
+
+        try:
+            connection = pymysql.connect(
+                host=self.config.host,
+                port=self.config.port,
+                user=self.config.user,
+                password=self.config.password,
+                database=self.config.database,
+                charset="utf8mb4",
+                autocommit=False,
+                connect_timeout=self.config.timeout,
+                read_timeout=self.config.timeout,
+                write_timeout=self.config.timeout,
+                ssl=tls_context,
+                cursorclass=pymysql.cursors.DictCursor,
+            )
+        except Exception:  # noqa: BLE001 - raw driver errors are intentionally discarded.
+            raise DirectDBProbeFailure(
+                "connection_failed",
+                "تعذر اتصال مجس DB التجريبية؛ حُجبت تفاصيل الاتصال والخطأ الخام",
+            ) from None
+
+        row: dict[str, Any] | None = None
+        query_failed = False
+        rollback_failed = False
+        close_failed = False
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("START TRANSACTION READ ONLY")
+                cursor.execute(DIRECT_DB_SELECT_SQL, (thread_name, owner))
+                fetched = cursor.fetchone()
+                row = dict(fetched) if isinstance(fetched, dict) else None
+        except Exception:  # noqa: BLE001 - do not persist or print raw DB exceptions.
+            query_failed = True
+        finally:
+            try:
+                connection.rollback()
+            except Exception:  # noqa: BLE001
+                rollback_failed = True
+            try:
+                connection.close()
+            except Exception:  # noqa: BLE001
+                close_failed = True
+
+        if query_failed:
+            raise DirectDBProbeFailure(
+                "read_failed",
+                "فشلت قراءة مجس DB التجريبية؛ حُجب الخطأ الخام",
+            )
+        if rollback_failed or close_failed:
+            raise DirectDBProbeFailure(
+                "cleanup_failed",
+                "تعذر إنهاء اتصال مجس DB التجريبية بأمان",
+            )
+        return row
+
+
 class FrappeClient:
     def __init__(self, config: SmokeConfig):
         self.config = config
         self.session = requests.Session()
+        self._request_observer: Callable[[dict[str, Any]], None] | None = None
+        self._request_seq = 0
+        self.last_request_seq: int | None = None
         self.session.headers.update(
             {
                 "Authorization": config.token,
@@ -228,6 +567,28 @@ class FrappeClient:
             }
         )
 
+    def set_request_observer(
+        self,
+        observer: Callable[[dict[str, Any]], None],
+        *,
+        start_seq: int = 0,
+    ) -> None:
+        self._request_observer = observer
+        self._request_seq = max(0, int(start_seq))
+        self.last_request_seq = None
+
+    def _finish_request_transcript(
+        self,
+        entry: dict[str, Any],
+        *,
+        started_monotonic: float,
+    ) -> None:
+        entry["finished_at_utc"] = datetime.now(timezone.utc).isoformat()
+        entry["duration_ms"] = round((time.perf_counter() - started_monotonic) * 1000, 3)
+        self.last_request_seq = int(entry["seq"])
+        if self._request_observer:
+            self._request_observer(entry)
+
     def raw_request(
         self,
         method: str,
@@ -235,14 +596,46 @@ class FrappeClient:
         *,
         params: dict[str, Any] | None = None,
         payload: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> requests.Response:
-        return self.session.request(
-            method,
-            self.config.base_url + path,
-            params=params,
-            json=payload,
-            timeout=self.config.timeout,
+        self._request_seq += 1
+        started_monotonic = time.perf_counter()
+        entry: dict[str, Any] = {
+            "seq": self._request_seq,
+            "started_at_utc": datetime.now(timezone.utc).isoformat(),
+            "method": method.upper(),
+            "url": self.config.base_url + path,
+            "path": path,
+            "query_keys": sorted((params or {}).keys()),
+            "body_keys": sorted((payload or {}).keys()),
+            "safe_args": safe_request_arguments(params, payload),
+            # Authorization/Cookie and all inherited Session headers are deliberately absent.
+            "request_headers": selected_headers(headers, TRANSCRIPT_REQUEST_HEADERS),
+        }
+        try:
+            response = self.session.request(
+                method,
+                self.config.base_url + path,
+                params=params,
+                json=payload,
+                headers=headers,
+                timeout=self.config.timeout,
+            )
+        except requests.RequestException as exc:
+            entry["error_type"] = type(exc).__name__
+            self._finish_request_transcript(entry, started_monotonic=started_monotonic)
+            raise
+
+        entry["status"] = response.status_code
+        effective_url = normalize_text(getattr(response.request, "url", ""))
+        if effective_url:
+            entry["effective_url_sha256"] = digest(effective_url)
+        entry["response_headers"] = selected_headers(
+            response.headers,
+            TRANSCRIPT_RESPONSE_HEADERS,
         )
+        self._finish_request_transcript(entry, started_monotonic=started_monotonic)
+        return response
 
     def request(
         self,
@@ -251,9 +644,16 @@ class FrappeClient:
         *,
         params: dict[str, Any] | None = None,
         payload: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
         expected: Iterable[int] = (200,),
     ) -> dict[str, Any]:
-        response = self.raw_request(method, path, params=params, payload=payload)
+        response = self.raw_request(
+            method,
+            path,
+            params=params,
+            payload=payload,
+            headers=headers,
+        )
         if response.status_code not in set(expected):
             raise HttpFailure(method, path, response.status_code, parse_server_message(response))
         if not response.content:
@@ -272,12 +672,23 @@ class FrappeClient:
         *,
         http_method: str = "GET",
         args: dict[str, Any] | None = None,
+        request_headers: dict[str, str] | None = None,
     ) -> Any:
         path = f"{API_BASE}.{method_name}"
         if http_method == "GET":
-            data = self.request("GET", path, params=args or {})
+            data = self.request(
+                "GET",
+                path,
+                params=args or {},
+                headers=request_headers,
+            )
         else:
-            data = self.request("POST", path, payload=args or {})
+            data = self.request(
+                "POST",
+                path,
+                payload=args or {},
+                headers=request_headers,
+            )
         return data.get("message")
 
     def get_logged_user(self) -> str:
@@ -428,16 +839,31 @@ class SmokeRunner:
         manifest: dict[str, Any],
         manifest_path: Path,
         user: str,
+        direct_db_probe: DirectTestDBProbe | None = None,
     ):
         self.client = client
         self.config = config
         self.manifest = manifest
         self.manifest_path = manifest_path
         self.user = user
+        self.direct_db_probe = direct_db_probe
         self.run_id = normalize_text(manifest.get("run_id"))
         self.marker = normalize_text(manifest.get("marker"))
         self.reference_name = normalize_text(manifest.get("reference_name"))
         self.thread_name = normalize_text(manifest.get("thread_name"))
+        transcript = self.manifest.setdefault("http_transcript", [])
+        transcript_seq = max(
+            (
+                int(row.get("seq") or 0)
+                for row in transcript
+                if isinstance(row, dict)
+            ),
+            default=0,
+        )
+        self.client.set_request_observer(
+            self.record_http_exchange,
+            start_seq=transcript_seq,
+        )
 
     @classmethod
     def new(
@@ -446,6 +872,7 @@ class SmokeRunner:
         config: SmokeConfig,
         user: str,
         state_dir: Path,
+        direct_db_probe: DirectTestDBProbe | None = None,
     ) -> "SmokeRunner":
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         run_id = f"MISMK-{timestamp}-{uuid4().hex[:6]}"
@@ -464,6 +891,16 @@ class SmokeRunner:
             "resources": [],
             "checks": [],
             "warnings": [],
+            "http_transcript": [],
+            "seen_state_observations": [],
+            "direct_test_db_observations": [],
+            "direct_test_db_probe": {
+                "enabled": direct_db_probe is not None,
+                "connection_scope": "new_per_observation",
+                "transaction": "START TRANSACTION READ ONLY",
+                "tls": "verified_default_context",
+                "credentials_persisted": False,
+            },
             "contains_secrets": False,
         }
         runner = cls(
@@ -472,6 +909,7 @@ class SmokeRunner:
             manifest=manifest,
             manifest_path=manifest_path,
             user=user,
+            direct_db_probe=direct_db_probe,
         )
         runner.save_manifest()
         return runner
@@ -485,6 +923,163 @@ class SmokeRunner:
         )
         os.chmod(temporary, 0o600)
         temporary.replace(self.manifest_path)
+
+    def record_http_exchange(self, entry: dict[str, Any]) -> None:
+        transcript = self.manifest.setdefault("http_transcript", [])
+        if len(transcript) >= MAX_HTTP_TRANSCRIPT_ENTRIES:
+            if not self.manifest.get("http_transcript_truncated"):
+                self.manifest["http_transcript_truncated"] = True
+                self.save_manifest()
+            return
+        persisted = dict(entry)
+        persisted["run_status"] = self.manifest.get("status")
+        transcript.append(persisted)
+        self.save_manifest()
+
+    def record_seen_observation(
+        self,
+        *,
+        label: str,
+        source: str,
+        expected_event_key: str,
+        attempt: int,
+        item: dict[str, Any] | None = None,
+        list_payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        observations = self.manifest.setdefault("seen_state_observations", [])
+        ensure(
+            len(observations) < MAX_SEEN_OBSERVATIONS,
+            "تجاوز transcript حالة القراءة الحد الآمن",
+        )
+        listed_item = (
+            find_item(list_payload, self.thread_name)
+            if isinstance(list_payload, dict)
+            else None
+        )
+        observed_item = listed_item if list_payload is not None else item
+        observation = {
+            "seq": len(observations) + 1,
+            "observed_at_utc": datetime.now(timezone.utc).isoformat(),
+            "http_seq": self.client.last_request_seq,
+            "label": label,
+            "source": source,
+            "attempt": attempt,
+            "expected_event_key": expected_event_key,
+            "listed_in_unread": bool(listed_item) if list_payload is not None else None,
+            "item": mention_state(observed_item),
+        }
+        if list_payload is not None:
+            response_search = "" if list_payload.get("search") is None else str(
+                list_payload.get("search")
+            )
+            observation["list_bucket"] = list_payload.get("bucket")
+            observation["list_response_search"] = {
+                "length": len(response_search),
+                "sha256": digest(response_search),
+            }
+            observation["list_total"] = list_payload.get("total")
+            observation["list_count_unread"] = (list_payload.get("counts") or {}).get(
+                "unread"
+            )
+        observations.append(observation)
+        # Persist before validation or sleeping so the first discrepant response is retained.
+        self.save_manifest()
+        return observed_item
+
+    def record_direct_db_observation(
+        self,
+        *,
+        label: str,
+        expected_event_key: str,
+        api_states: dict[str, dict[str, Any] | None] | None = None,
+        raise_on_error: bool = True,
+    ) -> dict[str, Any] | None:
+        if self.direct_db_probe is None:
+            return None
+
+        observations = self.manifest.setdefault("direct_test_db_observations", [])
+        ensure(
+            len(observations) < MAX_DIRECT_DB_OBSERVATIONS,
+            "تجاوز transcript مجس DB الحد الآمن",
+        )
+        observation: dict[str, Any] = {
+            "seq": len(observations) + 1,
+            "observed_at_utc": datetime.now(timezone.utc).isoformat(),
+            "http_seq": self.client.last_request_seq,
+            "label": label,
+            "source": "direct_test_db",
+            "expected_event_key": expected_event_key,
+            "connection_scope": "new_connection",
+            "transaction_policy": "START TRANSACTION READ ONLY ثم rollback",
+            "tls_policy": "verified_default_context",
+        }
+        try:
+            row = self.direct_db_probe.read_thread(
+                thread_name=self.thread_name,
+                owner=self.user,
+            )
+        except DirectDBProbeFailure as exc:
+            observation.update(
+                {
+                    "status": "error",
+                    "error_category": exc.category,
+                    "row_found": None,
+                    "item": None,
+                }
+            )
+            observations.append(observation)
+            self.save_manifest()
+            if raise_on_error:
+                raise
+            return None
+
+        direct_state = direct_db_mention_state(row)
+        safe_api_states = {
+            source: mention_state(state)
+            for source, state in (api_states or {}).items()
+        }
+        observation.update(
+            {
+                "status": "ok",
+                "transaction": "read_only_rolled_back",
+                "tls_verified": True,
+                "row_found": direct_state is not None,
+                "item": direct_state,
+                "api_states": safe_api_states,
+                "matches_api": compare_mention_states(direct_state, safe_api_states),
+            }
+        )
+        observations.append(observation)
+        self.save_manifest()
+        return direct_state
+
+    def record_final_failure_db_observation(self) -> None:
+        if self.direct_db_probe is None or not self.thread_name:
+            return
+        observations = self.manifest.get("direct_test_db_observations") or []
+        if any(
+            isinstance(row, dict) and row.get("label") == "final_failure"
+            for row in observations
+        ):
+            return
+
+        latest_api_states: dict[str, dict[str, Any] | None] = {}
+        expected_event_key = ""
+        for row in reversed(self.manifest.get("seen_state_observations") or []):
+            if not isinstance(row, dict):
+                continue
+            state = row.get("item") if isinstance(row.get("item"), dict) else None
+            source = normalize_text(row.get("source"))
+            if source and source not in latest_api_states:
+                latest_api_states[source] = state
+            if not expected_event_key:
+                expected_event_key = normalize_text(row.get("expected_event_key"))
+        self.record_direct_db_observation(
+            label="final_failure",
+            expected_event_key=expected_event_key,
+            api_states=latest_api_states,
+            raise_on_error=False,
+        )
 
     def check(self, title: str, detail: str = "تم") -> None:
         self.manifest.setdefault("checks", []).append(
@@ -531,15 +1126,25 @@ class SmokeRunner:
         )
         self.save_manifest()
 
-    def mentions(self, bucket: str, *, page_length: int = 25) -> dict[str, Any]:
+    def mentions(
+        self,
+        bucket: str,
+        *,
+        page_length: int = 25,
+        http_method: str = "POST",
+        search: str | None = None,
+        request_headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         payload = self.client.call(
             "get_mentions",
+            http_method=http_method,
             args={
                 "bucket": bucket,
-                "search": self.run_id,
+                "search": self.run_id if search is None else search,
                 "limit_start": 0,
                 "page_length": page_length,
             },
+            request_headers=request_headers,
         )
         if not isinstance(payload, dict):
             raise SmokeFailure("get_mentions لم يرجع كائنًا")
@@ -548,6 +1153,7 @@ class SmokeRunner:
     def detail(self, thread_name: str) -> dict[str, Any]:
         payload = self.client.call(
             "get_mention_detail",
+            http_method="POST",
             args={"thread_name": thread_name},
         )
         if not isinstance(payload, dict):
@@ -726,6 +1332,205 @@ class SmokeRunner:
             if attempt < POLL_ATTEMPTS:
                 time.sleep(POLL_INTERVAL_SECONDS)
         raise SmokeFailure("لم يتغير last_event_key ضمن مهلة polling لاختبار stale token")
+
+    def assert_observed_event_key(
+        self,
+        item: dict[str, Any] | None,
+        expected_event_key: str,
+        *,
+        label: str,
+    ) -> None:
+        if not item:
+            return
+        current_event_key = normalize_text(item.get("last_event_key"))
+        if current_event_key != expected_event_key:
+            raise SmokeFailure(
+                "وصل حدث Mention جديد أثناء التحقق من القراءة؛ "
+                f"source={label} expected={expected_event_key} current={current_event_key}"
+            )
+
+    def seen_state_is_consistent(
+        self,
+        detail_item: dict[str, Any],
+        unread_payload: dict[str, Any],
+        expected_event_key: str,
+    ) -> bool:
+        return bool(
+            normalize_text(detail_item.get("last_event_key")) == expected_event_key
+            and normalize_text(detail_item.get("last_seen_event_key"))
+            == expected_event_key
+            and not bool(detail_item.get("unread"))
+            and not find_item(unread_payload, self.thread_name)
+        )
+
+    def unread_bucket_invariant_broken(self, payload: dict[str, Any]) -> bool:
+        item = find_item(payload, self.thread_name)
+        if not item:
+            return False
+        last_event_key = normalize_text(item.get("last_event_key"))
+        last_seen_event_key = normalize_text(item.get("last_seen_event_key"))
+        return bool(
+            last_event_key
+            and last_event_key == last_seen_event_key
+            and not bool(item.get("unread"))
+        )
+
+    def observe_seen_detail(
+        self,
+        *,
+        label: str,
+        expected_event_key: str,
+        attempt: int,
+    ) -> dict[str, Any]:
+        detail_item = detail_mention(self.detail(self.thread_name))
+        self.record_seen_observation(
+            label=label,
+            source="detail",
+            expected_event_key=expected_event_key,
+            attempt=attempt,
+            item=detail_item,
+        )
+        self.assert_observed_event_key(
+            detail_item,
+            expected_event_key,
+            label=label,
+        )
+        return detail_item
+
+    def observe_unread_list(
+        self,
+        *,
+        label: str,
+        expected_event_key: str,
+        attempt: int,
+        http_method: str = "POST",
+        search: str | None = None,
+        request_headers: dict[str, str] | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        payload = self.mentions(
+            "unread",
+            http_method=http_method,
+            search=search,
+            request_headers=request_headers,
+        )
+        item = self.record_seen_observation(
+            label=label,
+            source="unread_list",
+            expected_event_key=expected_event_key,
+            attempt=attempt,
+            list_payload=payload,
+        )
+        self.assert_observed_event_key(item, expected_event_key, label=label)
+        return payload, item
+
+    def wait_for_seen_state(self, expected_event_key: str) -> None:
+        # First take three equivalent list reads with deliberately different HTTP cache keys.
+        detail_item = self.observe_seen_detail(
+            label="post_mark_post_detail",
+            expected_event_key=expected_event_key,
+            attempt=0,
+        )
+
+        exact_get, exact_item = self.observe_unread_list(
+            label="post_mark_get_unread_exact",
+            expected_event_key=expected_event_key,
+            attempt=0,
+            http_method="GET",
+        )
+
+        padded_get, padded_item = self.observe_unread_list(
+            label="post_mark_get_unread_padded_no_cache",
+            expected_event_key=expected_event_key,
+            attempt=0,
+            http_method="GET",
+            search=f"{self.run_id} ",
+            request_headers={"Cache-Control": "no-cache, no-store", "Pragma": "no-cache"},
+        )
+
+        post_list, post_item = self.observe_unread_list(
+            label="post_mark_post_unread",
+            expected_event_key=expected_event_key,
+            attempt=0,
+        )
+
+        variants = {
+            "get_exact": (exact_get, exact_item),
+            "get_padded_no_cache": (padded_get, padded_item),
+            "post": (post_list, post_item),
+        }
+        broken_variants = [
+            label
+            for label, (payload, _) in variants.items()
+            if self.unread_bucket_invariant_broken(payload)
+        ]
+        self.manifest["seen_read_comparison"] = {
+            "recorded_at_utc": datetime.now(timezone.utc).isoformat(),
+            "detail": mention_state(detail_item),
+            "listed": {label: bool(item) for label, (_, item) in variants.items()},
+            "items": {label: mention_state(item) for label, (_, item) in variants.items()},
+            "broken_variants": broken_variants,
+        }
+        self.save_manifest()
+        self.record_direct_db_observation(
+            label="post_mark_after_variants",
+            expected_event_key=expected_event_key,
+            api_states={
+                "detail": detail_item,
+                "get_exact": exact_item,
+                "get_padded_no_cache": padded_item,
+                "post": post_item,
+            },
+        )
+        if broken_variants:
+            raise SmokeFailure(
+                "get_mentions(bucket=unread) أعاد عنصرًا unread=false ومفاتيحه متساوية؛ "
+                f"variants={','.join(broken_variants)}"
+            )
+        if self.seen_state_is_consistent(detail_item, post_list, expected_event_key):
+            self.check("mark_mention_seen", "attempt=0")
+            return
+
+        last_state: dict[str, Any] = {}
+        for attempt in range(1, POLL_ATTEMPTS + 1):
+            detail_item = self.observe_seen_detail(
+                label="poll_post_detail",
+                expected_event_key=expected_event_key,
+                attempt=attempt,
+            )
+
+            unread_payload, unread_item = self.observe_unread_list(
+                label="poll_post_unread",
+                expected_event_key=expected_event_key,
+                attempt=attempt,
+            )
+            if self.unread_bucket_invariant_broken(unread_payload):
+                raise SmokeFailure(
+                    "get_mentions(bucket=unread) كسر invariant أثناء polling: "
+                    "العنصر unread=false ومفاتيحه متساوية"
+                )
+
+            last_state = {
+                "detail": mention_state(detail_item),
+                "listed_in_unread": bool(unread_item),
+                "unread_list_item": mention_state(unread_item),
+                "unread_list_total": unread_payload.get("total"),
+                "unread_list_count": (unread_payload.get("counts") or {}).get(
+                    "unread"
+                ),
+            }
+            if self.seen_state_is_consistent(
+                detail_item,
+                unread_payload,
+                expected_event_key,
+            ):
+                self.check("mark_mention_seen", f"attempt={attempt}")
+                return
+            if attempt < POLL_ATTEMPTS:
+                time.sleep(POLL_INTERVAL_SECONDS)
+        raise SmokeFailure(
+            "لم تتسق حالة القراءة ضمن مهلة polling: "
+            + json.dumps(last_state, ensure_ascii=False, sort_keys=True)
+        )
 
     def marker_comment_names(self) -> set[str]:
         rows = self.client.list_docs(
@@ -983,18 +1788,26 @@ class SmokeRunner:
 
     def run_optional_self_reply(self) -> None:
         if not self.config.include_self_reply:
-            self.warn("تجاوز reply_mention/reply_and_close؛ استخدم --include-self-reply لاختبار رد ذاتي معزول")
+            self.warn("تجاوز reply_mention/reply_and_close؛ استخدم --include-self-reply لاختبار منشن ذاتي معزول")
             return
 
         expected_event_key = self.current_event_key()
         request_id = f"{self.run_id}-REPLY"
-        reply = f"{self.marker} SELF-REPLY بلا mention"
+        reply = f"{self.marker} SELF-REPLY @{self.user}"
+        escaped_user = html.escape(self.user, quote=True)
+        reply_html = (
+            f"<p>{html.escape(self.marker)} SELF-REPLY "
+            f'<span class="mention" data-id="{escaped_user}" '
+            f'data-value="{escaped_user}" data-is-group="false">'
+            f"@{escaped_user}</span></p>"
+        )
         first_response = self.client.call(
             "reply_mention",
             http_method="POST",
             args={
                 "thread_name": self.thread_name,
                 "reply": reply,
+                "reply_html": reply_html,
                 "request_id": request_id,
                 "expected_last_event_key": expected_event_key,
             },
@@ -1004,36 +1817,51 @@ class SmokeRunner:
         first_comment = first_response.get("comment") or {}
         ensure(first_reply.get("request_id") == request_id, "reply_mention فقد request_id")
         ensure(first_reply.get("event_type") == "Reply", "reply_mention لم ينشئ حدث Reply")
-        ensure(normalize_text(first_comment.get("name")), "reply_mention لم يرجع Comment")
+        first_comment_name = normalize_text(first_comment.get("name"))
+        ensure(first_comment_name, "reply_mention لم يرجع Comment")
+        stored_comment = self.client.get_doc("Comment", first_comment_name)
+        ensure(stored_comment, "تعذر قراءة Comment الناتجة من الرد الذاتي")
+        stored_content = normalize_text(stored_comment.get("content"))
+        ensure(
+            f'data-id="{escaped_user}"' in stored_content,
+            "Comment الناتجة لا تحتوي منشن مستخدم التوكن",
+        )
+        ensure(
+            'data-is-group="false"' in stored_content,
+            "Comment الناتجة لم تثبت أن المنشن لمستخدم وليس مجموعة",
+        )
 
-        repeated_response = self.client.call(
-            "reply_mention",
-            http_method="POST",
-            args={
-                "thread_name": self.thread_name,
-                "reply": reply,
-                "request_id": request_id,
-                "expected_last_event_key": expected_event_key,
-            },
-        )
-        ensure(isinstance(repeated_response, dict), "إعادة reply_mention لم ترجع كائنًا")
-        repeated_reply = repeated_response.get("reply") or {}
-        repeated_comment = repeated_response.get("comment") or {}
-        ensure(
-            repeated_reply.get("event_key") == first_reply.get("event_key"),
-            "idempotency أنشأت event_key ثانية",
-        )
-        ensure(
-            repeated_comment.get("name") == first_comment.get("name"),
-            "idempotency أنشأت Comment ثانية",
-        )
-        detail = self.detail(self.thread_name)
-        messages = detail.get("messages") or []
-        ensure(
-            sum(1 for row in messages if row.get("request_id") == request_id) == 1,
-            "reply_mention idempotent يجب أن يظهر مرة واحدة فقط",
-        )
-        self.check("reply_mention ذاتي + idempotency", request_id)
+        self.record_marker_comments()
+        for attempt in range(1, POLL_ATTEMPTS + 1):
+            detail = self.detail(self.thread_name)
+            mention = detail_mention(detail)
+            messages = detail.get("messages") or []
+            reply_events = [
+                row for row in messages if row.get("request_id") == request_id
+            ]
+            mention_events = [
+                row
+                for row in messages
+                if row.get("event_type") == "Mention"
+                and normalize_text(row.get("comment")) == first_comment_name
+            ]
+            if (
+                len(reply_events) == 1
+                and len(mention_events) == 1
+                and normalize_text(mention.get("last_event_key"))
+                == normalize_text(mention_events[0].get("event_key"))
+            ):
+                self.check(
+                    "reply_mention بمنشن ذاتي والتقاط وارد واحد",
+                    f"{request_id}; attempt={attempt}",
+                )
+                break
+            if attempt < POLL_ATTEMPTS:
+                time.sleep(POLL_INTERVAL_SECONDS)
+        else:
+            raise SmokeFailure(
+                "لم يلتقط الرد الذاتي كحدث Mention واحد مطابق للتعليق ضمن مهلة polling"
+            )
 
         close_request_id = f"{self.run_id}-REPLY-CLOSE"
         close_reply = f"{self.marker} SELF-REPLY-CLOSE بلا mention"
@@ -1090,13 +1918,38 @@ class SmokeRunner:
 
         self.create_isolated_reference_and_self_mention()
         self.wait_for_thread()
+        candidates = self.client.call(
+            "search_reply_mentions",
+            http_method="POST",
+            args={"thread_name": self.thread_name, "search_term": ""},
+        )
+        ensure(isinstance(candidates, list), "search_reply_mentions لم ترجع قائمة")
+        ensure(len(candidates) <= 8, "search_reply_mentions تجاوزت الحد الآمن")
+        ensure(
+            all(
+                isinstance(row, dict)
+                and set(row) == {"id", "value", "is_group"}
+                and row.get("is_group") is False
+                for row in candidates
+            ),
+            "search_reply_mentions أعادت نتيجة مجموعة أو عقدًا غير متوقع",
+        )
+        self.check("search_reply_mentions محدودة وبلا مجموعات")
         self.check_optional_notification_link()
         self.run_stale_version_guard()
 
         open_payload = self.mentions("open")
-        unread_payload = self.mentions("unread")
+        # Prime the exact GET cache key while the fixture is still unread.
+        unread_payload = self.mentions("unread", http_method="GET")
         open_item = find_item(open_payload, self.thread_name)
         unread_item = find_item(unread_payload, self.thread_name)
+        self.record_seen_observation(
+            label="pre_mark_get_unread_exact",
+            source="unread_list",
+            expected_event_key=normalize_text((unread_item or {}).get("last_event_key")),
+            attempt=0,
+            list_payload=unread_payload,
+        )
         ensure(open_item, "Thread لا تظهر في bucket=open")
         ensure(unread_item, "Thread الجديدة لا تظهر في bucket=unread")
         ensure(bool(open_item.get("unread")), "Thread الجديدة ليست غير مقروءة")
@@ -1121,8 +1974,25 @@ class SmokeRunner:
             ensure(permissions.get(permission) is True, f"الصلاحية {permission} ليست مفعلة")
         self.check("detail + messages + permissions")
 
-        expected_event_key = self.current_event_key()
-        self.client.call(
+        expected_event_key = normalize_text(mention.get("last_event_key"))
+        ensure(
+            len(expected_event_key) == 64
+            and all(char in "0123456789abcdef" for char in expected_event_key.lower()),
+            "last_event_key المعروض في التفاصيل غير صالح",
+        )
+        self.record_seen_observation(
+            label="pre_mark_post_detail",
+            source="detail",
+            expected_event_key=expected_event_key,
+            attempt=0,
+            item=mention,
+        )
+        self.record_direct_db_observation(
+            label="pre_mark",
+            expected_event_key=expected_event_key,
+            api_states={"detail": mention, "unread_list": unread_item},
+        )
+        seen_response = self.client.call(
             "mark_mention_seen",
             http_method="POST",
             args={
@@ -1131,10 +2001,30 @@ class SmokeRunner:
                 "expected_last_event_key": expected_event_key,
             },
         )
-        detail_payload = self.detail(self.thread_name)
-        ensure(not bool(detail_mention(detail_payload).get("unread")), "mark_mention_seen لم يحدّث unread")
-        ensure(not find_item(self.mentions("unread"), self.thread_name), "Thread بقيت في bucket=unread")
-        self.check("mark_mention_seen")
+        ensure(isinstance(seen_response, dict), "mark_mention_seen لم يرجع كائنًا")
+        seen_mention = seen_response.get("mention") or {}
+        self.record_seen_observation(
+            label="mark_once_response",
+            source="mark_response",
+            expected_event_key=expected_event_key,
+            attempt=0,
+            item=seen_mention,
+        )
+        self.record_direct_db_observation(
+            label="post_mark_immediate",
+            expected_event_key=expected_event_key,
+            api_states={"mark_response": seen_mention},
+        )
+        ensure(
+            normalize_text(seen_mention.get("last_event_key")) == expected_event_key,
+            "mark_mention_seen غيّر last_event_key",
+        )
+        ensure(
+            normalize_text(seen_mention.get("last_seen_event_key")) == expected_event_key,
+            "mark_mention_seen لم يحفظ last_seen_event_key",
+        )
+        ensure(not bool(seen_mention.get("unread")), "mark_mention_seen لم يحدّث unread في الاستجابة")
+        self.wait_for_seen_state(expected_event_key)
 
         self.run_optional_self_reply()
 
@@ -1605,6 +2495,16 @@ def dry_run_summary(args: argparse.Namespace, env_file: Path, state_dir: Path) -
         "direct_thread_fixture": False,
         "internal_event_cleanup": "Thread.on_trash cascade؛ بلا REST read/delete لـEvent",
         "include_self_reply": bool(args.include_self_reply),
+        "include_db_read_probe": bool(args.include_db_read_probe),
+        "db_probe_network_requests": False,
+        "db_probe_live_requirements": [
+            "--run",
+            "--include-db-read-probe",
+            "FRAPPE_TEST_DB_* فقط",
+            "FRAPPE_TEST_DB_READ_ONLY=truthy",
+            "FRAPPE_TEST_DB_SSL=truthy",
+        ],
+        "self_reply_recipient_policy": "مستخدم FRAPPE_TEST_TOKEN فقط؛ لا موظف خارجي",
         "cleanup_manifest": str(args.cleanup_manifest) if args.cleanup_manifest else None,
         "state_dir": str(state_dir),
         "production_hosts_denied": sorted(KNOWN_PRODUCTION_HOSTS),
@@ -1634,7 +2534,10 @@ def parse_args() -> argparse.Namespace:
         "--env-file",
         type=Path,
         default=default_env_file(),
-        help="ملف البيئة المحلي؛ لا يقرأ إلا FRAPPE_TEST_SITE/FRAPPE_TEST_TOKEN للتشغيل.",
+        help=(
+            "ملف البيئة المحلي؛ يستخدم FRAPPE_TEST_SITE/FRAPPE_TEST_TOKEN، "
+            "ومع مجس DB الصريح يستخدم FRAPPE_TEST_DB_* فقط."
+        ),
     )
     parser.add_argument(
         "--state-dir",
@@ -1650,7 +2553,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--include-self-reply",
         action="store_true",
-        help="يختبر reply_mention برد ذاتي نصي على ToDo المعزول؛ لا يحتوي @mention.",
+        help="يختبر reply_mention بمنشن مستخدم التوكن نفسه فقط؛ لا يذكر موظفًا آخر.",
+    )
+    parser.add_argument(
+        "--include-db-read-probe",
+        action="store_true",
+        help=(
+            "تشخيص اختياري حي: يقرأ صف Thread من DB التجريبية باتصال TLS جديد "
+            "ومعاملة READ ONLY لكل عينة؛ لا يعمل دون --run."
+        ),
     )
     parser.add_argument(
         "--cleanup-manifest",
@@ -1672,6 +2583,15 @@ def main() -> int:
         return 0
 
     config = validate_run_config(args)
+    ensure(
+        not (args.include_db_read_probe and args.cleanup_manifest),
+        "--include-db-read-probe لا يستخدم مع --cleanup-manifest",
+    )
+    direct_db_probe = (
+        DirectTestDBProbe(validate_direct_test_db_config(config.timeout))
+        if args.include_db_read_probe
+        else None
+    )
     client = FrappeClient(config)
     user = client.get_logged_user()
     ensure(user and user != "Guest", "FRAPPE_TEST_TOKEN لا يمثل مستخدمًا مسجلًا")
@@ -1701,7 +2621,13 @@ def main() -> int:
         )
         return 1 if runner.cleanup() else 0
 
-    runner = SmokeRunner.new(client, config, user, state_dir)
+    runner = SmokeRunner.new(
+        client,
+        config,
+        user,
+        state_dir,
+        direct_db_probe=direct_db_probe,
+    )
     smoke_error: Exception | None = None
     cleanup_errors: list[str] = []
     summary: dict[str, Any] | None = None
@@ -1709,6 +2635,7 @@ def main() -> int:
         summary = runner.run()
     except Exception as exc:  # noqa: BLE001
         smoke_error = exc
+        runner.record_final_failure_db_observation()
         runner.manifest["status"] = "checks_failed"
         runner.manifest["failure"] = str(exc)
         runner.save_manifest()

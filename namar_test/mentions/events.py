@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from contextlib import contextmanager
 from typing import Any
 
 import frappe
@@ -12,6 +13,7 @@ from namar_test.followups.logic import (
     MAX_REFERENCE_LENGTH,
     clean_text,
     mention_event_key,
+    mention_state_event_key,
     mention_thread_key,
     plain_text,
 )
@@ -19,6 +21,7 @@ from namar_test.followups.logic import (
 
 THREAD_DOCTYPE = "Namar Mention Thread"
 EVENT_DOCTYPE = "Namar Mention Event"
+TODO_SYNC_FLAG = "namar_suppressed_mention_todo_sync"
 
 
 def _value(doc: Any, fieldname: str, default: Any = None) -> Any:
@@ -163,6 +166,303 @@ def _linked_todo_is_open(thread) -> bool:
     )
 
 
+def _mention_tables_ready() -> bool:
+    return bool(
+        frappe.db.table_exists(THREAD_DOCTYPE)
+        and frappe.db.table_exists(EVENT_DOCTYPE)
+    )
+
+
+def _todo_actor(todo: Any) -> str:
+    actor = clean_text(
+        _value(todo, "modified_by")
+        or getattr(getattr(frappe, "session", None), "user", None)
+        or "Administrator",
+        MAX_REFERENCE_LENGTH,
+    )
+    return actor or "Administrator"
+
+
+def _closed_via_followup(thread: Any) -> bool:
+    return str(_value(thread, "closed_via_followup", 0) or 0).strip().lower() in {
+        "1",
+        "true",
+    }
+
+
+def _todo_matches_thread(todo: Any, thread: Any) -> bool:
+    return bool(
+        clean_text(_value(todo, "name"), MAX_REFERENCE_LENGTH)
+        == clean_text(thread.converted_to_todo, MAX_REFERENCE_LENGTH)
+        and clean_text(_value(todo, "allocated_to"), MAX_REFERENCE_LENGTH)
+        == clean_text(thread.for_user, MAX_REFERENCE_LENGTH)
+        and clean_text(_value(todo, "reference_type"), MAX_REFERENCE_LENGTH)
+        == clean_text(thread.reference_doctype, MAX_REFERENCE_LENGTH)
+        and clean_text(_value(todo, "reference_name"), MAX_REFERENCE_LENGTH)
+        == clean_text(thread.reference_name, MAX_REFERENCE_LENGTH)
+    )
+
+
+def _todo_before_change(todo: Any) -> Any | None:
+    try:
+        return todo.get_doc_before_save()
+    except (AttributeError, TypeError):
+        return None
+
+
+def _linked_thread_names(todo_name: str) -> list[str]:
+    return list(
+        frappe.db.get_values(
+            THREAD_DOCTYPE,
+            {"converted_to_todo": todo_name},
+            "name",
+            pluck=True,
+        )
+        or []
+    )
+
+
+def _locked_thread(thread_name: str):
+    frappe.db.get_value(THREAD_DOCTYPE, thread_name, "name", for_update=True)
+    return frappe.get_doc(THREAD_DOCTYPE, thread_name)
+
+
+def _append_todo_state_event(
+    thread: Any,
+    event_type: str,
+    content: str,
+    actor: str,
+) -> None:
+    event_key = mention_state_event_key(
+        event_type,
+        thread.name,
+        actor,
+        thread.modified,
+    )
+    if frappe.db.exists(EVENT_DOCTYPE, event_key):
+        return
+    frappe.get_doc(
+        {
+            "doctype": EVENT_DOCTYPE,
+            "event_key": event_key,
+            "for_user": thread.for_user,
+            "thread": thread.name,
+            "event_type": event_type,
+            "mentioned_at": now_datetime(),
+            "from_user": actor,
+            "content_plain": content,
+        }
+    ).insert(ignore_permissions=True, ignore_if_duplicate=True)
+
+
+def _sync_is_suppressed(todo_name: str) -> bool:
+    flags = getattr(frappe, "flags", None)
+    counters = getattr(flags, TODO_SYNC_FLAG, {}) if flags is not None else {}
+    return int((counters or {}).get(todo_name, 0)) > 0
+
+
+@contextmanager
+def suppress_todo_mention_sync(todo_name: str):
+    """Defer one exact ToDo transition while it is replaced inside a savepoint."""
+
+    normalized_name = clean_text(todo_name, MAX_REFERENCE_LENGTH)
+    flags = getattr(frappe, "flags", None)
+    if not normalized_name or flags is None:
+        yield
+        return
+
+    counters = dict(getattr(flags, TODO_SYNC_FLAG, {}) or {})
+    counters[normalized_name] = int(counters.get(normalized_name, 0)) + 1
+    setattr(flags, TODO_SYNC_FLAG, counters)
+    try:
+        yield
+    finally:
+        counters = dict(getattr(flags, TODO_SYNC_FLAG, {}) or {})
+        remaining = int(counters.get(normalized_name, 0)) - 1
+        if remaining > 0:
+            counters[normalized_name] = remaining
+        else:
+            counters.pop(normalized_name, None)
+        setattr(flags, TODO_SYNC_FLAG, counters)
+
+
+def sync_linked_mentions_on_todo_change(todo: Any, method: str | None = None) -> None:
+    """Keep a converted mention aligned with its exact linked ToDo."""
+
+    todo_name = clean_text(_value(todo, "name"), MAX_REFERENCE_LENGTH)
+    if not todo_name or _sync_is_suppressed(todo_name) or not _mention_tables_ready():
+        return
+
+    status = clean_text(_value(todo, "status"), 20)
+    if status not in {"Open", "Closed", "Cancelled"}:
+        return
+
+    actor = _todo_actor(todo)
+    previous_todo = _todo_before_change(todo)
+    for thread_name in _linked_thread_names(todo_name):
+        thread = _locked_thread(thread_name)
+        if not _todo_matches_thread(todo, thread):
+            if previous_todo and _todo_matches_thread(previous_todo, thread):
+                _reopen_converted_thread(
+                    thread,
+                    (
+                        f"تغيّر مكلّف أو مرجع المتابعة {todo_name}؛ "
+                        "عادت الرسالة إلى تحتاج قرارًا"
+                    ),
+                    actor,
+                )
+            continue
+
+        if status == "Closed" and thread.status == "Converted":
+            _append_todo_state_event(
+                thread,
+                "Closed",
+                f"أُنجزت المتابعة {todo_name}",
+                actor,
+            )
+            thread.status = "Closed"
+            thread.closed_at = _value(todo, "modified") or now_datetime()
+            thread.closed_by = actor
+            thread.closed_via_followup = 1
+            thread.save(ignore_permissions=True)
+        elif status == "Cancelled" and (
+            thread.status == "Converted"
+            or (thread.status == "Closed" and _closed_via_followup(thread))
+        ):
+            _append_todo_state_event(
+                thread,
+                "Reopened",
+                f"أُلغيت المتابعة {todo_name} وعادت الرسالة إلى تحتاج قرارًا",
+                actor,
+            )
+            thread.status = "Open"
+            thread.closed_at = None
+            thread.closed_by = None
+            thread.closed_via_followup = 0
+            thread.save(ignore_permissions=True)
+        elif status == "Open" and (
+            thread.status == "Open"
+            or (thread.status == "Closed" and _closed_via_followup(thread))
+        ):
+            _append_todo_state_event(
+                thread,
+                "Converted",
+                f"أُعيد فتح المتابعة {todo_name}",
+                actor,
+            )
+            thread.status = "Converted"
+            thread.closed_at = None
+            thread.closed_by = None
+            thread.closed_via_followup = 0
+            thread.save(ignore_permissions=True)
+
+
+def sync_linked_mentions_on_todo_trash(todo: Any, method: str | None = None) -> None:
+    """Return only active converted mentions to the decision queue on deletion."""
+
+    todo_name = clean_text(_value(todo, "name"), MAX_REFERENCE_LENGTH)
+    if not todo_name or not _mention_tables_ready():
+        return
+
+    actor = _todo_actor(todo)
+    for thread_name in _linked_thread_names(todo_name):
+        thread = _locked_thread(thread_name)
+        if not _todo_matches_thread(todo, thread):
+            continue
+        if thread.status == "Converted":
+            _append_todo_state_event(
+                thread,
+                "Reopened",
+                f"حُذفت المتابعة {todo_name} وعادت الرسالة إلى تحتاج قرارًا",
+                actor,
+            )
+            thread.status = "Open"
+            thread.converted_to_todo = None
+            thread.closed_at = None
+            thread.closed_by = None
+            thread.closed_via_followup = 0
+            thread.save(ignore_permissions=True)
+        elif thread.status == "Closed" and _closed_via_followup(thread):
+            thread.converted_to_todo = None
+            thread.save(ignore_permissions=True)
+
+
+def _reopen_converted_thread(
+    thread: Any,
+    reason: str,
+    actor: str,
+) -> bool:
+    if thread.status != "Converted":
+        return False
+
+    normalized_actor = clean_text(actor, MAX_REFERENCE_LENGTH) or "Administrator"
+    normalized_reason = plain_text(reason, MAX_NOTE_LENGTH) or "تعذر العثور على المتابعة المرتبطة"
+    _append_todo_state_event(
+        thread,
+        "Reopened",
+        normalized_reason,
+        normalized_actor,
+    )
+    thread.status = "Open"
+    thread.closed_at = None
+    thread.closed_by = None
+    thread.closed_via_followup = 0
+    thread.save(ignore_permissions=True)
+    return True
+
+
+def reopen_stale_converted_mention(
+    thread_name: str,
+    reason: str,
+    actor: str = "Administrator",
+) -> bool:
+    """Repair a converted thread whose stored ToDo can no longer be active."""
+
+    if not _mention_tables_ready():
+        return False
+    thread = _locked_thread(clean_text(thread_name, MAX_REFERENCE_LENGTH))
+    return _reopen_converted_thread(thread, reason, actor)
+
+
+def transfer_linked_mentions_to_next_todo(current_todo: Any, next_todo: Any) -> int:
+    """Move converted mention pointers atomically to the next open follow-up."""
+
+    current_name = clean_text(_value(current_todo, "name"), MAX_REFERENCE_LENGTH)
+    next_name = clean_text(_value(next_todo, "name"), MAX_REFERENCE_LENGTH)
+    if not current_name or not next_name or not _mention_tables_ready():
+        return 0
+    if clean_text(_value(next_todo, "status"), 20) != "Open":
+        frappe.throw("المتابعة القادمة ليست مفتوحة", frappe.ValidationError)
+    if any(
+        clean_text(_value(current_todo, fieldname), MAX_REFERENCE_LENGTH)
+        != clean_text(_value(next_todo, fieldname), MAX_REFERENCE_LENGTH)
+        for fieldname in ("allocated_to", "reference_type", "reference_name")
+    ):
+        frappe.throw("المتابعة القادمة لا تطابق الرسالة المحوّلة", frappe.ValidationError)
+
+    actor = _todo_actor(next_todo)
+    transferred = 0
+    for thread_name in _linked_thread_names(current_name):
+        thread = _locked_thread(thread_name)
+        if thread.status != "Converted" or not _todo_matches_thread(current_todo, thread):
+            continue
+        _append_todo_state_event(
+            thread,
+            "Converted",
+            f"أُنجزت المتابعة {current_name} وجُدولت المتابعة التالية {next_name}",
+            actor,
+        )
+        thread.converted_to_todo = next_name
+        thread.converted_at = now_datetime()
+        thread.converted_by = actor
+        thread.closed_at = None
+        thread.closed_by = None
+        thread.closed_via_followup = 0
+        thread.save(ignore_permissions=True)
+        transferred += 1
+    return transferred
+
+
 def _get_or_create_thread(
     for_user: str,
     reference_doctype: str,
@@ -267,11 +567,12 @@ def process_mention_event(
         thread.status = "Open"
         thread.closed_at = None
         thread.closed_by = None
+        thread.closed_via_followup = 0
     elif thread.status == "Converted" and not _linked_todo_is_open(thread):
         thread.status = "Open"
-        thread.converted_to_todo = None
-        thread.converted_at = None
-        thread.converted_by = None
+        thread.closed_at = None
+        thread.closed_by = None
+        thread.closed_via_followup = 0
     thread.save(ignore_permissions=True)
     return thread.name
 

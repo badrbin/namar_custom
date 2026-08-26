@@ -19,8 +19,9 @@ class NamarMyFollowups {
 		this.mentions_api = "namar_test.mentions.api";
 		this.state = {
 			source: deep_link.source,
-			bucket: deep_link.source === "mentions" ? "open" : "all",
+			bucket: deep_link.bucket,
 			search: "",
+			search_scope: "all",
 			priority: "",
 			items: [],
 			counts: {},
@@ -39,20 +40,36 @@ class NamarMyFollowups {
 			action_busy: false,
 		};
 		this.selected_by_source = { mentions: null, followups: null, approvals: null };
+		this.source_counts = { mentions: null, followups: null, approvals: null };
+		this.source_count_status = { mentions: "idle", followups: "idle", approvals: "idle" };
+		this.source_count_loaded_at = { mentions: 0, followups: 0, approvals: 0 };
+		this.source_count_sequence = { mentions: 0, followups: 0, approvals: 0 };
+		this.source_count_requests = {};
 		this.pending_thread = deep_link.source === "mentions" ? deep_link.thread : "";
 		this.list_sequence = 0;
 		this.detail_sequence = 0;
 		this.last_loaded_at = 0;
 		this.search_timer = null;
+		this.mention_reply_control = null;
+		this.applied_seen_events = new Set();
 		this.build();
 		this.bind_events();
 	}
 
 	show() {
 		const deep_link = this.read_deep_link();
+		this.load_source_summaries({ exclude_source: deep_link.source });
 		if (deep_link.source !== this.state.source) {
 			this.pending_thread = deep_link.source === "mentions" ? deep_link.thread : "";
-			this.change_source(deep_link.source, { update_url: false });
+			this.change_source(deep_link.source, {
+				update_url: false,
+				bucket: deep_link.bucket,
+			});
+			return;
+		}
+
+		if (deep_link.bucket && deep_link.bucket !== this.state.bucket) {
+			this.change_bucket(deep_link.bucket, { update_url: false });
 			return;
 		}
 
@@ -83,15 +100,18 @@ class NamarMyFollowups {
 					<div class="mf-source-switch" role="tablist" aria-label="${this.escape(__("مصدر قائمة العمل"))}">
 						<button type="button" class="mf-source-btn ${this.state.source === "mentions" ? "is-active" : ""}" data-source="mentions" role="tab" aria-selected="${this.state.source === "mentions"}">
 							${this.icon("mail", "sm")}
-							<span>${this.escape(__("الوارد"))}</span>
+							<span class="mf-source-label">${this.escape(__("الوارد"))}</span>
+							<strong class="mf-source-count is-loading" data-source-count="mentions" aria-live="polite">…</strong>
 						</button>
 						<button type="button" class="mf-source-btn ${this.state.source === "followups" ? "is-active" : ""}" data-source="followups" role="tab" aria-selected="${this.state.source === "followups"}">
 							${this.icon("clipboard", "sm")}
-							<span>${this.escape(__("المتابعات"))}</span>
+							<span class="mf-source-label">${this.escape(__("المتابعات"))}</span>
+							<strong class="mf-source-count is-loading" data-source-count="followups" aria-live="polite">…</strong>
 						</button>
 						<button type="button" class="mf-source-btn ${this.state.source === "approvals" ? "is-active" : ""}" data-source="approvals" role="tab" aria-selected="${this.state.source === "approvals"}">
 							${this.icon("review", "sm")}
-							<span>${this.escape(__("الموافقات"))}</span>
+							<span class="mf-source-label">${this.escape(__("الموافقات"))}</span>
+							<strong class="mf-source-count is-loading" data-source-count="approvals" aria-live="polite">…</strong>
 						</button>
 					</div>
 				</header>
@@ -103,13 +123,19 @@ class NamarMyFollowups {
 
 					<aside class="mf-queue-panel" aria-label="${this.escape(__("قائمة العمل"))}">
 						<div class="mf-queue-tools">
-							<div class="mf-search-box" role="search">
-								<span class="mf-search-icon">${this.icon("search", "sm")}</span>
-								<label class="sr-only" for="mf-followups-search">${this.escape(__("البحث في قائمة العمل"))}</label>
-								<input id="mf-followups-search" type="search" class="mf-search-input" placeholder="${this.escape(this.search_placeholder())}" autocomplete="off" />
-								<button type="button" class="mf-clear-search" aria-label="${this.escape(__("مسح البحث"))}" hidden>
-									${this.icon("close", "xs")}
-								</button>
+							<div class="mf-search-controls">
+								<label class="mf-search-scope-field" for="mf-followups-search-scope">
+									<span>${this.escape(__("البحث حسب"))}</span>
+									<select id="mf-followups-search-scope" class="mf-search-scope"></select>
+								</label>
+								<div class="mf-search-box" role="search">
+									<span class="mf-search-icon">${this.icon("search", "sm")}</span>
+									<label class="sr-only" for="mf-followups-search">${this.escape(__("البحث في قائمة العمل"))}</label>
+									<input id="mf-followups-search" type="search" class="mf-search-input" placeholder="${this.escape(this.search_placeholder())}" autocomplete="off" />
+									<button type="button" class="mf-clear-search" aria-label="${this.escape(__("مسح البحث"))}" hidden>
+										${this.icon("close", "xs")}
+									</button>
+								</div>
 							</div>
 							<button type="button" class="mf-icon-button mf-filter-button" aria-label="${this.escape(__("تصفية حسب الأولوية"))}" title="${this.escape(__("تصفية حسب الأولوية"))}">
 								${this.icon("filter", "sm")}
@@ -130,10 +156,148 @@ class NamarMyFollowups {
 		this.$filters = this.$root.find(".mf-filter-bar");
 		this.$pagination = this.$root.find(".mf-pagination");
 		this.$search = this.$root.find(".mf-search-input");
+		this.$search_scope = this.$root.find(".mf-search-scope");
 		this.$clear_search = this.$root.find(".mf-clear-search");
 		this.$root.find(".mf-filter-button").prop("hidden", this.state.source !== "followups");
+		this.render_search_scope();
+		this.render_source_counts();
 		this.render_filters();
 		this.render_detail_empty();
+	}
+
+	load_source_summaries({ exclude_source = "", force = false } = {}) {
+		const requests = ["mentions", "followups", "approvals"]
+			.filter((source) => source !== exclude_source)
+			.map((source) => this.load_source_count(source, { force }));
+		return Promise.allSettled(requests);
+	}
+
+	load_source_count(source, { force = false } = {}) {
+		if (!["mentions", "followups", "approvals"].includes(source)) {
+			return Promise.resolve(null);
+		}
+		const is_fresh = Date.now() - this.source_count_loaded_at[source] <= 60 * 1000;
+		if (!force && this.source_count_status[source] === "ready" && is_fresh) {
+			return Promise.resolve(this.source_counts[source]);
+		}
+		if (!force && this.source_count_requests[source]) {
+			return this.source_count_requests[source];
+		}
+
+		const sequence = ++this.source_count_sequence[source];
+		this.source_count_status[source] = "loading";
+		this.render_source_counts();
+		const request = Promise.resolve()
+			.then(() => this.fetch_source_summary(source))
+			.then((response) => {
+				if (sequence !== this.source_count_sequence[source]) return null;
+				const count = this.open_count_from_response(response);
+				this.set_source_count(source, count);
+				return count;
+			})
+			.catch((error) => {
+				if (sequence !== this.source_count_sequence[source]) return null;
+				this.source_count_status[source] = "error";
+				this.render_source_counts();
+				this.log_error(`load_source_count:${source}`, error);
+				return null;
+			});
+		this.source_count_requests[source] = request;
+		request.then(() => {
+			if (this.source_count_requests[source] === request) {
+				delete this.source_count_requests[source];
+			}
+		});
+		return request;
+	}
+
+	fetch_source_summary(source) {
+		const args = { search: "", limit_start: 0, page_length: 1 };
+		if (source === "mentions") {
+			args.bucket = "open";
+			return this.call("get_mentions", args, this.mentions_api);
+		}
+		if (source === "followups") {
+			args.bucket = "all";
+			args.priority = "";
+			return this.call("get_followups", args);
+		}
+		return this.call("get_approvals", args);
+	}
+
+	open_count_from_response(response) {
+		const value = response?.counts?.open;
+		const count = Number(value);
+		if (
+			value === undefined
+			|| value === null
+			|| typeof value === "boolean"
+			|| !Number.isInteger(count)
+			|| count < 0
+		) {
+			throw new Error("Missing open source count");
+		}
+		return count;
+	}
+
+	set_source_count(source, count) {
+		this.source_counts[source] = Math.max(0, Math.trunc(Number(count) || 0));
+		this.source_count_status[source] = "ready";
+		this.source_count_loaded_at[source] = Date.now();
+		this.render_source_counts();
+		if (typeof $ === "function" && typeof document !== "undefined") {
+			$(document).trigger("namar:my-followups:count-changed", [{
+				source,
+				count: this.source_counts[source],
+				force: Boolean(this.state.action_busy),
+			}]);
+		}
+	}
+
+	sync_source_count_from_list(source, payload) {
+		if (source === "followups" && this.state.priority) {
+			this.load_source_count("followups");
+			return false;
+		}
+		const value = payload?.counts?.open;
+		const count = Number(value);
+		if (
+			value === undefined
+			|| value === null
+			|| typeof value === "boolean"
+			|| !Number.isInteger(count)
+			|| count < 0
+		) return false;
+		this.source_count_sequence[source] += 1;
+		delete this.source_count_requests[source];
+		this.set_source_count(source, count);
+		return true;
+	}
+
+	render_source_counts() {
+		if (!this.$root) return;
+		const labels = {
+			mentions: __("الوارد"),
+			followups: __("المتابعات"),
+			approvals: __("الموافقات"),
+		};
+		Object.keys(labels).forEach((source) => {
+			const status = this.source_count_status[source];
+			const count = this.source_counts[source];
+			const has_count = count !== null && count !== undefined && Number.isFinite(Number(count));
+			const text = has_count ? this.number(count) : status === "error" ? "—" : "…";
+			const aria_label = status === "ready"
+				? __("{0}: {1} مفتوحة", [labels[source], text])
+				: status === "error"
+					? __("تعذّر تحديث عدد {0}", [labels[source]])
+					: __("جارٍ تحميل عدد {0}", [labels[source]]);
+			this.$root.find(`[data-source-count="${source}"]`)
+				.text(text)
+				.toggleClass("is-loading", status === "loading" || status === "idle")
+				.toggleClass("is-error", status === "error")
+				.attr("aria-label", aria_label)
+				.attr("title", aria_label);
+		});
 	}
 
 	bind_events() {
@@ -158,6 +322,13 @@ class NamarMyFollowups {
 				this.state.search = value;
 				this.load_list();
 			}, 350);
+		});
+
+		this.$search_scope.on("change", (event) => {
+			if (this.state.action_busy) return;
+			this.state.search_scope = String(event.currentTarget.value || "all");
+			this.$search.attr("placeholder", this.search_placeholder());
+			if (this.state.search) this.load_list();
 		});
 
 		this.$root.on("click", ".mf-clear-search", () => {
@@ -193,9 +364,7 @@ class NamarMyFollowups {
 		this.$root.on("click", ".mf-reschedule", () => this.reschedule_followup());
 		this.$root.on("click", ".mf-add-note", () => this.add_note());
 		this.$root.on("click", ".mf-open-approval", () => this.open_approval());
-		this.$root.on("input", ".mf-mention-reply-input", () => {
-			this.state.reply_request_id = null;
-		});
+		this.$root.on("click", ".mf-mention-picker-trigger", () => this.open_reply_mention_picker());
 		this.$root.on("click", ".mf-mention-reply", () => this.reply_to_mention(false));
 		this.$root.on("click", ".mf-mention-reply-close", () => this.reply_to_mention(true));
 		this.$root.on("click", ".mf-mention-close", () => this.close_mention());
@@ -204,17 +373,26 @@ class NamarMyFollowups {
 		this.$root.on("click", ".mf-open-converted-followup", () => this.open_converted_followup());
 	}
 
-	change_source(source, { update_url = true } = {}) {
+	change_source(source, { update_url = true, bucket = "" } = {}) {
 		if (this.state.action_busy) return;
 		if (!["mentions", "followups", "approvals"].includes(source) || source === this.state.source) {
 			return;
 		}
 
+		window.clearTimeout(this.search_timer);
 		this.selected_by_source[this.state.source] = this.state.selected_name;
 		this.state.source = source;
 		if (source !== "mentions" || update_url) this.pending_thread = "";
-		this.state.bucket = source === "mentions" ? "open" : "all";
+		const allowed_buckets = source === "mentions"
+			? ["open", "unread", "converted", "closed"]
+			: source === "followups"
+				? ["all", "overdue", "today", "upcoming"]
+				: ["all"];
+		this.state.bucket = allowed_buckets.includes(bucket)
+			? bucket
+			: source === "mentions" ? "open" : "all";
 		this.state.search = "";
+		this.state.search_scope = "all";
 		this.state.priority = "";
 		this.state.selected_name = this.selected_by_source[source];
 		this.state.detail = null;
@@ -228,6 +406,7 @@ class NamarMyFollowups {
 		this.detail_sequence += 1;
 		this.$search.val("");
 		this.$clear_search.prop("hidden", true);
+		this.render_search_scope();
 		this.$root.find(".mf-filter-button")
 			.prop("hidden", source !== "followups")
 			.removeClass("is-active");
@@ -287,7 +466,7 @@ class NamarMyFollowups {
 		dialog.show();
 	}
 
-	change_bucket(bucket) {
+	change_bucket(bucket, { update_url = true } = {}) {
 		if (this.state.action_busy) return;
 		const allowed = this.state.source === "mentions"
 			? ["open", "unread", "converted", "closed"]
@@ -298,12 +477,14 @@ class NamarMyFollowups {
 			return;
 		}
 		this.state.bucket = bucket;
+		if (update_url) this.sync_url_state(this.state.source);
 		this.render_filters();
 		this.load_list();
 	}
 
 	async load_list({ preserve_selection = false, append = false } = {}) {
 		const sequence = ++this.list_sequence;
+		const source = this.state.source;
 		const previous_selection = preserve_selection ? this.state.selected_name : null;
 		const keep_mobile_detail = preserve_selection && this.state.mobile_detail;
 		const limit_start = append ? this.state.next_start ?? this.state.items.length : 0;
@@ -312,6 +493,10 @@ class NamarMyFollowups {
 			this.state.loading_more = true;
 			this.render_pagination();
 		} else {
+			if (this.source_counts[source] === null) {
+				this.source_count_status[source] = "loading";
+				this.render_source_counts();
+			}
 			if (!preserve_selection) {
 				this.detail_sequence += 1;
 				this.state.selected_name = null;
@@ -326,6 +511,7 @@ class NamarMyFollowups {
 		try {
 			const args = {
 				search: this.state.search,
+				search_scope: this.state.search_scope,
 				limit_start,
 				page_length: this.state.page_length,
 			};
@@ -354,13 +540,28 @@ class NamarMyFollowups {
 			this.state.list_status = "ready";
 			this.state.loading_more = false;
 			this.last_loaded_at = Date.now();
+			const source_count_synced = this.sync_source_count_from_list(source, payload);
+			if (
+				!source_count_synced
+				&& this.source_counts[source] === null
+				&& this.source_count_status[source] !== "loading"
+			) {
+				this.source_count_status[source] = "error";
+				this.render_source_counts();
+			}
 			this.render_filters();
 			this.render_list();
 
 			let selection = this.state.source === "mentions" && this.pending_thread
 				? this.pending_thread
 				: previous_selection;
-			const allow_external_selection = this.state.source === "mentions" && Boolean(this.pending_thread);
+			const keep_displayed_mention = this.state.source === "mentions"
+				&& preserve_selection
+				&& Boolean(previous_selection)
+				&& Boolean(this.state.detail)
+				&& this.item_key(this.state.detail) === String(previous_selection);
+			const allow_external_selection = this.state.source === "mentions"
+				&& Boolean(this.pending_thread || keep_displayed_mention);
 			this.pending_thread = "";
 			if (!selection || (!allow_external_selection && !this.state.items.some((item) => this.item_key(item) === selection))) {
 				selection = this.state.items.length ? this.item_key(this.state.items[0]) : null;
@@ -383,6 +584,10 @@ class NamarMyFollowups {
 			if (sequence !== this.list_sequence) return;
 			this.state.list_status = "error";
 			this.state.loading_more = false;
+			if (this.source_counts[source] === null) {
+				this.source_count_status[source] = "error";
+				this.render_source_counts();
+			}
 			this.render_list_error();
 			this.log_error("load_list", error);
 		}
@@ -429,7 +634,12 @@ class NamarMyFollowups {
 			if (sequence !== this.detail_sequence || name !== this.state.selected_name) return;
 
 			const detail = this.normalize_detail_response(response);
-			if (this.state.source === "mentions" && Boolean(detail.unread)) {
+			const should_mark_seen = this.state.source === "mentions" && Boolean(detail.unread);
+			this.state.detail = detail;
+			this.state.detail_status = "ready";
+			this.render_detail();
+
+			if (should_mark_seen) {
 				try {
 					await this.call("mark_mention_seen", {
 						thread_name: name,
@@ -437,16 +647,13 @@ class NamarMyFollowups {
 						expected_last_event_key: detail.last_event_key,
 					}, this.mentions_api);
 					detail.unread = 0;
-					this.apply_seen_state(name);
+					this.apply_seen_state(name, detail.last_event_key);
 				} catch (error) {
+					if (sequence !== this.detail_sequence || name !== this.state.selected_name) return;
 					if (await this.handle_mention_conflict(error, name)) return;
 					this.log_error("mark_mention_seen", error);
 				}
 			}
-			if (sequence !== this.detail_sequence || name !== this.state.selected_name) return;
-			this.state.detail = detail;
-			this.state.detail_status = "ready";
-			this.render_detail();
 		} catch (error) {
 			if (sequence !== this.detail_sequence) return;
 			this.state.detail_status = "error";
@@ -461,7 +668,7 @@ class NamarMyFollowups {
 			const filters = [
 				{ key: "open", label: __("تحتاج قرارًا") },
 				{ key: "unread", label: __("غير مقروءة") },
-				{ key: "converted", label: __("محوّلة") },
+				{ key: "converted", label: __("قيد المتابعة") },
 				{ key: "closed", label: __("مغلقة") },
 			];
 			this.$filters.html(filters.map((filter) => {
@@ -623,7 +830,7 @@ class NamarMyFollowups {
 		const count = Math.max(1, this.number(item.mention_count));
 		const unread = Boolean(item.unread);
 		const is_active = String(name) === String(this.state.selected_name);
-		const status = this.mention_status(item.status);
+		const status = this.mention_status(item);
 		const time = this.format_relative_datetime(item.latest_mentioned_at);
 		const aria_label = this.mention_aria_label(item, sender, preview, reference_title);
 
@@ -707,10 +914,10 @@ class NamarMyFollowups {
 	}
 
 	render_mention_detail() {
+		this.mention_reply_control = null;
 		const detail = this.state.detail || {};
 		const messages = this.first_array(detail.messages);
 		const permissions = detail.permissions || {};
-		const status = this.mention_status(detail.status);
 		const latest_comment = this.first(detail.latest_comment);
 		const latest_message = messages.find((message) => (
 			message.comment === latest_comment || message.event_key === latest_comment
@@ -731,6 +938,11 @@ class NamarMyFollowups {
 		const can_reopen = permissions.can_reopen === true;
 		const can_convert = permissions.can_convert === true;
 		const converted_to_todo = this.first(detail.converted_to_todo, detail.followup_name);
+		const status = this.mention_status(detail);
+		const closed_via_followup = Boolean(this.number(detail.closed_via_followup));
+		const show_followup_card = closed_via_followup || (
+			Boolean(converted_to_todo) && status.key === "converted"
+		);
 		const has_actions = can_close || can_reopen || can_convert;
 
 		this.$detail.html(`
@@ -778,26 +990,33 @@ class NamarMyFollowups {
 						${this.render_mention_messages(messages, detail)}
 					</section>
 
-					${converted_to_todo ? `
+					${show_followup_card ? `
 						<section class="mf-section mf-converted-followup-card">
 							<span class="mf-converted-followup-icon">${this.icon("clipboard", "sm")}</span>
 							<div>
-								<strong>${this.escape(__("حُوّلت إلى متابعة"))}</strong>
-								<span>${this.escape(converted_to_todo)}</span>
+								<strong>${this.escape(closed_via_followup ? __("أُنجزت عبر متابعة") : __("قيد المتابعة"))}</strong>
+								<span>${this.escape(converted_to_todo || __("سجل المتابعة غير متاح"))}</span>
 							</div>
-							<button type="button" class="mf-link-button mf-open-converted-followup" data-todo-name="${this.escape_attr(converted_to_todo)}">
-								${this.icon("external-link", "xs")}
-								<span>${this.escape(__("فتح المتابعة"))}</span>
-							</button>
+							${converted_to_todo ? `
+								<button type="button" class="mf-link-button mf-open-converted-followup" data-todo-name="${this.escape_attr(converted_to_todo)}">
+									${this.icon("external-link", "xs")}
+									<span>${this.escape(__("فتح المتابعة"))}</span>
+								</button>
+							` : ""}
 						</section>
 					` : ""}
 
 					${can_reply ? `
 						<section class="mf-section mf-mention-reply-section">
-							<h3>${this.escape(__("الرد"))}</h3>
-							<label class="sr-only" for="mf-mention-reply">${this.escape(__("اكتب ردك"))}</label>
-							<textarea id="mf-mention-reply" class="mf-mention-reply-input" rows="4" dir="auto"
-								placeholder="${this.escape(__("اكتب ردك على المستند..."))}"></textarea>
+							<div class="mf-mention-reply-heading">
+								<h3>${this.escape(__("الرد"))}</h3>
+								<button type="button" class="mf-mention-picker-trigger" aria-label="${this.escape(__("ذكر موظف في الرد"))}">
+									<span aria-hidden="true">@</span>
+									<span>${this.escape(__("ذكر موظف"))}</span>
+								</button>
+							</div>
+							<div id="mf-mention-reply" class="mf-mention-reply-editor" dir="rtl"></div>
+							<p class="mf-mention-reply-hint">${this.escape(__("اكتب @ أو اضغط «ذكر موظف» لإضافة منشن."))}</p>
 							<div class="mf-mention-reply-actions">
 								<button type="button" class="mf-action-btn is-primary mf-mention-reply">
 									${this.icon("send", "sm")}
@@ -819,7 +1038,7 @@ class NamarMyFollowups {
 						${can_reopen ? `
 							<button type="button" class="mf-action-btn is-secondary mf-mention-reopen">
 								${this.icon("refresh", "sm")}
-								<span>${this.escape(__("إعادة فتح"))}</span>
+								<span>${this.escape(__("إعادة فتح الرسالة"))}</span>
 							</button>
 						` : ""}
 						${can_close ? `
@@ -838,6 +1057,82 @@ class NamarMyFollowups {
 				` : ""}
 			</div>
 		`);
+
+		if (can_reply) this.init_mention_reply_editor();
+	}
+
+	init_mention_reply_editor() {
+		const $parent = this.$detail.find(".mf-mention-reply-editor");
+		const thread_name = this.state.selected_name;
+		if (!$parent.length || !thread_name) return;
+
+		const control = frappe.ui.form.make_control({
+			parent: $parent,
+			df: {
+				fieldtype: "Comment",
+				fieldname: "mention_reply",
+			},
+			enable_mentions: true,
+			render_input: true,
+			only_input: true,
+			no_wrapper: true,
+			on_submit: () => {
+				if (this.mention_reply_control === control && thread_name === this.state.selected_name) {
+					this.reply_to_mention(false);
+				}
+			},
+		});
+		this.mention_reply_control = control;
+
+		const quill = control.quill;
+		if (!quill) return;
+		quill.root.id = "mf-mention-reply-input";
+		quill.root.setAttribute("dir", "auto");
+		quill.root.setAttribute("aria-label", __("اكتب ردك"));
+		quill.root.dataset.placeholder = __("اكتب ردك على المستند...");
+		quill.on("text-change", () => {
+			if (this.mention_reply_control === control) this.state.reply_request_id = null;
+		});
+
+		const mention_module = quill.getModule("mention");
+		if (!mention_module) return;
+		let search_sequence = 0;
+		mention_module.options.source = frappe.utils.debounce(async (search_term, render_list) => {
+			const sequence = ++search_sequence;
+			if (this.mention_reply_control !== control || thread_name !== this.state.selected_name) {
+				render_list([], search_term);
+				return;
+			}
+			try {
+				const response = await this.call("search_reply_mentions", {
+					thread_name,
+					search_term,
+				}, this.mentions_api);
+				if (
+					sequence === search_sequence
+					&& this.mention_reply_control === control
+					&& thread_name === this.state.selected_name
+				) {
+					render_list(Array.isArray(response) ? response : [], search_term);
+				}
+			} catch (error) {
+				this.log_error("search_reply_mentions", error);
+				render_list([], search_term);
+			}
+		}, 300);
+	}
+
+	open_reply_mention_picker() {
+		const quill = this.mention_reply_control?.quill;
+		if (!quill || this.state.action_busy) return;
+		const range = quill.getSelection(true) || { index: Math.max(0, quill.getLength() - 1), length: 0 };
+		const index = range.index + range.length;
+		const previous = index > 0 ? quill.getText(index - 1, 1) : "";
+		const inserted = previous && !/\s/.test(previous) ? " @" : "@";
+		quill.setSelection(index, 0, "silent");
+		quill.insertText(index, inserted, "user");
+		quill.setSelection(index + inserted.length, 0, "user");
+		quill.focus();
 	}
 
 	render_mention_messages(messages, detail) {
@@ -1130,12 +1425,17 @@ class NamarMyFollowups {
 	}
 
 	async reply_to_mention(close_after_reply) {
-		if (this.state.source !== "mentions" || !this.state.selected_name) return;
-		const $input = this.$detail.find(".mf-mention-reply-input");
-		const reply = ($input.val() || "").trim();
+		if (
+			this.state.action_busy
+			|| this.state.source !== "mentions"
+			|| !this.state.selected_name
+		) return;
+		const control = this.mention_reply_control;
+		const reply_html = String(control?.get_value?.() || "").trim();
+		const reply = strip_html(reply_html).replace(/\s+/g, " ").trim();
 		if (!reply) {
 			frappe.show_alert({ message: __("اكتب الرد أولًا"), indicator: "orange" });
-			$input.trigger("focus");
+			control?.quill?.focus();
 			return;
 		}
 
@@ -1146,6 +1446,7 @@ class NamarMyFollowups {
 			args: {
 				thread_name: this.state.selected_name,
 				reply,
+				reply_html,
 				request_id,
 				expected_last_event_key: this.state.detail?.last_event_key,
 			},
@@ -1171,6 +1472,7 @@ class NamarMyFollowups {
 		if (this.state.source !== "mentions" || !this.state.selected_name) return;
 		await this.run_mention_action({
 			method: "reopen_mention",
+			next_bucket: "open",
 			args: {
 				thread_name: this.state.selected_name,
 				expected_last_event_key: this.state.detail?.last_event_key,
@@ -1230,7 +1532,9 @@ class NamarMyFollowups {
 						this.state.selected_name = null;
 						this.selected_by_source.mentions = null;
 						this.sync_url_state("mentions");
+						this.show_mobile_queue();
 						await this.load_list();
+						await this.load_source_count("followups", { force: true });
 					}
 				} catch (error) {
 					if (this.is_mention_conflict_error(error)) {
@@ -1247,7 +1551,13 @@ class NamarMyFollowups {
 		this.prepare_dialog_rtl(dialog);
 	}
 
-	async run_mention_action({ method, args, success_message, preserve_selection = false }) {
+	async run_mention_action({
+		method,
+		args,
+		success_message,
+		preserve_selection = false,
+		next_bucket = "",
+	}) {
 		this.set_action_busy(true);
 		try {
 			await this.call(method, args, this.mentions_api);
@@ -1255,7 +1565,12 @@ class NamarMyFollowups {
 			if (!preserve_selection) {
 				this.state.selected_name = null;
 				this.selected_by_source.mentions = null;
+				if (next_bucket) {
+					this.state.bucket = next_bucket;
+					this.render_filters();
+				}
 				this.sync_url_state("mentions");
+				this.show_mobile_queue();
 			}
 			await this.load_list({ preserve_selection });
 			return true;
@@ -1401,6 +1716,7 @@ class NamarMyFollowups {
 			if (!preserve_selection) {
 				this.state.selected_name = null;
 				this.selected_by_source.followups = null;
+				this.show_mobile_queue();
 			}
 			await this.load_list({ preserve_selection });
 			return true;
@@ -1415,14 +1731,20 @@ class NamarMyFollowups {
 	set_action_busy(busy) {
 		this.state.action_busy = busy;
 		if (busy) {
+			// إذا بدأ إجراء أثناء مهلة البحث، اجعل القائمة التالية تطابق النص الظاهر.
+			this.state.search = String(this.$search?.val?.() || "").trim();
 			window.clearTimeout(this.search_timer);
-			this.$root.find("button:not(:disabled), input:not(:disabled), textarea:not(:disabled)")
+			this.$root.find("button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled)")
 				.attr("data-mf-busy-disabled", "1")
 				.prop("disabled", true);
 		} else {
 			this.$root.find('[data-mf-busy-disabled="1"]')
 				.prop("disabled", false)
 				.removeAttr("data-mf-busy-disabled");
+		}
+		if (this.mention_reply_control) {
+			if (busy) this.mention_reply_control.disable();
+			else this.mention_reply_control.enable();
 		}
 		this.$detail.toggleClass("is-action-busy", busy);
 	}
@@ -1503,7 +1825,7 @@ class NamarMyFollowups {
 		const bucket_total = ["mentions", "followups"].includes(this.state.source)
 			? counts[this.state.bucket]
 			: counts.all;
-		const total_value = payload.total ?? bucket_total;
+		const total_value = this.state.search ? payload.total : (payload.total ?? bucket_total);
 		const total = total_value === undefined || total_value === null ? null : this.number(total_value);
 		const has_more = Boolean(payload.has_more ?? (total !== null && items.length < total));
 		const next_start = payload.next_start ?? (has_more ? this.state.limit_start + items.length : null);
@@ -1618,24 +1940,81 @@ class NamarMyFollowups {
 	}
 
 	search_placeholder() {
-		if (this.state.source === "mentions") return __("ابحث في الوارد");
-		if (this.state.source === "approvals") return __("ابحث في الموافقات");
-		return __("ابحث في المتابعات");
+		const placeholders = {
+			document: __("اكتب رقم المستند"),
+			doctype: __("اكتب نوع المستند"),
+			title: __("اكتب العنوان أو اسم الجهة"),
+			employee: __("اكتب اسم الموظف أو بريده"),
+			content: this.state.source === "mentions"
+				? __("اكتب كلمة من نص الرسالة")
+				: __("اكتب كلمة من نص المهمة"),
+			state: __("اكتب حالة الموافقة"),
+		};
+		if (this.state.search_scope !== "all") {
+			return placeholders[this.state.search_scope] || __("اكتب عبارة البحث");
+		}
+		if (this.state.source === "mentions") return __("ابحث في كل بيانات الوارد");
+		if (this.state.source === "approvals") return __("ابحث في كل بيانات الموافقات");
+		return __("ابحث في كل بيانات المتابعات");
+	}
+
+	search_scope_options() {
+		if (this.state.source === "mentions") {
+			return [
+				["all", __("كل الحقول")],
+				["document", __("رقم المستند")],
+				["title", __("العنوان أو الجهة")],
+				["employee", __("آخر موظف مرسل")],
+				["content", __("نص آخر رسالة")],
+			];
+		}
+		if (this.state.source === "approvals") {
+			return [
+				["all", __("كل الحقول")],
+				["document", __("رقم المستند")],
+				["doctype", __("نوع المستند")],
+				["state", __("حالة الموافقة")],
+			];
+		}
+		return [
+			["all", __("كل الحقول")],
+			["document", __("رقم المستند")],
+			["doctype", __("نوع المستند")],
+			["employee", __("الموظف الطالب")],
+			["content", __("نص المهمة")],
+		];
+	}
+
+	render_search_scope() {
+		if (!this.$search_scope?.length) return;
+		const options = this.search_scope_options();
+		if (!options.some(([value]) => value === this.state.search_scope)) {
+			this.state.search_scope = "all";
+		}
+		this.$search_scope.html(options.map(([value, label]) => (
+			`<option value="${this.escape_attr(value)}">${this.escape(label)}</option>`
+		)).join(""));
+		this.$search_scope.val(this.state.search_scope);
+		this.$search.attr("placeholder", this.search_placeholder());
 	}
 
 	mention_empty_message() {
 		const messages = {
 			open: __("لا توجد رسائل تحتاج قرارًا حاليًا."),
 			unread: __("اطلعت على كل الرسائل الواردة."),
-			converted: __("لم تُحوّل أي رسالة إلى متابعة بعد."),
+			converted: __("لا توجد رسائل قيد المتابعة حاليًا."),
 			closed: __("لا توجد رسائل مغلقة حاليًا."),
 		};
 		return messages[this.state.bucket] || messages.open;
 	}
 
 	mention_status(value) {
-		const status = String(value || "Open").toLowerCase();
-		if (status === "converted") return { key: "converted", label: __("محوّلة لمتابعة") };
+		const item = value && typeof value === "object" ? value : { status: value };
+		const status = String(item.status || "Open").toLowerCase();
+		if (status === "converted") return { key: "converted", label: __("قيد المتابعة") };
+		if (status === "closed" && Boolean(this.number(item.closed_via_followup))) {
+			return { key: "closed", label: __("أُنجزت عبر متابعة") };
+		}
 		if (status === "closed") return { key: "closed", label: __("مغلقة") };
 		return { key: "open", label: __("تحتاج قرارًا") };
 	}
@@ -1646,6 +2025,7 @@ class NamarMyFollowups {
 		const display_reference = reference_title || this.first(item.reference_title, item.reference_name);
 		return [
 			item.unread ? __("غير مقروءة") : __("مقروءة"),
+			this.mention_status(item).label,
 			display_sender,
 			display_preview,
 			display_reference,
@@ -1653,23 +2033,39 @@ class NamarMyFollowups {
 	}
 
 	read_deep_link() {
-		let source = "followups";
+		let source = "mentions";
 		let thread = "";
+		let bucket = "all";
 		try {
 			const params = new URLSearchParams(window.location.search || "");
 			const requested_source = params.get("source");
 			if (["mentions", "followups", "approvals"].includes(requested_source)) source = requested_source;
+			const requested_bucket = params.get("bucket");
+			const allowed_buckets = source === "mentions"
+				? ["open", "unread", "converted", "closed"]
+				: source === "followups"
+					? ["all", "overdue", "today", "upcoming"]
+					: ["all"];
+			const default_bucket = source === "mentions" ? "open" : "all";
+			bucket = allowed_buckets.includes(requested_bucket)
+				? requested_bucket
+				: default_bucket;
 			thread = source === "mentions" ? String(params.get("thread") || "").trim() : "";
 		} catch (error) {
 			this.log_error("read_deep_link", error);
 		}
-		return { source, thread };
+		return { source, bucket, thread };
 	}
 
 	sync_url_state(source, thread = "") {
 		try {
 			const url = new URL(window.location.href);
 			url.searchParams.set("source", source);
+			if (source === "followups" && this.state.bucket !== "all") {
+				url.searchParams.set("bucket", this.state.bucket);
+			} else {
+				url.searchParams.delete("bucket");
+			}
 			if (source === "mentions" && thread) url.searchParams.set("thread", thread);
 			else url.searchParams.delete("thread");
 			window.history.replaceState(window.history.state, "", url.toString());
@@ -1678,21 +2074,50 @@ class NamarMyFollowups {
 		}
 	}
 
-	apply_seen_state(name) {
+	apply_seen_state(name, event_key = "") {
 		if (this.state.source !== "mentions") return;
-		const item = this.state.items.find((entry) => this.item_key(entry) === String(name));
+		const item_index = this.state.items.findIndex((entry) => this.item_key(entry) === String(name));
+		const item = item_index >= 0 ? this.state.items[item_index] : null;
+		const seen_identity = `${String(name)}:${String(event_key)}`;
+		const is_first_application = !this.applied_seen_events.has(seen_identity);
+		this.applied_seen_events.add(seen_identity);
+		const was_unread = item ? Boolean(item.unread) : is_first_application;
 		if (item) item.unread = 0;
-		if (this.state.counts.unread !== undefined) {
+		if (was_unread && this.state.counts.unread !== undefined) {
 			this.state.counts.unread = Math.max(0, this.number(this.state.counts.unread) - 1);
 		}
-		this.$root.find(".mf-queue-item").each((_, element) => {
-			if (String($(element).data("name")) === String(name)) {
-				$(element)
-					.removeClass("is-unread")
-					.attr("aria-label", item ? this.mention_aria_label(item) : __("مقروءة"));
+
+		if (this.state.bucket === "unread" && item_index >= 0) {
+			this.state.items.splice(item_index, 1);
+			if (this.state.total !== null && this.state.total !== undefined) {
+				this.state.total = Math.max(0, this.number(this.state.total) - 1);
 			}
-		});
-		this.render_filters();
+			if (this.state.next_start !== null && this.state.next_start !== undefined) {
+				this.state.next_start = Math.max(0, this.number(this.state.next_start) - 1);
+				this.state.has_more = this.state.total === null || this.state.total === undefined
+					? this.state.has_more
+					: this.state.next_start < this.state.total;
+			}
+			this.state.limit_start = this.state.items.length;
+			this.render_filters();
+			this.render_list();
+		} else {
+			this.$root.find(".mf-queue-item").each((_, element) => {
+				if (String($(element).data("name")) === String(name)) {
+					$(element)
+						.removeClass("is-unread")
+						.attr("aria-label", item ? this.mention_aria_label(item) : __("مقروءة"));
+				}
+			});
+			this.render_filters();
+		}
+
+		if (String(this.state.selected_name) === String(name)) {
+			this.$root.find(".mf-read-pill")
+				.removeClass("is-unread")
+				.addClass("is-read")
+				.text(__("مقروءة"));
+		}
 	}
 
 	make_request_id() {
