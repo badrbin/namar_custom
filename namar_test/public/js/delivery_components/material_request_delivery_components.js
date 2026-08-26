@@ -709,6 +709,20 @@
     });
   }
 
+  function scheduleDashboardRenderAfterRequests(frm) {
+    var renderAfterModelSettles = function() {
+      window.setTimeout(function() {
+        if (!frm || frm.is_new() || window.cur_frm !== frm) return;
+        renderUnifiedDashboard(frm);
+      }, 0);
+    };
+    if (typeof frappe.after_ajax === "function") {
+      frappe.after_ajax(renderAfterModelSettles);
+      return;
+    }
+    renderAfterModelSettles();
+  }
+
   function reloadCurrentFormFromExternalEvent(eventData) {
     var frm = window.cur_frm;
     if (!frm || frm.doctype !== "Material Request" || !frm.doc || frm.doc.name !== eventData.material_request) return;
@@ -750,7 +764,7 @@
 
   window.namar_delivery_tracking = window.namar_delivery_tracking || {};
   window.namar_delivery_tracking.delivery_components = {
-    interface_version: 4,
+    interface_version: 5,
     render_material_request: renderUnifiedDashboard,
     sync_packages: syncPackages,
     prepare_and_print: prepareAndPrintPackages
@@ -765,6 +779,7 @@
     refresh: function(frm) {
       renderUnifiedDashboard(frm);
       refreshFulfillment(frm);
+      scheduleDashboardRenderAfterRequests(frm);
     }
   });
 })();
