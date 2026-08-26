@@ -97,6 +97,78 @@
       + '</div>';
   }
 
+  function sectorPackageIsManufactured(row) {
+    var packageQty = flt(row && row.package_qty || 0);
+    var readyQty = flt(row && row.ready_qty || 0);
+    var trackingStatus = row && (row.tracking_status || row.status) || "غير جاهز";
+    return packageQty > 0 && (
+      readyQty >= packageQty - 0.000001
+      || ["جاهز", "محمل", "تم التوريد"].indexOf(trackingStatus) !== -1
+    );
+  }
+
+  function renderSectorManufacturingTable(title, packageRows, emptyText, hasColor, isCompleted) {
+    var toneBg = isCompleted ? "rgba(34,197,94,0.10)" : "rgba(245,158,11,0.10)";
+    var toneColor = isCompleted ? "#16a34a" : "#b45309";
+    var rowsHtml = packageRows.map(function(row) {
+      var packageQty = flt(row.package_qty || 0);
+      var packageText = (row.package_no || "-") + " / " + (row.package_count || "-");
+      var statusText = isCompleted ? "تم تصنيعه" : "متبقي";
+      var statusDetails = isCompleted ? (row.ready_at || "") : "بانتظار التصنيع";
+      var quantityText = isCompleted
+        ? formatCount(packageQty) + " / " + formatCount(packageQty)
+        : "0 / " + formatCount(packageQty);
+      var searchText = [
+        row.loading_code || "",
+        packageText,
+        row.component_label || row.component || "",
+        row.color || "",
+        row.item_code || "",
+        formatCount(packageQty),
+        statusText,
+        statusDetails,
+        row.ready_by || ""
+      ].join(" ").toLowerCase();
+      return ''
+        + '<tr class="delivery-component-dashboard-row" data-search="' + escapeHtml(searchText) + '">'
+        + '<td style="padding:9px 8px; border-bottom:1px solid var(--border-color); text-align:center; direction:ltr; vertical-align:middle; font-weight:900; white-space:nowrap;">' + escapeHtml(row.loading_code || "-") + '</td>'
+        + '<td style="padding:9px 8px; border-bottom:1px solid var(--border-color); text-align:right; direction:rtl; vertical-align:middle; font-weight:800;">' + escapeHtml(row.component_label || row.component || "-") + '</td>'
+        + '<td style="padding:9px 8px; border-bottom:1px solid var(--border-color); text-align:center; direction:ltr; vertical-align:middle; font-weight:800; white-space:nowrap;">' + escapeHtml(quantityText) + '</td>'
+        + '<td style="padding:9px 8px; border-bottom:1px solid var(--border-color); text-align:center; direction:rtl; vertical-align:middle;">'
+        +   '<span style="display:inline-flex; justify-content:center; min-width:78px; padding:3px 9px; border-radius:999px; background:' + toneBg + '; color:' + toneColor + '; font-size:12px; font-weight:800; white-space:nowrap;">' + statusText + '</span>'
+        +   (statusDetails ? '<div style="margin-top:4px; color:var(--text-muted); font-size:11px; white-space:nowrap;">' + escapeHtml(statusDetails) + '</div>' : '')
+        + '</td>'
+        + (hasColor ? '<td style="padding:9px 8px; border-bottom:1px solid var(--border-color); text-align:right; direction:rtl; vertical-align:middle;">' + escapeHtml(row.color || "-") + '</td>' : '')
+        + '<td style="padding:9px 8px; border-bottom:1px solid var(--border-color); text-align:center; direction:ltr; vertical-align:middle; font-weight:900; white-space:nowrap;">' + escapeHtml(packageText) + '</td>'
+        + '<td style="padding:9px 8px; border-bottom:1px solid var(--border-color); text-align:right; direction:ltr; vertical-align:middle;">' + escapeHtml(isCompleted ? (row.ready_by || "-") : "-") + '</td>'
+        + '</tr>';
+    }).join("");
+    var colorHeader = hasColor
+      ? '<th style="padding:9px 8px; text-align:right; direction:rtl; color:var(--text-muted); font-size:12px;">اللون</th>'
+      : '';
+    var bodyHtml = packageRows.length
+      ? '<div style="max-height:420px; overflow:auto; direction:ltr; border:1px solid var(--border-color); border-radius:10px;">'
+        + '<table style="width:100%; min-width:' + (hasColor ? '760' : '680') + 'px; border-collapse:collapse; table-layout:auto; direction:ltr;">'
+        + '<thead style="position:sticky; top:0; background:var(--control-bg); z-index:1;"><tr>'
+        + '<th style="padding:9px 8px; text-align:center; direction:rtl; color:var(--text-muted); font-size:12px; white-space:nowrap;">الرمز</th>'
+        + '<th style="padding:9px 8px; text-align:right; direction:rtl; color:var(--text-muted); font-size:12px;">القطاع</th>'
+        + '<th style="padding:9px 8px; text-align:center; direction:rtl; color:var(--text-muted); font-size:12px; white-space:nowrap;">الكمية</th>'
+        + '<th style="padding:9px 8px; text-align:center; direction:rtl; color:var(--text-muted); font-size:12px; white-space:nowrap;">الحالة</th>'
+        + colorHeader
+        + '<th style="padding:9px 8px; text-align:center; direction:rtl; color:var(--text-muted); font-size:12px; white-space:nowrap;">رقم الحزمة</th>'
+        + '<th style="padding:9px 8px; text-align:right; direction:rtl; color:var(--text-muted); font-size:12px;">بواسطة</th>'
+        + '</tr></thead><tbody>' + rowsHtml + '</tbody></table></div>'
+      : '<div style="padding:16px; border:1px solid var(--border-color); border-radius:10px; color:var(--text-muted); text-align:center;">' + escapeHtml(emptyText) + '</div>';
+    return ''
+      + '<section style="min-width:0;">'
+      + '<div style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px;">'
+      + '<div style="font-size:15px; font-weight:900;">' + escapeHtml(title) + '</div>'
+      + '<span style="display:inline-flex; min-width:30px; justify-content:center; padding:3px 8px; border-radius:999px; background:' + toneBg + '; color:' + toneColor + '; font-size:12px; font-weight:900;">' + formatCount(packageRows.length) + '</span>'
+      + '</div>'
+      + bodyHtml
+      + '</section>';
+  }
+
   function applyDashboardSearch(wrapper) {
     if (!wrapper || !wrapper.length) return;
     var query = String(wrapper.find(".delivery-component-dashboard-search").val() || "").trim().toLowerCase();
@@ -548,98 +620,41 @@
       return true;
     }
 
-    var packageRows = rows(frm);
-    var totalPackages = flt(frm.doc.custom_delivery_component_total_packages || 0) || packageRows.filter(function(row) {
-      return isBarcodeRoute(row);
-    }).length;
-    var registeredPackages = packageRows.filter(function(row) {
-      if (!isBarcodeRoute(row)) return false;
-      var packageQty = flt(row.package_qty || 0);
-      var readyQty = flt(row.ready_qty || 0);
-      var trackingStatus = row.tracking_status || row.status || "غير جاهز";
-      return readyQty >= packageQty - 0.000001
-        || ["جاهز", "محمل", "تم التوريد"].indexOf(trackingStatus) !== -1;
-    }).length;
+    var packageRows = rows(frm).filter(isBarcodeRoute);
+    var completedPackageRows = packageRows.filter(sectorPackageIsManufactured);
+    var pendingPackageRows = packageRows.filter(function(row) {
+      return !sectorPackageIsManufactured(row);
+    });
+    var totalPackages = packageRows.length;
+    var registeredPackages = completedPackageRows.length;
     var remainingPackages = Math.max(totalPackages - registeredPackages, 0);
-    var deliveryOnlyComponents = packageRows.filter(function(row) {
-      return trackingRoute(row.tracking_route) === "توريد فقط - بدون باركود";
-    }).length;
-    var withDoorComponents = packageRows.filter(function(row) {
-      return trackingRoute(row.tracking_route) === "مع الباب";
-    }).length;
+    var completionPercent = totalPackages > 0
+      ? Math.round((registeredPackages / totalPackages) * 1000) / 10
+      : 0;
     var statusText = totalPackages <= 0
-      ? (packageRows.length ? "لا تتطلب باركود" : "لا توجد مكونات")
+      ? "لا توجد قطاعات"
       : remainingPackages <= 0
-        ? "مكتمل"
-        : registeredPackages > 0 ? "جزئي" : "غير جاهز";
+        ? "مصنع بالكامل"
+        : registeredPackages > 0 ? "قيد التصنيع" : "غير مصنع";
     var requestCode = frm.doc.custom_delivery_loading_code || "-";
     var overallStatus = frm.doc.custom_fulfillment_readiness_status || "غير جاهز";
     var overallSummary = frm.doc.custom_fulfillment_readiness_summary || "";
     var overallComplete = ["جاهز بالكامل", "تم التحميل بالكامل", "تم التوريد بالكامل"].indexOf(overallStatus) !== -1;
     var overallBg = overallComplete ? "rgba(34,197,94,0.14)" : overallStatus === "جاهزية جزئية" ? "rgba(245,158,11,0.14)" : "rgba(239,68,68,0.10)";
     var overallColor = overallComplete ? "#16a34a" : overallStatus === "جاهزية جزئية" ? "#b45309" : "#dc2626";
-    var statusBg = statusText === "مكتمل" ? "rgba(34,197,94,0.14)" : statusText === "جزئي" ? "rgba(245,158,11,0.14)" : "rgba(148,163,184,0.16)";
-    var statusColor = statusText === "مكتمل" ? "#16a34a" : statusText === "جزئي" ? "#b45309" : "#475569";
+    var statusBg = statusText === "مصنع بالكامل" ? "rgba(34,197,94,0.14)" : statusText === "قيد التصنيع" ? "rgba(245,158,11,0.14)" : "rgba(148,163,184,0.16)";
+    var statusColor = statusText === "مصنع بالكامل" ? "#16a34a" : statusText === "قيد التصنيع" ? "#b45309" : "#475569";
     var hasColor = packageRows.some(function(row) { return !!String(row.color || "").trim(); });
-    var hasRegistrationInfo = packageRows.some(function(row) { return !!(row.ready_at || row.ready_by); });
-
-    var packageRowsHtml = packageRows.map(function(row) {
-      var route = trackingRoute(row.tracking_route);
-      var barcodeRoute = isBarcodeRoute(row);
-      var packageQty = flt(row.package_qty || 0);
-      var readyQty = flt(row.ready_qty || 0);
-      var trackingStatus = row.tracking_status || row.status || "غير جاهز";
-      var registered = barcodeRoute && (readyQty >= packageQty - 0.000001
-        || ["جاهز", "محمل", "تم التوريد"].indexOf(trackingStatus) !== -1);
-      var displayStatus = barcodeRoute ? (registered ? "تم التصنيع" : "غير مصنع") : route;
-      var rowDone = !barcodeRoute || registered;
-      var rowStatusBg = rowDone ? "rgba(34,197,94,0.14)" : "rgba(245,158,11,0.14)";
-      var rowStatusColor = rowDone ? "#16a34a" : "#b45309";
-      var searchText = [
-        barcodeRoute ? (row.loading_code || "") : "",
-        row.component_label || row.component || "",
-        row.color || "",
-        row.item_code || "",
-        formatCount(packageQty),
-        displayStatus,
-        row.ready_at || "",
-        row.ready_by || ""
-      ].join(" ").toLowerCase();
-      return ''
-        + '<tr class="delivery-component-dashboard-row" data-search="' + escapeHtml(searchText) + '">'
-        + '<td style="padding:9px 8px; border-bottom:1px solid var(--border-color); text-align:center; direction:ltr; vertical-align:middle; font-weight:900; white-space:nowrap;">' + escapeHtml(barcodeRoute ? (row.loading_code || "-") : "") + '</td>'
-        + '<td style="padding:9px 8px; border-bottom:1px solid var(--border-color); text-align:right; direction:rtl; vertical-align:middle; font-weight:800;">' + escapeHtml(row.component_label || row.component || "-") + '</td>'
-        + (hasColor ? '<td style="padding:9px 8px; border-bottom:1px solid var(--border-color); text-align:right; direction:rtl; vertical-align:middle;">' + escapeHtml(row.color || "-") + '</td>' : '')
-        + '<td style="padding:9px 8px; border-bottom:1px solid var(--border-color); text-align:center; direction:ltr; vertical-align:middle; font-weight:800; white-space:nowrap;">' + formatCount(packageQty) + '</td>'
-        + '<td style="padding:9px 8px; border-bottom:1px solid var(--border-color); text-align:center; direction:rtl; vertical-align:middle;"><span style="display:inline-flex; justify-content:center; min-width:82px; padding:3px 9px; border-radius:999px; background:' + rowStatusBg + '; color:' + rowStatusColor + '; font-size:12px; font-weight:800; white-space:nowrap;">' + displayStatus + '</span></td>'
-        + (hasRegistrationInfo ? '<td style="padding:9px 8px; border-bottom:1px solid var(--border-color); text-align:center; direction:ltr; vertical-align:middle; white-space:nowrap;">' + escapeHtml(row.ready_at || "-") + '</td>' : '')
-        + (hasRegistrationInfo ? '<td style="padding:9px 8px; border-bottom:1px solid var(--border-color); text-align:right; direction:ltr; vertical-align:middle;">' + escapeHtml(row.ready_by || "-") + '</td>' : '')
-        + '</tr>';
-    }).join("");
-
-    var optionalHeaders = '';
-    if (hasColor) optionalHeaders += '<th style="padding:9px 8px; text-align:right; direction:rtl; color:var(--text-muted); font-size:12px;">اللون</th>';
-    var trailingHeaders = '';
-    if (hasRegistrationInfo) {
-      trailingHeaders += '<th style="padding:9px 8px; text-align:center; direction:rtl; color:var(--text-muted); font-size:12px;">وقت التسجيل</th>';
-      trailingHeaders += '<th style="padding:9px 8px; text-align:right; direction:rtl; color:var(--text-muted); font-size:12px;">المستخدم</th>';
-    }
     var tableHtml = packageRows.length ? ''
       + '<div style="margin-top:14px;">'
       + '<div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:8px;">'
-      + '<input type="search" class="delivery-component-dashboard-search form-control" placeholder="بحث بالرمز أو المكون أو اللون..." style="max-width:360px; height:34px; direction:rtl; text-align:right;">'
+      + '<input type="search" class="delivery-component-dashboard-search form-control" placeholder="بحث بالرمز أو القطاع أو اللون..." style="max-width:360px; height:34px; direction:rtl; text-align:right;">'
       + '<span class="delivery-component-dashboard-search-count" style="color:var(--text-muted); font-size:12px;"></span>'
       + '</div>'
-      + '<div style="max-height:420px; overflow:auto; border:1px solid var(--border-color); border-radius:10px;">'
-      + '<table style="width:100%; min-width:' + (hasRegistrationInfo ? '940' : '620') + 'px; border-collapse:collapse; table-layout:auto; direction:ltr;">'
-      + '<thead style="position:sticky; top:0; background:var(--control-bg); z-index:1;"><tr>'
-      + '<th style="padding:9px 8px; text-align:center; direction:rtl; color:var(--text-muted); font-size:12px; white-space:nowrap;">رمز الحزمة</th>'
-      + '<th style="padding:9px 8px; text-align:right; direction:rtl; color:var(--text-muted); font-size:12px;">المكون</th>'
-      + optionalHeaders
-      + '<th style="padding:9px 8px; text-align:center; direction:rtl; color:var(--text-muted); font-size:12px; white-space:nowrap;">الكمية</th>'
-      + '<th style="padding:9px 8px; text-align:center; direction:rtl; color:var(--text-muted); font-size:12px; white-space:nowrap;">الحالة</th>'
-      + trailingHeaders
-      + '</tr></thead><tbody>' + packageRowsHtml + '</tbody></table></div></div>'
+      + '<div style="display:grid; grid-template-columns:minmax(0,1fr); gap:14px; align-items:start;">'
+      + renderSectorManufacturingTable("المتبقي للتصنيع", pendingPackageRows, "لا توجد حزم قطاعات متبقية.", hasColor, false)
+      + renderSectorManufacturingTable("تم تصنيعه", completedPackageRows, "لا توجد حزم قطاعات مصنعة بعد.", hasColor, true)
+      + '</div></div>'
       : '<div style="margin-top:12px; color:var(--text-muted);">لا توجد حزم بعد. استخدم زر طباعة باركود القطاعات أعلى لوحة التصنيع لتجهيزها تلقائيًا.</div>';
 
     var html = ''
@@ -651,14 +666,19 @@
       + '<div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap;">'
       + '<div><div style="font-size:18px; font-weight:900; margin-bottom:4px;">تصنيع القطاعات</div>'
       + '<div style="color:var(--text-muted);">بعد إغلاق الكرتون، امسح الملصق مرة واحدة لتسجيل الحزمة كاملة.</div></div>'
+      + '<div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">'
+      + '<span style="display:inline-flex; padding:5px 11px; border-radius:999px; background:var(--control-bg); color:var(--text-color); direction:ltr; font-size:12px; font-weight:900;">' + escapeHtml(requestCode) + '</span>'
       + '<span style="display:inline-flex; padding:5px 11px; border-radius:999px; background:' + statusBg + '; color:' + statusColor + '; font-size:12px; font-weight:900;">' + escapeHtml(statusText) + '</span>'
       + '</div>'
+      + '</div>'
       + '<div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:14px;">'
-      + statCard("حزم القطاعات المصنعة", formatCount(registeredPackages) + " / " + formatCount(totalPackages), remainingPackages > 0 ? "amber" : "green")
       + statCard("المتبقي", formatCount(remainingPackages), remainingPackages > 0 ? "amber" : "green")
-      + (deliveryOnlyComponents ? statCard("مكونات توريد فقط", formatCount(deliveryOnlyComponents), "default") : "")
-      + (withDoorComponents ? statCard("مكونات مع الباب", formatCount(withDoorComponents), "default") : "")
-      + statCard("رمز الطلب", escapeHtml(requestCode), "default")
+      + statCard("تم تصنيعه", formatCount(registeredPackages), registeredPackages > 0 ? "green" : "default")
+      + statCard("الإجمالي", formatCount(totalPackages), "default")
+      + '</div>'
+      + '<div style="margin-top:12px;">'
+      + '<div style="display:flex; justify-content:space-between; gap:10px; margin-bottom:6px; color:var(--text-muted); font-size:12px; font-weight:800;"><span>نسبة الإنجاز</span><span style="direction:ltr;">' + completionPercent + '%</span></div>'
+      + '<div style="height:8px; border-radius:999px; background:var(--control-bg); overflow:hidden;"><div style="width:' + completionPercent + '%; height:100%; border-radius:999px; background:#16a34a;"></div></div>'
       + '</div>'
       + tableHtml
       + '</div>';
@@ -686,6 +706,20 @@
     });
   }
 
+  function scheduleDashboardRenderAfterRequests(frm) {
+    var renderAfterModelSettles = function() {
+      window.setTimeout(function() {
+        if (!frm || frm.is_new() || window.cur_frm !== frm) return;
+        renderUnifiedDashboard(frm);
+      }, 0);
+    };
+    if (typeof frappe.after_ajax === "function") {
+      frappe.after_ajax(renderAfterModelSettles);
+      return;
+    }
+    renderAfterModelSettles();
+  }
+
   function reloadCurrentFormFromExternalEvent(eventData) {
     var frm = window.cur_frm;
     if (!frm || frm.doctype !== "Material Request" || !frm.doc || frm.doc.name !== eventData.material_request) return;
@@ -702,6 +736,9 @@
   function setupRealtime() {
     if (realtimeBound || !frappe.realtime || typeof frappe.realtime.on !== "function") return;
     realtimeBound = true;
+    if (typeof frappe.realtime.doctype_subscribe === "function") {
+      frappe.realtime.doctype_subscribe("Material Request");
+    }
     frappe.realtime.on("delivery_component_package_changed", reloadCurrentFormFromExternalEvent);
   }
 
@@ -727,7 +764,7 @@
 
   window.namar_delivery_tracking = window.namar_delivery_tracking || {};
   window.namar_delivery_tracking.delivery_components = {
-    interface_version: 3,
+    interface_version: 6,
     render_material_request: renderUnifiedDashboard,
     sync_packages: syncPackages,
     prepare_and_print: prepareAndPrintPackages
@@ -742,6 +779,7 @@
     refresh: function(frm) {
       renderUnifiedDashboard(frm);
       refreshFulfillment(frm);
+      scheduleDashboardRenderAfterRequests(frm);
     }
   });
 })();
