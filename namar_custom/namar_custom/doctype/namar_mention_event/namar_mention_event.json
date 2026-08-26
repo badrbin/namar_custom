@@ -1,0 +1,115 @@
+{
+ "actions": [],
+ "autoname": "field:event_key",
+ "creation": "2026-08-17 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "event_key",
+  "for_user",
+  "thread",
+  "event_type",
+  "mentioned_at",
+  "comment",
+  "comment_modified",
+  "from_user",
+  "content_plain",
+  "request_id"
+ ],
+ "fields": [
+  {
+   "fieldname": "event_key",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Event Key",
+   "read_only": 1,
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "for_user",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "For User",
+   "options": "User",
+   "read_only": 1,
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "thread",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Thread",
+   "read_only": 1,
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "event_type",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Event Type",
+   "options": "Mention\nReply\nClosed\nReopened\nConverted",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "mentioned_at",
+   "fieldtype": "Datetime",
+   "in_list_view": 1,
+   "label": "Event At",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "comment",
+   "fieldtype": "Data",
+   "label": "Comment",
+   "read_only": 1
+  },
+  {
+   "fieldname": "comment_modified",
+   "fieldtype": "Datetime",
+   "label": "Comment Modified",
+   "read_only": 1
+  },
+  {
+   "fieldname": "from_user",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "From User",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "content_plain",
+   "fieldtype": "Text",
+   "label": "Content",
+   "read_only": 1
+  },
+  {
+   "fieldname": "request_id",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Request ID",
+   "read_only": 1
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-08-17 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Namar Custom",
+ "name": "Namar Mention Event",
+ "naming_rule": "By fieldname",
+ "owner": "Administrator",
+ "permissions": [],
+ "search_fields": "thread,event_type",
+ "sort_field": "mentioned_at",
+ "sort_order": "ASC",
+ "states": [],
+ "title_field": "thread",
+ "track_changes": 0
+}

@@ -1,0 +1,239 @@
+{
+ "actions": [],
+ "autoname": "field:thread_key",
+ "creation": "2026-08-17 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 0,
+ "engine": "InnoDB",
+ "field_order": [
+  "thread_key",
+  "for_user",
+  "status",
+  "reference_section",
+  "reference_doctype",
+  "reference_name",
+  "latest_comment",
+  "latest_from_user",
+  "latest_preview_plain",
+  "activity_section",
+  "first_mentioned_at",
+  "latest_mentioned_at",
+  "mention_count",
+  "last_event_key",
+  "last_seen_event_key",
+  "converted_to_todo",
+  "conversion_section",
+  "converted_at",
+  "converted_by",
+  "closed_at",
+  "closed_by",
+  "closed_via_followup",
+  "reply_section",
+  "last_replied_at",
+  "last_replied_by",
+  "last_reply_comment"
+ ],
+ "fields": [
+  {
+   "fieldname": "thread_key",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Thread Key",
+   "read_only": 1,
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "for_user",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "For User",
+   "options": "User",
+   "read_only": 1,
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "default": "Open",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "options": "Open\nConverted\nClosed",
+   "read_only": 1,
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "reference_section",
+   "fieldtype": "Section Break",
+   "label": "Reference"
+  },
+  {
+   "fieldname": "reference_doctype",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Reference DocType",
+   "read_only": 1,
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "reference_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Reference Name",
+   "read_only": 1,
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "latest_comment",
+   "fieldtype": "Data",
+   "label": "Latest Comment",
+   "read_only": 1
+  },
+  {
+   "fieldname": "latest_from_user",
+   "fieldtype": "Link",
+   "label": "Latest From User",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "latest_preview_plain",
+   "fieldtype": "Text",
+   "label": "Latest Content",
+   "read_only": 1
+  },
+  {
+   "fieldname": "activity_section",
+   "fieldtype": "Section Break",
+   "label": "Activity"
+  },
+  {
+   "fieldname": "first_mentioned_at",
+   "fieldtype": "Datetime",
+   "label": "First Mentioned At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "latest_mentioned_at",
+   "fieldtype": "Datetime",
+   "in_list_view": 1,
+   "label": "Latest Mentioned At",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "mention_count",
+   "fieldtype": "Int",
+   "label": "Mention Count",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_event_key",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Last Event Key",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_seen_event_key",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Last Seen Event Key",
+   "read_only": 1
+  },
+  {
+   "fieldname": "converted_to_todo",
+   "fieldtype": "Data",
+   "label": "Linked ToDo",
+   "read_only": 1
+  },
+  {
+   "fieldname": "conversion_section",
+   "fieldtype": "Section Break",
+   "label": "Status Audit"
+  },
+  {
+   "fieldname": "converted_at",
+   "fieldtype": "Datetime",
+   "label": "Converted At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "converted_by",
+   "fieldtype": "Link",
+   "label": "Converted By",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "closed_at",
+   "fieldtype": "Datetime",
+   "label": "Closed At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "closed_by",
+   "fieldtype": "Link",
+   "label": "Closed By",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "closed_via_followup",
+   "fieldtype": "Check",
+   "label": "Closed via Follow-up",
+   "read_only": 1
+  },
+  {
+   "fieldname": "reply_section",
+   "fieldtype": "Section Break",
+   "label": "Reply Audit"
+  },
+  {
+   "fieldname": "last_replied_at",
+   "fieldtype": "Datetime",
+   "label": "Last Replied At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_replied_by",
+   "fieldtype": "Link",
+   "label": "Last Replied By",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_reply_comment",
+   "fieldtype": "Data",
+   "label": "Last Reply Comment",
+   "read_only": 1
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-08-17 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Namar Custom",
+ "name": "Namar Mention Thread",
+ "naming_rule": "By fieldname",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "delete": 1,
+   "role": "System Manager"
+  }
+ ],
+ "search_fields": "reference_name,latest_preview_plain",
+ "sort_field": "latest_mentioned_at",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "reference_name",
+ "track_changes": 0
+}
