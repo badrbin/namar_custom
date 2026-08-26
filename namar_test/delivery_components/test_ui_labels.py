@@ -15,7 +15,7 @@ class DeliveryComponentUiLabelsTestCase(unittest.TestCase):
         self.assertIn("function sectorPackageIsManufactured", source)
         self.assertIn('statusText = isCompleted ? "تم تصنيعه" : "متبقي"', source)
         self.assertIn("تصنيع القطاعات", source)
-        self.assertIn("interface_version: 5", source)
+        self.assertIn("interface_version: 6", source)
 
     def test_dashboard_renders_again_after_frappe_requests_finish(self):
         source = (
@@ -26,6 +26,16 @@ class DeliveryComponentUiLabelsTestCase(unittest.TestCase):
         self.assertIn('typeof frappe.after_ajax === "function"', source)
         self.assertIn("frappe.after_ajax(renderAfterModelSettles);", source)
         self.assertIn("scheduleDashboardRenderAfterRequests(frm);", source)
+
+    def test_realtime_uses_material_request_doctype_room(self):
+        client_source = (
+            APP_ROOT / "public/js/delivery_components/material_request_delivery_components.js"
+        ).read_text(encoding="utf-8")
+        service_source = (APP_ROOT / "delivery_components/service.py").read_text(encoding="utf-8")
+
+        self.assertIn('frappe.realtime.doctype_subscribe("Material Request")', client_source)
+        self.assertIn('room="doctype:Material Request"', service_source)
+        self.assertNotIn('doctype="Material Request",\n            docname=material_request', service_source)
 
     def test_sector_dashboard_splits_pending_and_completed_packages(self):
         source = (

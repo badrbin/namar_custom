@@ -739,6 +739,9 @@
   function setupRealtime() {
     if (realtimeBound || !frappe.realtime || typeof frappe.realtime.on !== "function") return;
     realtimeBound = true;
+    if (typeof frappe.realtime.doctype_subscribe === "function") {
+      frappe.realtime.doctype_subscribe("Material Request");
+    }
     frappe.realtime.on("delivery_component_package_changed", reloadCurrentFormFromExternalEvent);
   }
 
@@ -764,7 +767,7 @@
 
   window.namar_delivery_tracking = window.namar_delivery_tracking || {};
   window.namar_delivery_tracking.delivery_components = {
-    interface_version: 5,
+    interface_version: 6,
     render_material_request: renderUnifiedDashboard,
     sync_packages: syncPackages,
     prepare_and_print: prepareAndPrintPackages

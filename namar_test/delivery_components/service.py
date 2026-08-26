@@ -1297,8 +1297,7 @@ def publish_package_changed_event(material_request: str, package_row: dict[str, 
                 "tracking_status": package_row.get("tracking_status") or "",
                 "summary": summary,
             },
-            doctype="Material Request",
-            docname=material_request,
+            room="doctype:Material Request",
             after_commit=True,
         )
     except Exception:
