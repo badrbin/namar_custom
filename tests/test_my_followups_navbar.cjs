@@ -244,7 +244,10 @@ async function main() {
   assert.match(css, /direction:\s*rtl/);
   assert.match(css, /\.namar-my-followups-source-badge[\s\S]*?direction:\s*ltr/);
   assert.match(css, /\.namar-my-followups-source-badge\.is-mentions[\s\S]*?--red-600/);
-  assert.match(css, /\.namar-my-followups-source-badge\.is-followups[\s\S]*?--orange-700/);
+  assert.match(css, /\.namar-my-followups-source-badge\.is-followups[\s\S]*?--namar-followups-badge-bg,\s*#f4b400/);
+  assert.match(css, /\.namar-my-followups-source-badge\.is-followups[\s\S]*?--namar-followups-badge-border,\s*#d89b00/);
+  assert.match(css, /\.namar-my-followups-source-badge\.is-followups[\s\S]*?--namar-followups-badge-text,\s*#332600/);
+  assert.doesNotMatch(css, /\.namar-my-followups-source-badge\.is-followups[\s\S]*?--orange-700/);
   assert.match(css, /\.namar-my-followups-source-badge\.is-approvals[\s\S]*?--purple-600/);
   assert.doesNotMatch(css, /namar-my-followups-source-symbol/);
   assert.match(css, /@media \(max-width: 767px\)[\s\S]*?\.namar-my-followups-label \{[\s\S]*?display:\s*none/);

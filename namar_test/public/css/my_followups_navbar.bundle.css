@@ -79,7 +79,9 @@
 }
 
 #namar-my-followups-nav .namar-my-followups-source-badge.is-followups {
-	background: var(--orange-700, #b45309);
+	background: var(--namar-followups-badge-bg, #f4b400);
+	box-shadow: inset 0 0 0 1px var(--namar-followups-badge-border, #d89b00);
+	color: var(--namar-followups-badge-text, #332600);
 }
 
 #namar-my-followups-nav .namar-my-followups-source-badge.is-approvals {
@@ -91,6 +93,11 @@
 	color: #fff;
 	filter: brightness(0.9);
 	text-decoration: none;
+}
+
+#namar-my-followups-nav .namar-my-followups-source-badge.is-followups:hover,
+#namar-my-followups-nav .namar-my-followups-source-badge.is-followups:focus-visible {
+	color: var(--namar-followups-badge-text, #332600);
 }
 
 #namar-my-followups-nav .namar-my-followups-source-badge:focus-visible {
