@@ -192,6 +192,8 @@ async function main() {
   assert.match(source, /href="\/app\/my-followups"/);
   assert.match(source, /href="\$\{meta\.href\}"/);
   assert.match(source, /data-source-badge="\$\{source\}"/);
+  assert.doesNotMatch(source, /namar-my-followups-source-symbol/);
+  assert.doesNotMatch(source, /symbol:\s*"[وتم]"/);
   assert.match(source, /window\.location\.assign\(href\)/);
   assert.match(source, /stopImmediatePropagation/);
   assert.match(source, /attention_counts/);
@@ -212,6 +214,7 @@ async function main() {
   assert.match(css, /\.namar-my-followups-source-badge\.is-mentions[\s\S]*?--red-600/);
   assert.match(css, /\.namar-my-followups-source-badge\.is-followups[\s\S]*?--orange-700/);
   assert.match(css, /\.namar-my-followups-source-badge\.is-approvals[\s\S]*?--purple-600/);
+  assert.doesNotMatch(css, /namar-my-followups-source-symbol/);
   assert.match(css, /@media \(max-width: 767px\)[\s\S]*?\.namar-my-followups-label \{[\s\S]*?display:\s*none/);
   assert.doesNotMatch(css, /\.namar-my-followups-source-badge[^{]*\{[^}]*position:\s*absolute/);
 }

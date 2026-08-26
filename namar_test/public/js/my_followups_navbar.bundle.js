@@ -9,19 +9,16 @@
 		mentions: {
 			label: "الوارد",
 			attention_label: "الوارد الذي يحتاج قرارًا",
-			symbol: "و",
 			href: "/app/my-followups?source=mentions",
 		},
 		followups: {
 			label: "المتابعات",
 			attention_label: "المتابعات المتأخرة",
-			symbol: "ت",
 			href: "/app/my-followups?source=followups&bucket=overdue",
 		},
 		approvals: {
 			label: "الموافقات",
 			attention_label: "الموافقات المعلقة",
-			symbol: "م",
 			href: "/app/my-followups?source=approvals",
 		},
 	};
@@ -156,7 +153,6 @@
 						href="${meta.href}"
 						data-source-badge="${source}"
 						hidden>
-						<span class="namar-my-followups-source-symbol" aria-hidden="true">${meta.symbol}</span>
 						<bdi class="namar-my-followups-source-value" dir="ltr"></bdi>
 					</a>`;
 				}).join("");

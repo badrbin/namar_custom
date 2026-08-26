@@ -98,12 +98,6 @@
 	outline-offset: 1px;
 }
 
-#namar-my-followups-nav .namar-my-followups-source-symbol {
-	font-size: 8px;
-	font-weight: 800;
-	opacity: 0.92;
-}
-
 @media (max-width: 767px) {
 	#namar-my-followups-nav .namar-my-followups-link {
 		gap: 0;
@@ -131,8 +125,5 @@
 		padding-inline: 4px;
 	}
 
-	#namar-my-followups-nav .namar-my-followups-source-symbol {
-		font-size: 7px;
-	}
 }
 /*rtl:end:ignore*/
