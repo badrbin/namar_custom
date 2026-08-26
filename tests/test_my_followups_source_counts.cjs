@@ -98,6 +98,11 @@ function renderMentionDetail(detail) {
 async function main() {
 {
   const page = makePage();
+  context.window.location.search = "";
+  assert.deepEqual(
+    { ...page.read_deep_link() },
+    { source: "mentions", bucket: "open", thread: "" }
+  );
   context.window.location.search = "?source=followups&bucket=overdue";
   assert.deepEqual(
     { ...page.read_deep_link() },

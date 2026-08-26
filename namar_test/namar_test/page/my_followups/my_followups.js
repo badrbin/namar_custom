@@ -2033,7 +2033,7 @@ class NamarMyFollowups {
 	}
 
 	read_deep_link() {
-		let source = "followups";
+		let source = "mentions";
 		let thread = "";
 		let bucket = "all";
 		try {
