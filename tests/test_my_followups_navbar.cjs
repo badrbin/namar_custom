@@ -52,6 +52,7 @@ const {
   NamarMyFollowupsNavbar,
   badge_text,
   badge_view,
+  is_plain_navigation,
   normalize_counts,
   valid_count,
 } = testHooks;
@@ -91,6 +92,10 @@ async function main() {
   assert.match(view.status_label, /المتابعات المتأخرة: 5/);
   assert.equal(badge_view({ mentions: 0, followups: 0, approvals: 0, total: 0 }).visible, false);
   assert.equal(badge_view(null), null);
+  assert.equal(is_plain_navigation({ button: 0 }), true);
+  assert.equal(is_plain_navigation({ button: 0, metaKey: true }), false);
+  assert.equal(is_plain_navigation({ button: 0, ctrlKey: true }), false);
+  assert.equal(is_plain_navigation({ button: 1 }), false);
 
   const controller = new NamarMyFollowupsNavbar();
   controller.render = () => {};
@@ -187,6 +192,8 @@ async function main() {
   assert.match(source, /href="\/app\/my-followups"/);
   assert.match(source, /href="\$\{meta\.href\}"/);
   assert.match(source, /data-source-badge="\$\{source\}"/);
+  assert.match(source, /window\.location\.assign\(href\)/);
+  assert.match(source, /stopImmediatePropagation/);
   assert.match(source, /attention_counts/);
   assert.match(source, /الوارد/);
   assert.match(source, /الوارد الذي يحتاج قرارًا/);
