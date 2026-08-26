@@ -1,4 +1,6 @@
 # Patches for namar_custom. Keep this file present for Frappe app compatibility.
 
+[pre_model_sync]
+
 [post_model_sync]
 namar_custom.patches.v0_0_5.sync_converted_mention_followups

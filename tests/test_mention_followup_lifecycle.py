@@ -514,6 +514,7 @@ class MentionFollowupLifecycleTestCase(unittest.TestCase):
         with PATCHES_PATH.open(encoding="utf-8") as patches_file:
             parser.read_file(patches_file)
 
+        self.assertIn("pre_model_sync", parser.sections())
         self.assertIn("post_model_sync", parser.sections())
         self.assertIn(
             "namar_custom.patches.v0_0_5.sync_converted_mention_followups",
