@@ -121,17 +121,19 @@
 		}
 
 		bind_navigation($node) {
-			$node
-				.off(`click${EVENT_NAMESPACE}`, ".namar-my-followups-source-badge")
-				.on(`click${EVENT_NAMESPACE}`, ".namar-my-followups-source-badge", (event) => {
-					if (!is_plain_navigation(event)) return;
-					const href = event.currentTarget?.getAttribute?.("href");
-					if (!href) return;
-					event.preventDefault();
-					event.stopImmediatePropagation?.();
-					event.stopPropagation?.();
-					window.location.assign(href);
-				});
+			[".namar-my-followups-link", ".namar-my-followups-source-badge"].forEach((selector) => {
+				$node
+					.off(`click${EVENT_NAMESPACE}`, selector)
+					.on(`click${EVENT_NAMESPACE}`, selector, (event) => {
+						if (!is_plain_navigation(event)) return;
+						const href = event.currentTarget?.getAttribute?.("href");
+						if (!href) return;
+						event.preventDefault();
+						event.stopImmediatePropagation?.();
+						event.stopPropagation?.();
+						window.location.assign(href);
+					});
+			});
 		}
 
 		ensure_node() {
