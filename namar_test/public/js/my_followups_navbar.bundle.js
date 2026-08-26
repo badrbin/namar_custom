@@ -77,6 +77,15 @@
 		};
 	}
 
+	function is_plain_navigation(event) {
+		if (!event) return true;
+		return (event.button === undefined || event.button === 0)
+			&& !event.metaKey
+			&& !event.ctrlKey
+			&& !event.shiftKey
+			&& !event.altKey;
+	}
+
 	class NamarMyFollowupsNavbar {
 		constructor() {
 			this.counts = null;
@@ -112,6 +121,20 @@
 			this.timer = window.setInterval(() => {
 				if (!document.hidden) this.refresh();
 			}, POLL_INTERVAL_MS);
+		}
+
+		bind_navigation($node) {
+			$node
+				.off(`click${EVENT_NAMESPACE}`, ".namar-my-followups-source-badge")
+				.on(`click${EVENT_NAMESPACE}`, ".namar-my-followups-source-badge", (event) => {
+					if (!is_plain_navigation(event)) return;
+					const href = event.currentTarget?.getAttribute?.("href");
+					if (!href) return;
+					event.preventDefault();
+					event.stopImmediatePropagation?.();
+					event.stopPropagation?.();
+					window.location.assign(href);
+				});
 		}
 
 		ensure_node() {
@@ -152,6 +175,7 @@
 				);
 				$notifications.after($node);
 			}
+			this.bind_navigation($node);
 			this.render();
 			this.update_active_state();
 			return $node;
@@ -281,6 +305,7 @@
 			NamarMyFollowupsNavbar,
 			badge_view,
 			badge_text,
+			is_plain_navigation,
 			normalize_counts,
 			valid_count,
 		});
