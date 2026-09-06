@@ -554,7 +554,7 @@ def _export(plan):
                 for row in rows:
                     self.writer.writerow(row)
 
-    make_access_log(doctype=meta.name, file_type=file_type, columns=selected, filters=filters)
+    make_access_log(doctype=meta.name, file_type=file_type, columns=frappe.as_json(selected), filters=filters)
     exporter = ScopedExporter(doctype=meta.name, parent_doctype=meta.name, all_doctypes=with_children,
                                with_data=True, select_columns=selected, file_type=file_type, filters=filters,
                                export_without_column_meta=True)

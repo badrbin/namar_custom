@@ -38,6 +38,7 @@ def make_boundary(roles=None, args=None, path="/api/resource/Customer", verb="GE
     fake.form_dict = Row(args or {})
     fake.request = Row(path=path, method=verb)
     fake.response = Row()
+    fake.as_json = lambda value: json.dumps(value, ensure_ascii=False)
     fake.PermissionError = type("PermissionError", (Exception,), {})
     fake.whitelist = lambda **kwargs: lambda fn: fn
     fake.get_roles = lambda user: roles if roles is not None else [DEFAULT_ROLE, "All", "Guest", "Desk User"]
@@ -252,9 +253,12 @@ class BoundaryTests(unittest.TestCase):
         with patch.dict(sys.modules, modules):
             with self.assertRaises(Denied): render_pdf(Row(doctype="Customer", name="C-1"), "Standard", {}, {})
             self.assertNotIn(("pdf",), calls)
-            f.get_print = lambda *args, **kwargs: '<p>Safe print</p>'
-            render_pdf(Row(doctype="Customer", name="C-1"), "Standard", {}, {})
+            f.get_print = lambda *args, **kwargs: calls.append(("get_print", kwargs)) or '<p>Safe print</p>'
+            render_pdf(Row(doctype="Customer", name="C-1"), "Standard", {"letterhead": "Selected Letter Head", "no_letterhead": 1}, {})
         self.assertIn(("pdf",), calls)
+        print_args = next(call[1] for call in calls if call[0] == "get_print")
+        self.assertEqual(print_args["letterhead"], "Selected Letter Head")
+        self.assertEqual(print_args["no_letterhead"], 1)
         self.assertEqual(f.local.response.filecontent, b"PDF")
         self.assertEqual(f.local.response.type, "pdf")
 

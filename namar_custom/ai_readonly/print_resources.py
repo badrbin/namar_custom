@@ -265,7 +265,8 @@ def render_pdf(doc, format_name, args, resources):
     validate_print_permission(doc)
     with print_language(args.get("language")):
         rendered = frappe.get_print(doc.doctype, doc.name, format_name, doc=doc, as_pdf=False,
-            no_letterhead=args.get("no_letterhead", 0), pdf_generator="wkhtmltopdf")
+            no_letterhead=args.get("no_letterhead", 0), letterhead=args.get("letterhead"),
+            pdf_generator="wkhtmltopdf")
         rendered = inline_images(rendered, get_url(allow_header_override=False), resources)
         # Frappe get_pdf explicitly disables JavaScript and local-file access.
         pdf = get_pdf(rendered)
