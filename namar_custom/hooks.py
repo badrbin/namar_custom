@@ -9,6 +9,9 @@ app_color = "grey"
 app_email = "badrarroug@namar.net"
 app_license = "MIT"
 
+# Enforce after Frappe resolves API/OAuth/session identity, before any dispatch.
+auth_hooks = ["namar_custom.ai_readonly.boundary.enforce_request"]
+
 permission_query_conditions = {
     "Namar Mention Thread": (
         "namar_custom.namar_custom.doctype.namar_mention_thread."

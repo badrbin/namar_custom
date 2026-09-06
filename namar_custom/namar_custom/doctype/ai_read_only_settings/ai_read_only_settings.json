@@ -1,0 +1,40 @@
+{
+ "doctype": "DocType",
+ "name": "AI Read Only Settings",
+ "module": "Namar Custom",
+ "issingle": 1,
+ "engine": "InnoDB",
+ "track_changes": 1,
+ "field_order": ["instructions", "protected_role", "policy_json"],
+ "fields": [
+  {
+   "fieldname": "instructions",
+   "fieldtype": "HTML",
+   "options": "<div dir=\"rtl\" style=\"text-align:right\">حماية حسابات الدور المستقل قبل تنفيذ أي طلب. تظل القراءة خاضعة لصلاحيات الدور وقيود المستخدم. لا تسمح بتقرير أو طباعة قبل مراجعة كود المصدر وتسجيل بصمته. أي مسار غير معتمد يُرفض.</div>"
+  },
+  {
+   "fieldname": "protected_role",
+   "fieldtype": "Link",
+   "options": "Role",
+   "label": "دور القراءة المحمي",
+   "default": "الذكاء الاصطناعي",
+   "reqd": 1,
+   "description": "<span dir=\"rtl\" style=\"text-align:right\">تطبق الحماية على كل مستخدم يحمل هذا الدور.</span>"
+  },
+  {
+   "fieldname": "policy_json",
+   "fieldtype": "Code",
+   "options": "JSON",
+   "label": "سياسة طرق القراءة والمصادر المعتمدة",
+   "reqd": 1,
+   "description": "<span dir=\"rtl\" style=\"text-align:right\">تتضمن version وmethods وreports وprint_formats وprint_resources وapp_revisions وpermission_review وmax_rows. لا تتضمن مفاتيح أو كلمات مرور.</span>"
+  }
+ ],
+ "permissions": [
+  {"role": "System Manager", "read": 1, "write": 1}
+ ],
+ "actions": [],
+ "links": [],
+ "states": [],
+ "index_web_pages_for_search": 0
+}
