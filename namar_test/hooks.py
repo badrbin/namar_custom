@@ -7,6 +7,9 @@ app_description = "Namar ERPNext customizations migrated from live test Server S
 app_email = "badrarroug@namar.net"
 app_license = "MIT"
 
+# Enforce after Frappe resolves API/OAuth/session identity, before any dispatch.
+auth_hooks = ["namar_test.ai_readonly.boundary.enforce_request"]
+
 boot_session = "namar_test.boot.boot_session"
 
 permission_query_conditions = {
