@@ -74,6 +74,9 @@ fixtures = [
 ]
 
 override_whitelisted_methods = {
+    "frappe.desk.form.activity.get_activity_timeline": "namar_test.activity_permissions.get_activity_timeline",
+    "frappe.desk.form.activity.get_more_email_activities": "namar_test.activity_permissions.get_more_email_activities",
+    "frappe.desk.form.activity.get_more_milestone_activities": "namar_test.activity_permissions.get_more_milestone_activities",
     "apply_material_request_scenario_bypass": "namar_test.api.apply_material_request_scenario_bypass",
     "backfill_material_request_state_duration": "namar_test.api.backfill_material_request_state_duration",
     "get_cutting_report": "namar_test.api.get_cutting_report",
