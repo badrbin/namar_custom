@@ -805,7 +805,8 @@ else:
         doc.mobile_no = mobile_no
         doc.phone = mobile_no
 
-    doc.email_id = email_id
+    if is_create_submission or "email_id" in frappe.form_dict:
+        doc.email_id = email_id
     if city:
         doc.city = city
     valid_territory = resolve_valid_territory(territory, city)
@@ -815,21 +816,31 @@ else:
         frappe.throw("المدينة مطلوبة")
     if valid_territory:
         doc.territory = valid_territory
-    doc.custom_map_notes = notes
-    doc.custom_next_follow_up_on = follow_up
-    existing_stage = normalize_existing_stage(doc.get("custom_sales_stage_link") or doc.get("custom_sales_stage"))
-    doc.custom_sales_stage_link = sales_stage or existing_stage or get_default_stage()
-    sync_legacy_stage_field(doc, doc.custom_sales_stage_link)
-    doc.custom_business_type = business_type
+    if is_create_submission or notes_provided:
+        doc.custom_map_notes = notes
+    if is_create_submission or "custom_next_follow_up_on" in frappe.form_dict:
+        doc.custom_next_follow_up_on = follow_up
+    stage_provided = "custom_sales_stage" in frappe.form_dict or "sales_stage" in frappe.form_dict
+    if is_create_submission or stage_provided:
+        existing_stage = normalize_existing_stage(doc.get("custom_sales_stage_link") or doc.get("custom_sales_stage"))
+        doc.custom_sales_stage_link = sales_stage or existing_stage or get_default_stage()
+        sync_legacy_stage_field(doc, doc.custom_sales_stage_link)
+    if is_create_submission or "custom_business_type" in frappe.form_dict:
+        doc.custom_business_type = business_type
     if is_create_submission and door_count is None:
         frappe.throw("عدد الأبواب مطلوب")
-    doc.custom_door_count = door_count
-    doc.custom_contact_person = contact_person
+    if is_create_submission or "custom_door_count" in frappe.form_dict:
+        doc.custom_door_count = door_count
+    if is_create_submission or "custom_contact_person" in frappe.form_dict:
+        doc.custom_contact_person = contact_person
     if secondary_mobile or "custom_secondary_mobile" in frappe.form_dict:
         doc.custom_secondary_mobile = secondary_mobile
-    doc.custom_sales_priority = sales_priority or clean_text(doc.get("custom_sales_priority")) or "متوسطة"
-    doc.custom_next_action = next_action
-    doc.custom_last_visit_result = last_visit_result
+    if is_create_submission or "custom_sales_priority" in frappe.form_dict:
+        doc.custom_sales_priority = sales_priority or clean_text(doc.get("custom_sales_priority")) or "متوسطة"
+    if is_create_submission or "custom_next_action" in frappe.form_dict:
+        doc.custom_next_action = next_action
+    if is_create_submission or "custom_last_visit_result" in frappe.form_dict:
+        doc.custom_last_visit_result = last_visit_result
     if project_image:
         doc.custom_project_image = project_image
     doc.custom_last_activity_on = frappe.utils.now_datetime()
@@ -847,7 +858,8 @@ else:
         assert_unique_google_map("" if doc.is_new() else doc.name, next_google_map)
         doc.custom_google_map = next_google_map
 
-    doc.status = status_input or get_stage_status(doc.custom_sales_stage_link)
+    if is_create_submission or stage_provided or "status" in frappe.form_dict:
+        doc.status = status_input or get_stage_status(doc.custom_sales_stage_link)
 
     if is_create_submission:
         source = require_text(source, "المصدر")
@@ -855,8 +867,9 @@ else:
         doc.source = source
 
     owner_user = ensure_owner_field(doc, owner_input)
-    shared_users = parse_shared_users(shared_users_input, owner_user)
-    rebuild_shared_users(doc, shared_users)
+    if is_create_submission or "shared_users" in frappe.form_dict:
+        shared_users = parse_shared_users(shared_users_input, owner_user)
+        rebuild_shared_users(doc, shared_users)
 
     is_new = doc.is_new()
     doc.save(ignore_permissions=True)
