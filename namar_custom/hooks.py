@@ -9,6 +9,12 @@ app_color = "grey"
 app_email = "badrarroug@namar.net"
 app_license = "MIT"
 
+override_whitelisted_methods = {
+    "frappe.desk.form.activity.get_activity_timeline": "namar_custom.activity_permissions.get_activity_timeline",
+    "frappe.desk.form.activity.get_more_email_activities": "namar_custom.activity_permissions.get_more_email_activities",
+    "frappe.desk.form.activity.get_more_milestone_activities": "namar_custom.activity_permissions.get_more_milestone_activities",
+}
+
 permission_query_conditions = {
     "Namar Mention Thread": (
         "namar_custom.namar_custom.doctype.namar_mention_thread."
