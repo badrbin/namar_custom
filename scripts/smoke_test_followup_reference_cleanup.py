@@ -324,7 +324,11 @@ class CleanupSmoke:
     def run(self) -> None:
         # Mandatory connectivity/schema preflight before creating any fixture.
         self.probe.snapshot(self.marker, [])
-        ensure(self.user and self.user not in {"Guest", "Administrator"}, "يتطلب توكن مستخدم تجريبي مسجّل غير Administrator")
+        ensure(self.user and self.user != "Guest", "يتطلب توكن مستخدم تجريبي مسجّل")
+        actor = self.client.get_doc("User", self.user) or {}
+        ensure(actor.get("enabled") and actor.get("user_type") == "System User"
+               and actor.get("allowed_in_mentions"),
+               "حساب الاختبار الحالي غير مفعّل لاستقبال المنشن")
         for doctype, permission in (("ToDo", "read"), ("ToDo", "create"), ("ToDo", "delete"), ("Comment", "create")):
             ensure(self.client.has_permission(doctype, permission), f"صلاحية التجريبي ناقصة: {doctype}:{permission}")
         self.manifest["status"] = "running"
