@@ -1765,12 +1765,20 @@ class NamarMyFollowups {
 		const doctype = this.reference_type(detail);
 		const name = this.reference_name(detail);
 		if (doctype && name) {
-			frappe.set_route("Form", doctype, name);
+			window.open(frappe.utils.get_form_link(doctype, name), "_blank", "noopener,noreferrer");
 			return;
 		}
 		if (detail.reference_route) {
-			const route = String(detail.reference_route).replace(/^\/?app\//, "").split("/").filter(Boolean);
-			if (route.length) frappe.set_route(...route);
+			const route = String(detail.reference_route).trim().replace(/^app\//, "/app/");
+			if (!route) return;
+			try {
+				const url = new URL(route, `${window.location.origin}/app/`);
+				if (url.origin === window.location.origin && url.pathname.startsWith("/app/") && !url.username && !url.password) {
+					window.open(url.href, "_blank", "noopener,noreferrer");
+				}
+			} catch (_) {
+				// Ignore invalid reference routes.
+			}
 		}
 	}
 
