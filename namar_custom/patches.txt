@@ -5,3 +5,4 @@
 [post_model_sync]
 namar_custom.patches.v0_0_5.sync_converted_mention_followups
 namar_custom.patches.v0_0_7.purge_deleted_reference_followups
+namar_custom.patches.v0_0_8.configure_approval_routing

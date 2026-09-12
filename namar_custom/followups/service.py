@@ -5,9 +5,10 @@ from uuid import uuid4
 
 import frappe
 from frappe.desk.form import assign_to
-from frappe.model.workflow import get_transitions, get_workflow_name, get_workflow_state_field
+from frappe.model.workflow import get_transitions, get_workflow_name, get_workflow_safe_globals, get_workflow_state_field
 from frappe.utils import get_absolute_url, nowdate
 
+from namar_custom.followups.approval_routing import ApprovalRoutingResolver, role_routing
 from namar_custom.followups.reference_access import quiet_reference_errors, reference_exists
 from namar_custom.followups.logic import (
     APPROVAL_SEARCH_SCOPES,
@@ -180,8 +181,10 @@ def _serialize_todo(
 def _serialize_workflow_action(
     action,
     reference_title_cache: dict[tuple[str, str], str] | None = None,
+    routing: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     values = {fieldname: action.get(fieldname) for fieldname in WORKFLOW_ACTION_FIELDS}
+    values["routing"] = routing if routing is not None else role_routing()
     if values.get("reference_doctype") and values.get("reference_name"):
         values["reference_route"] = get_absolute_url(
             values["reference_doctype"],
@@ -322,7 +325,15 @@ def _approval_search_filters(search: str, search_scope: str = "all") -> list[lis
     ]
 
 
-def _approval_counts() -> dict[str, int]:
+def _approval_counts(
+    resolver: ApprovalRoutingResolver | None = None,
+    visible: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, int]:
+    resolver = resolver or ApprovalRoutingResolver(frappe, frappe.session.user, get_workflow_safe_globals)
+    if resolver.has_rules:
+        if visible is None:
+            visible = resolver.visible_actions(list(WORKFLOW_ACTION_FIELDS))
+        return {"open": len(visible)}
     # get_list تُبقي Permission Query القياسي لـ Workflow Action مطبقًا حتى
     # مع حقل تجميعي؛ لذلك يطابق العدد نفس نطاق العناصر المرئية للمستخدم.
     rows = frappe.get_list(
@@ -693,7 +704,7 @@ def get_approvals(
     page_length: int | str = 50,
     search_scope: str = "all",
 ) -> dict[str, Any]:
-    _assert_authenticated()
+    user = _assert_authenticated()
     normalized_search = normalize_search(search)
     normalized_search_scope = _logic(
         normalize_search_scope,
@@ -702,11 +713,17 @@ def get_approvals(
     )
     start, length, query_length = page_window(limit_start, page_length)
 
-    # get_list مقصودة هنا: فهي تطبق Permission Query القياسي لـ Workflow Action.
-    rows = frappe.get_list(
+    resolver = ApprovalRoutingResolver(frappe, user, get_workflow_safe_globals)
+    visible = resolver.visible_actions(list(WORKFLOW_ACTION_FIELDS)) if resolver.has_rules else None
+    filters = {"status": "Open"}
+    if visible is not None:
+        filters["name"] = ["in", list(visible)]
+    # Reuse the normal SQL search and pagination only after routing. The
+    # permission query is applied here again; routing never broadens its scope.
+    rows = [] if visible == {} else frappe.get_list(
         "Workflow Action",
         fields=list(WORKFLOW_ACTION_FIELDS),
-        filters={"status": "Open"},
+        filters=filters,
         or_filters=_approval_search_filters(normalized_search, normalized_search_scope),
         order_by="modified desc",
         limit_start=start,
@@ -714,18 +731,23 @@ def get_approvals(
     )
     reference_title_cache: dict[tuple[str, str], str] = {}
     result = pagination(
-        [_serialize_workflow_action(row, reference_title_cache) for row in rows],
+        [
+            _serialize_workflow_action(
+                row, reference_title_cache, visible.get(row["name"]) if visible is not None else None
+            )
+            for row in rows
+        ],
         start,
         length,
     )
     result["search"] = normalized_search
     result["search_scope"] = normalized_search_scope
-    result["counts"] = _approval_counts()
+    result["counts"] = _approval_counts(resolver, visible)
     return result
 
 
 def get_approval_detail(action_name: str) -> dict[str, Any]:
-    _assert_authenticated()
+    user = _assert_authenticated()
     name = _required(action_name, "اسم الموافقة", MAX_REFERENCE_LENGTH)
 
     # نتحقق بالقائمة ذات Permission Query بدل get_all أو قراءة DB مباشرة.
@@ -736,6 +758,14 @@ def get_approval_detail(action_name: str) -> dict[str, Any]:
         limit_page_length=1,
     )
     if not permitted:
+        frappe.throw(
+            "الموافقة غير متاحة لك أو لم تعد مفتوحة",
+            frappe.PermissionError,
+        )
+
+    resolver = ApprovalRoutingResolver(frappe, user, get_workflow_safe_globals)
+    visible = resolver.route_rows(permitted)
+    if name not in visible:
         frappe.throw(
             "الموافقة غير متاحة لك أو لم تعد مفتوحة",
             frappe.PermissionError,
@@ -758,7 +788,7 @@ def get_approval_detail(action_name: str) -> dict[str, Any]:
         if row.get("action")
     ]
     return {
-        "approval": _serialize_workflow_action(action),
+        "approval": _serialize_workflow_action(action, routing=visible[name]),
         "reference": _reference_summary(reference_doc),
         "available_actions": available_actions,
         "permitted_roles": [row.role for row in action.get("permitted_roles") or []],

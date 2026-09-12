@@ -59,6 +59,9 @@ jinja = {
 # Keep this production branch intentionally narrow. Do not merge the broad
 # test branch into production; add only approved production hooks here.
 doc_events = {
+    "Workflow": {
+        "validate": ["namar_custom.followups.approval_routing_settings.validate_workflow_approval_routing"],
+    },
     "*": {
         "after_delete": ["namar_custom.mentions.reference_cleanup.cleanup_deleted_reference"],
     },
@@ -87,4 +90,8 @@ doc_events = {
     "Material Request": {
         "before_insert": "namar_custom.delivery_components.tracking_codes.ensure_material_request_tracking_code",
     },
+}
+
+doctype_js = {
+    "Workflow": "public/js/doctype/workflow_approval_routing.js",
 }

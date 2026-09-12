@@ -18,7 +18,12 @@ const css = fs.readFileSync(cssPath, "utf8");
 const context = {
   frappe: {
     pages: { "my-followups": {} },
-    utils: {},
+    utils: {
+      escape_html: (value) => String(value).replace(/[&<>"']/g, (character) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+      })[character]),
+      unescape_html: (value) => value,
+    },
     show_alert: () => {},
   },
   __: (text) => text,
@@ -95,7 +100,76 @@ function renderMentionDetail(detail) {
   return html;
 }
 
+function renderApproval(routing) {
+  const page = makePage();
+  page.state.source = "approvals";
+  const record = {
+    name: "ACTION-1",
+    reference_doctype: "Sales Order",
+    reference_name: "SO-1",
+    workflow_state: "مراجعة الطلب",
+    routing,
+  };
+  page.state.detail = page.normalize_detail_response({ approval: record });
+  assert.equal(page.state.detail.routing, routing);
+  page.icon = () => "";
+  page.avatar = () => "";
+  page.due_meta = () => ({ label: "" });
+  let detail = "";
+  page.$detail = { html: (value) => { detail = value; } };
+  page.render_approval_detail();
+  return { item: page.render_queue_item(record), detail };
+}
+
 async function main() {
+{
+  for (const routing of [undefined, { mode: "Role", fallback: false }]) {
+    const rendered = renderApproval(routing);
+    for (const html of Object.values(rendered)) {
+      assert.doesNotMatch(html, /mf-approval-routing-notice/);
+      assert.doesNotMatch(html, /مخصص إلى/);
+    }
+  }
+
+  const fallback = renderApproval({ mode: "Targets", targets: [], fallback: true, note: "" });
+  for (const html of Object.values(fallback)) {
+    assert.match(html, /class="mf-approval-routing-notice" dir="rtl"/);
+    assert.match(html, /تعذر تحديد المستلمين؛ متاحة حسب الدور/);
+  }
+
+  const fallbackWithNote = renderApproval({
+    mode: "Targets",
+    fallback: true,
+    note: 'المسؤول <img src=x onerror="alert(1)"> غير متاح',
+  });
+  for (const html of Object.values(fallbackWithNote)) {
+    assert.match(html, /المسؤول &lt;img src=x onerror=&quot;alert\(1\)&quot;&gt; غير متاح/);
+    assert.doesNotMatch(html, /<img/);
+  }
+
+  const multipleTargets = renderApproval({
+    mode: "Targets",
+    fallback: false,
+    targets: [
+      { type: "User", label: "خالد", user: "person@example.com", user_name: "خالد" },
+      { type: "Role", label: "مدير المبيعات", role: "Sales Manager" },
+      { type: "Document Owner", label: "منشئ المستند" },
+    ],
+    responsible_users: ["person@example.com", "owner@example.com"],
+    note: 'موجّه إليك ضمن مستلمي المرحلة <script>alert("x")</script>',
+  });
+  for (const html of Object.values(multipleTargets)) {
+    assert.match(html, /class="mf-approval-routing-notice" dir="rtl"/);
+    assert.match(html, /موجّه إليك ضمن مستلمي المرحلة &lt;script&gt;alert\(&quot;x&quot;\)&lt;\/script&gt;/);
+    assert.doesNotMatch(html, /<script>|person@example\.com|owner@example\.com/);
+  }
+  const targetsWithoutNote = renderApproval({ mode: "Targets", targets: [], fallback: false });
+  for (const html of Object.values(targetsWithoutNote)) {
+    assert.match(html, /موجّه إليك ضمن مستلمي المرحلة/);
+  }
+  assert.match(css, /\.mf-approval-routing-notice \{[^}]*direction: rtl;[^}]*text-align: right;/);
+}
+
 {
   const page = makePage();
   context.window.location.search = "";
