@@ -48,7 +48,7 @@
 			const field = user_fields(frm).find((item) => item.fieldname === value);
 			value = field ? __(field.label || field.fieldname, null, frm.doc.document_type) : value;
 		}
-		return value || "افتح الصف لتحديد المستلم";
+		return value || "لم يُحدد المستلم";
 	}
 
 	function render_summary(frm, cdt, cdn) {
@@ -71,15 +71,6 @@
 		controls[SUMMARY_FIELD].$wrapper.html(rtl(html));
 		controls[EDIT_FIELD]?.$wrapper.attr("dir", "rtl").css("text-align", "right");
 		controls[EDIT_FIELD]?.$input.prop("disabled", !can_edit(frm));
-	}
-
-	function target_change(frm) {
-		this.doc.recipient_summary = recipient_label(this.doc, frm);
-		const current_row = this.grid_row || this.layout?.grid_row;
-		current_row?.refresh_dependency();
-		current_row?.grid_form?.layout?.refresh(this.doc);
-		current_row?.refresh_field(this.df.fieldname);
-		current_row?.refresh_field("recipient_summary");
 	}
 
 	function normalize_targets(rows, allowed_fields) {
@@ -127,7 +118,6 @@
 			invalid_config = true;
 		}
 		const fields = user_fields(frm);
-		for (const target of targets) target.recipient_summary = recipient_label(target, frm);
 		const allowed_fields = new Set(fields.map((field) => field.fieldname));
 		const field_options = [
 			{ value: "", label: "" },
@@ -142,53 +132,86 @@
 				field_options.push({ value: target.field, label: `حقل غير متاح (${target.field})` });
 			}
 		}
-		const explanation = "أضف سطرًا لكل موظف أو دور أو قاعدة، وافتح الصف لتحديد المستلم. " +
-			"تظهر الموافقة لمن يطابق أي سطر ويملك صلاحية المرحلة. " +
+		const explanation = "أضف موظفًا أو دورًا أو قاعدة، ويمكنك الجمع بين أكثر من اختيار. " +
+			"تظهر الموافقة لمن يطابق أي اختيار ويملك صلاحية المرحلة. " +
 			"ترك القائمة فارغة يعيد العرض حسب أدوار المرحلة. إذا تعذر تحديد جميع المستلمين المؤهلين يعود العرض للأدوار. " +
 			"هذه الإعدادات تخص متابعاتي؛ صلاحيات الاعتماد داخل المستند لا تتغير.";
+
+		function render_targets() {
+			const rows = targets.map((target, index) => {
+				const type_label = TYPES.find((type) => type.value === target.type)?.label || "اختيار غير صالح";
+				return `<tr>
+					<td style="vertical-align:middle">${esc(type_label)}</td>
+					<td style="vertical-align:middle;overflow-wrap:anywhere">${esc(recipient_label(target, frm))}</td>
+					<td style="white-space:nowrap;text-align:left">
+						<button type="button" class="btn btn-default btn-xs" data-routing-action="edit" data-index="${index}">تعديل</button>
+						<button type="button" class="btn btn-default btn-xs text-danger" data-routing-action="remove" data-index="${index}">إزالة</button>
+					</td>
+				</tr>`;
+			}).join("");
+			const html = rows ? `<div class="table-responsive"><table class="table table-bordered">
+				<thead><tr><th style="text-align:right">نوع المستلم</th><th style="text-align:right">المستلم</th><th></th></tr></thead>
+				<tbody>${rows}</tbody></table></div>`
+				: '<p class="text-muted">حسب أدوار المرحلة. أضف مستلمًا لتخصيص ظهور الموافقة.</p>';
+			dialog.fields_dict.targets_list.$wrapper.html(rtl(html));
+		}
+
+		async function edit_recipient(index = null) {
+			if (!can_edit(frm)) return;
+			if (index === null && targets.length >= MAX_TARGETS) {
+				frappe.throw(rtl(`يمكن تحديد ${MAX_TARGETS} مستلمًا أو قاعدة كحد أقصى لكل مرحلة.`));
+			}
+			const original = index === null ? { type: "user" } : { ...targets[index] };
+			const recipient_dialog = new frappe.ui.Dialog({
+				title: index === null ? __("إضافة مستلم") : __("تعديل المستلم"),
+				fields: [
+					{
+						fieldname: "type", fieldtype: "Select", label: __("نوع المستلم"), options: TYPES, reqd: 1,
+						change: function () { this.layout?.refresh_dependency(); },
+					},
+					{
+						fieldname: "user", fieldtype: "Link", label: __("الموظف"), options: "User",
+						depends_on: 'eval:doc.type==="user"', mandatory_depends_on: 'eval:doc.type==="user"',
+						get_query: () => ({ filters: { enabled: 1, user_type: "System User" } }),
+					},
+					{
+						fieldname: "role", fieldtype: "Link", label: __("الدور"), options: "Role",
+						depends_on: 'eval:doc.type==="role"', mandatory_depends_on: 'eval:doc.type==="role"',
+					},
+					{
+						fieldname: "field", fieldtype: "Select", label: __("حقل المسؤول"), options: field_options,
+						depends_on: 'eval:doc.type==="field"', mandatory_depends_on: 'eval:doc.type==="field"',
+					},
+				],
+				primary_action_label: __("حفظ المستلم"),
+				primary_action(values) {
+					if (!can_edit(frm)) return;
+					const [target] = normalize_targets([values], allowed_fields);
+					if (index === null) targets.push(target);
+					else targets[index] = target;
+					render_targets();
+					recipient_dialog.hide();
+				},
+			});
+			// Explicit values avoid FieldGroup interpreting the string "user" as the session user.
+			await recipient_dialog.set_values(original);
+			recipient_dialog.refresh_dependency();
+			recipient_dialog.$wrapper.attr("dir", "rtl");
+			recipient_dialog.$wrapper.find(".modal-body, .modal-title, .control-label").css("text-align", "right");
+			recipient_dialog.show();
+		}
+
 		const dialog = new frappe.ui.Dialog({
-			title: __("مستلمو الموافقة") + (row.state ? ` — ${row.state}` : ""),
-			size: "extra-large",
+			title: __("مستلمو الموافقة") + (row.state ? ` — ${esc(row.state)}` : ""),
+			size: "large",
 			fields: [
 				{
 					fieldname: "explanation", fieldtype: "HTML",
 					options: rtl(explanation + (invalid_config
 						? '<p class="text-danger">الإعداد السابق غير صالح. حدد المستلمين ثم احفظ سير العمل لتصحيحه.</p>' : "")),
 				},
-				{
-					fieldname: "targets", fieldtype: "Table", label: __("المستلمون"),
-					in_place_edit: false, data: targets, cannot_add_rows: false,
-					description: rtl("افتح الصف لتحديد المستلم."),
-					fields: [
-						{
-							fieldname: "type", fieldtype: "Select", label: __("نوع المستلم"),
-							options: TYPES, default: "user", in_list_view: 1, columns: 4,
-							formatter: (value) => esc(TYPES.find((type) => type.value === value)?.label || value),
-							change: function () { target_change.call(this, frm); },
-						},
-						{
-							fieldname: "recipient_summary", fieldtype: "Data", label: __("المستلم"),
-							in_list_view: 1, columns: 6, read_only: 1,
-							default: "افتح الصف لتحديد المستلم", formatter: (value) => esc(value),
-						},
-						{
-							fieldname: "user", fieldtype: "Link", label: __("الموظف"), options: "User",
-							in_list_view: 0, depends_on: 'eval:doc.type==="user"',
-							get_query: () => ({ filters: { enabled: 1, user_type: "System User" } }),
-							change: function () { target_change.call(this, frm); },
-						},
-						{
-							fieldname: "role", fieldtype: "Link", label: __("الدور"), options: "Role",
-							in_list_view: 0, depends_on: 'eval:doc.type==="role"',
-							change: function () { target_change.call(this, frm); },
-						},
-						{
-							fieldname: "field", fieldtype: "Select", label: __("حقل المسؤول"), options: field_options,
-							in_list_view: 0, depends_on: 'eval:doc.type==="field"',
-							change: function () { target_change.call(this, frm); },
-						},
-					],
-				},
+				{ fieldname: "targets_list", fieldtype: "HTML" },
+				{ fieldname: "add_target", fieldtype: "Button", label: __("إضافة مستلم"), click: () => edit_recipient() },
 				{
 					fieldname: "save_note", fieldtype: "HTML",
 					options: rtl("بعد تطبيق الاختيارات، احفظ سير العمل لتفعيلها."),
@@ -196,13 +219,25 @@
 			],
 			primary_action_label: __("تطبيق الاختيارات"),
 			async primary_action() {
-				const normalized = normalize_targets(dialog.fields_dict.targets.grid.get_data(), allowed_fields);
+				if (!can_edit(frm)) return;
+				const normalized = normalize_targets(targets, allowed_fields);
 				await frappe.model.set_value(cdt, cdn, TARGETS_FIELD,
 					JSON.stringify({ version: 1, targets: normalized }));
 				render_summary(frm, cdt, cdn);
 				dialog.hide();
 			},
 		});
+		dialog.fields_dict.targets_list.$wrapper.on("click.namar-routing", "button[data-routing-action]", (event) => {
+			if (!can_edit(frm)) return;
+			const index = Number(event.currentTarget.dataset.index);
+			if (!Number.isInteger(index) || index < 0 || index >= targets.length) return;
+			if (event.currentTarget.dataset.routingAction === "edit") return edit_recipient(index);
+			if (event.currentTarget.dataset.routingAction === "remove") {
+				targets.splice(index, 1);
+				render_targets();
+			}
+		});
+		render_targets();
 		dialog.$wrapper.attr("dir", "rtl");
 		dialog.$wrapper.find(".modal-body, .modal-title, .control-label").css("text-align", "right");
 		dialog.show();
