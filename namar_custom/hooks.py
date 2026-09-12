@@ -59,6 +59,9 @@ jinja = {
 # Keep this production branch intentionally narrow. Do not merge the broad
 # test branch into production; add only approved production hooks here.
 doc_events = {
+    "*": {
+        "after_delete": ["namar_custom.mentions.reference_cleanup.cleanup_deleted_reference"],
+    },
     "ToDo": {
         "on_change": [
             "namar_custom.mentions.events.sync_linked_mentions_on_todo_change"

@@ -8,6 +8,7 @@ from frappe.desk.form import assign_to
 from frappe.model.workflow import get_transitions, get_workflow_name, get_workflow_state_field
 from frappe.utils import get_absolute_url, nowdate
 
+from namar_custom.followups.reference_access import quiet_reference_errors, reference_exists
 from namar_custom.followups.logic import (
     APPROVAL_SEARCH_SCOPES,
     FOLLOWUP_SEARCH_SCOPES,
@@ -121,8 +122,13 @@ def _readable_reference_title(
 
     title = name
     try:
-        doc = frappe.get_doc(doctype, name)
-        doc.check_permission("read")
+        with quiet_reference_errors(frappe):
+            if not reference_exists(frappe, doctype, name):
+                if cache is not None:
+                    cache[key] = title
+                return title
+            doc = frappe.get_doc(doctype, name)
+            doc.check_permission("read")
     except (frappe.DoesNotExistError, frappe.PermissionError):
         pass
     else:

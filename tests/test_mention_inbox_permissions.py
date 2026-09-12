@@ -55,6 +55,14 @@ class FakeMentionDatabase:
     def __init__(self, thread_rows: list[dict]):
         self.thread_rows = thread_rows
         self.get_values_calls: list[tuple[str, object, object, dict]] = []
+        self.references = {
+            (row.get("reference_doctype"), row.get("reference_name"))
+            for row in thread_rows
+        }
+
+    def get_value(self, doctype, name, fieldname="name", **kwargs):
+        name = name.get("name") if isinstance(name, dict) else name
+        return name if (doctype, name) in self.references else None
 
     def get_values(self, doctype, filters=None, fieldname="name", **kwargs):
         self.get_values_calls.append((doctype, filters, fieldname, kwargs))
@@ -123,6 +131,7 @@ def load_mention_service(
     fake_frappe = ModuleType("frappe")
     fake_frappe.session = SimpleNamespace(user=user)
     fake_frappe.db = FakeMentionDatabase(thread_rows)
+    fake_frappe.get_meta = lambda doctype: SimpleNamespace(issingle=False, is_virtual=False)
     fake_frappe._dict = FakeFrappeDict
     fake_frappe.ValidationError = type("ValidationError", (Exception,), {})
     fake_frappe.PermissionError = type("PermissionError", (Exception,), {})

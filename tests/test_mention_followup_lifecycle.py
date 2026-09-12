@@ -55,6 +55,7 @@ class FakeDatabase:
         self.todos: dict[str, FakeDocument] = {}
         self.events: dict[str, FakeDocument] = {}
         self.comments: dict[str, FakeDict] = {}
+        self.references: set[tuple[str, str]] = set()
 
     def table_exists(self, doctype):
         return doctype in {"Namar Mention Thread", "Namar Mention Event"}
@@ -72,6 +73,9 @@ class FakeDatabase:
         return rows
 
     def get_value(self, doctype, filters, fieldname="name", **kwargs):
+        name = filters.get("name") if isinstance(filters, dict) else filters
+        if (doctype, name) in self.references:
+            return name
         if doctype == "User" and isinstance(filters, dict):
             return filters.get("name")
         if doctype == "Namar Mention Thread" and isinstance(filters, str):
@@ -110,6 +114,7 @@ def load_events_module():
     database = FakeDatabase()
     fake_frappe = ModuleType("frappe")
     fake_frappe.db = database
+    fake_frappe.get_meta = lambda doctype: SimpleNamespace(issingle=False, is_virtual=False)
     fake_frappe.flags = SimpleNamespace()
     fake_frappe.session = SimpleNamespace(user="employee@example.com")
     fake_frappe.ValidationError = type("ValidationError", (Exception,), {})
@@ -208,6 +213,7 @@ def make_thread(
         },
     )
     database.threads[thread.name] = thread
+    database.references.add((thread.reference_doctype, thread.reference_name))
     return thread
 
 

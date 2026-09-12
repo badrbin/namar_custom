@@ -91,6 +91,8 @@ def load_service(*, action_rows=None, count_rows=None):
     fake_frappe.PermissionError = type("PermissionError", (Exception,), {})
     fake_frappe.ValidationError = type("ValidationError", (Exception,), {})
     fake_frappe.DoesNotExistError = type("DoesNotExistError", (Exception,), {})
+    fake_frappe.get_meta = lambda doctype: SimpleNamespace(issingle=False, is_virtual=False)
+    fake_frappe.db = SimpleNamespace(get_value=lambda *args, **kwargs: None)
     fake_frappe.get_list_calls = []
 
     def throw(message, exc_type=Exception):
