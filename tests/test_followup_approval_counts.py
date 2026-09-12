@@ -91,7 +91,9 @@ def load_service(*, action_rows=None, count_rows=None):
     fake_frappe.PermissionError = type("PermissionError", (Exception,), {})
     fake_frappe.ValidationError = type("ValidationError", (Exception,), {})
     fake_frappe.DoesNotExistError = type("DoesNotExistError", (Exception,), {})
-    fake_frappe.get_meta = lambda doctype: SimpleNamespace(issingle=False, is_virtual=False)
+    fake_frappe.get_meta = lambda doctype: SimpleNamespace(
+        issingle=False, is_virtual=False, has_field=lambda name: False,
+    )
     fake_frappe.db = SimpleNamespace(get_value=lambda *args, **kwargs: None)
     fake_frappe.get_list_calls = []
 
@@ -123,6 +125,7 @@ def load_service(*, action_rows=None, count_rows=None):
     fake_workflow.get_transitions = lambda doc: []
     fake_workflow.get_workflow_name = lambda doctype: None
     fake_workflow.get_workflow_state_field = lambda workflow: None
+    fake_workflow.get_workflow_safe_globals = lambda: {}
     fake_model.workflow = fake_workflow
     fake_frappe.model = fake_model
 

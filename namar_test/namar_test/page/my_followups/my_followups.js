@@ -814,6 +814,7 @@ class NamarMyFollowups {
 							<span>${this.escape(requester_label)} ${this.escape(requester)}</span>
 						</div>
 					` : ""}
+					${this.state.source === "approvals" ? this.approval_routing_notice(item) : ""}
 				</div>
 			</article>
 		`;
@@ -1325,6 +1326,7 @@ class NamarMyFollowups {
 							${approver ? `<span>${this.icon("assign", "xs")}${this.escape(__("مخصص إلى"))} ${this.escape(approver)}</span>` : ""}
 							${detail.creation ? `<span>${this.icon("calendar", "xs")}${this.escape(this.format_datetime(detail.creation))}</span>` : ""}
 						</div>
+						${this.approval_routing_notice(detail)}
 					</section>
 
 					<section class="mf-section">
@@ -1349,6 +1351,15 @@ class NamarMyFollowups {
 				</footer>
 			</div>
 		`);
+	}
+
+	approval_routing_notice(item) {
+		const routing = item.routing || {};
+		if (!routing.fallback && routing.mode !== "Targets") return "";
+		const note = this.first(routing.note, routing.fallback
+			? __("تعذر تحديد المستلمين؛ متاحة حسب الدور")
+			: __("موجّه إليك ضمن مستلمي المرحلة"));
+		return `<p class="mf-approval-routing-notice" dir="rtl">${this.escape(note)}</p>`;
 	}
 
 	render_timeline(items, { include_current = false, current_label = "" } = {}) {

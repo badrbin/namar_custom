@@ -122,6 +122,9 @@ override_whitelisted_methods = {
 }
 
 doc_events = {
+    "Workflow": {
+        "validate": ["namar_test.followups.approval_routing_settings.validate_workflow_approval_routing"],
+    },
     "*": {
         "after_delete": ["namar_test.mentions.reference_cleanup.cleanup_deleted_reference"],
     },
@@ -186,6 +189,7 @@ scheduler_events = {
 }
 
 doctype_js = {
+    "Workflow": "public/js/doctype/workflow_approval_routing.js",
     "Cutting Template": "public/js/doctype/cutting_template_form.js",
     "Delivery Note": "public/js/doctype/delivery_note_form.js",
     "Installation Note": "public/js/doctype/installation_note_form.js",
