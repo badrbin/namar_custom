@@ -20,15 +20,19 @@ EVENTS_PATH = (
 
 
 class FakeDatabase:
+    references = {("Material Request", "MREQ-1"), ("Material Request", "MREQ-2")}
+
     def get_value(self, doctype, filters, fieldname, **kwargs):
         if doctype == "User":
             return filters.get("name")
-        return None
+        name = filters.get("name") if isinstance(filters, dict) else filters
+        return name if (doctype, name) in self.references else None
 
 
 def load_events_module(*, can_read: bool = True):
     fake_frappe = ModuleType("frappe")
     fake_frappe.db = FakeDatabase()
+    fake_frappe.get_meta = lambda doctype: SimpleNamespace(issingle=False, is_virtual=False)
     fake_frappe.has_permission = lambda *args, **kwargs: can_read
     fake_frappe.DoesNotExistError = type("DoesNotExistError", (Exception,), {})
     fake_frappe.PermissionError = type("PermissionError", (Exception,), {})

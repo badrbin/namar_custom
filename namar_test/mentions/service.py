@@ -9,6 +9,7 @@ import frappe
 from frappe.utils import get_absolute_url, now_datetime
 
 from namar_test.followups import service as followup_service
+from namar_test.followups.reference_access import can_read_reference
 from namar_test.followups.logic import (
     MENTION_SEARCH_SCOPES,
     MAX_DESCRIPTION_LENGTH,
@@ -161,17 +162,7 @@ def _get_reference_doc(thread):
 
 
 def _can_read_reference(row, user: str) -> bool:
-    try:
-        return bool(
-            frappe.has_permission(
-                row.reference_doctype,
-                "read",
-                doc=row.reference_name,
-                user=user,
-            )
-        )
-    except (frappe.DoesNotExistError, frappe.PermissionError):
-        return False
+    return can_read_reference(frappe, user, row.reference_doctype, row.reference_name)
 
 
 def _is_unread(row) -> bool:

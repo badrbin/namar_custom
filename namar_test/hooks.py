@@ -122,6 +122,9 @@ override_whitelisted_methods = {
 }
 
 doc_events = {
+    "*": {
+        "after_delete": ["namar_test.mentions.reference_cleanup.cleanup_deleted_reference"],
+    },
     "ToDo": {
         "on_change": [
             "namar_test.mentions.events.sync_linked_mentions_on_todo_change"

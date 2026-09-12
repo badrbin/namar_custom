@@ -8,6 +8,7 @@ import frappe
 from frappe.desk.notifications import extract_mentions
 from frappe.utils import get_datetime, now_datetime
 
+from namar_test.followups.reference_access import can_read_reference, reference_exists
 from namar_test.followups.logic import (
     MAX_NOTE_LENGTH,
     MAX_REFERENCE_LENGTH,
@@ -59,17 +60,7 @@ def _eligible_recipient(user: str) -> bool:
 
 
 def _can_read_reference(user: str, reference_doctype: str, reference_name: str) -> bool:
-    try:
-        return bool(
-            frappe.has_permission(
-                reference_doctype,
-                "read",
-                doc=reference_name,
-                user=user,
-            )
-        )
-    except (frappe.DoesNotExistError, frappe.PermissionError):
-        return False
+    return can_read_reference(frappe, user, reference_doctype, reference_name)
 
 
 def _enqueue_snapshot(comment_doc: Any, recipients: Iterable[str], from_user: str) -> None:
@@ -510,6 +501,10 @@ def process_mention_event(
     if event_key != expected_event_key or for_user not in recipients:
         return None
     if not _eligible_recipient(for_user):
+        return None
+    # Lock source before thread, matching deletion's reference -> thread order.
+    # A queued Comment snapshot must never recreate an inbox after its source is gone.
+    if not reference_exists(frappe, reference_doctype, reference_name, for_update=True):
         return None
     if not _can_read_reference(for_user, reference_doctype, reference_name):
         return None
