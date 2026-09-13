@@ -1,13 +1,22 @@
 from __future__ import annotations
 
 from collections import Counter
+from contextlib import contextmanager
 import json
+import sqlite3
 import sys
 from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 from test_followup_approval_counts import FakeFrappeDict, load_service, workflow_action
+
+try:
+    from pypika import Case, Table
+    from pypika.dialects import MySQLQueryBuilder
+    from pypika.functions import Cast
+except ImportError:
+    MySQLQueryBuilder = None
 
 
 FIELD = "custom_followups_routing_targets"
@@ -715,6 +724,144 @@ class ApprovalRoutingTestCase(unittest.TestCase):
         self.assertEqual(sorted(sizes), [250, 2000, 2000])
         self.assertEqual(len(runtime.constructed_docs), 4250)
         self.assertEqual(len(runtime.permission_reads), 4250)
+
+
+@contextmanager
+def projected_child_reader(runtime, child_doctype, columns):
+    """Exercise the compiled PyPika SELECT against a local collation model.
+
+    Only MariaDB's BINARY cast is translated to SQLite BLOB for execution;
+    SELECT/WHERE/CASE and quoting come from the production builder unchanged.
+    Production Frappe additionally binds query values when its QB.run walks it.
+    """
+    runtime.projection_sql = []
+    runtime.projected_transport = []
+    runtime.frappe.db.db_type = "mariadb"
+    runtime.frappe.db.get_table_columns = lambda doctype: list(columns)
+
+    class Query(MySQLQueryBuilder):
+        def run(self, *, as_dict):
+            sql = self.get_sql()
+            runtime.projection_sql.append(sql)
+            connection = sqlite3.connect(":memory:")
+            connection.row_factory = sqlite3.Row
+            connection.create_collation("FRAPPE_TEST_CI", lambda a, b: (a.rstrip().casefold() > b.rstrip().casefold()) - (a.rstrip().casefold() < b.rstrip().casefold()))
+            table = '"' + ("tab" + child_doctype).replace('"', '""') + '"'
+            quoted = ['"' + column.replace('"', '""') + '"' for column in columns]
+            declarations = [name + (" INTEGER" if column in ("idx", "qty") else " TEXT COLLATE FRAPPE_TEST_CI") for name, column in zip(quoted, columns)]
+            connection.execute("CREATE TABLE " + table + " (" + ",".join(declarations) + ")")
+            connection.executemany(
+                "INSERT INTO " + table + " VALUES (" + ",".join("?" for _ in columns) + ")",
+                [[row.get(column) for column in columns] for row in runtime.data[child_doctype]],
+            )
+            rows = [FakeFrappeDict(row) for row in connection.execute(sql.replace(" AS BINARY)", " AS BLOB)"))]
+            connection.close()
+            runtime.projected_transport.extend(FakeFrappeDict(row) for row in rows)
+            return rows
+
+    runtime.frappe.qb = SimpleNamespace(DocType=lambda doctype: Table("tab" + doctype), from_=lambda table: Query().from_(table))
+    query_module = ModuleType("frappe.query_builder")
+    query_module.Case = Case
+    functions_module = ModuleType("frappe.query_builder.functions")
+    functions_module.Cast = Cast
+    with patch.dict(sys.modules, {"frappe.query_builder": query_module, "frappe.query_builder.functions": functions_module}):
+        yield
+
+
+@unittest.skipIf(MySQLQueryBuilder is None, "PyPika is supplied by the Frappe runtime")
+class ChildProjectionTestCase(unittest.TestCase):
+    def make_runtime(self):
+        runtime = RoutingRuntime([{"type": "user", "user": A}])
+        child_doctype = "Material Request Item"
+        runtime.child_tables["Material Request"] = [("items", child_doctype)]
+        parent = runtime.data["Material Request"][0].name
+        rows = [FakeFrappeDict(
+            name=name, parent=parent, parenttype=parenttype, parentfield=parentfield,
+            idx=idx, qty=7, extra_field="كل الأعمدة محفوظة", nullable_field=None,
+        ) for name, parenttype, parentfield, idx in (
+            ("normal", "Material Request", "items", 2),
+            ("different-case", "material request", "ITEMS", 1),
+            ("trailing-space", "Material Request ", "items ", 0),
+            ("null-idx", "Material Request", "items", None),
+            ("wrong-type", "Sales Order", "items", 5),
+            ("wrong-field", "Material Request", "other_items", 6),
+            ("null-type", None, "items", 8),
+        )]
+        runtime.data[child_doctype] = rows
+        columns = list(rows[0])
+        return runtime, child_doctype, columns
+
+    def test_projection_restores_all_values_before_constructor_and_preserves_variants(self):
+        runtime, child_doctype, columns = self.make_runtime()
+        with projected_child_reader(runtime, child_doctype, columns):
+            runtime.approvals()
+        children = runtime.constructed_docs[0]["items"]
+        self.assertEqual([row["name"] for row in children], ["null-idx", "trailing-space", "different-case", "normal"])
+        expected = {row["name"]: row for row in runtime.data[child_doctype]}
+        for row in children:
+            self.assertEqual({column: row[column] for column in columns}, expected[row["name"]])
+            self.assertEqual(row["doctype"], child_doctype)
+            self.assertIsNone(row["nullable_field"])
+        transport = {row["name"]: row for row in runtime.projected_transport}
+        self.assertIsNone(transport["normal"]["parenttype"])
+        self.assertIsNone(transport["normal"]["parentfield"])
+        self.assertEqual(transport["different-case"]["parenttype"], "material request")
+        self.assertEqual(transport["different-case"]["parentfield"], "ITEMS")
+        self.assertEqual(transport["trailing-space"]["parenttype"], "Material Request ")
+        self.assertEqual(transport["trailing-space"]["parentfield"], "items ")
+        sql = runtime.projection_sql[0]
+        select, where = sql.split(" WHERE ", 1)
+        self.assertEqual(select.count("CASE WHEN"), 2)
+        self.assertNotIn("BINARY", where)
+        self.assertIn("`parenttype`=", where)
+        self.assertIn("`parentfield`=", where)
+        self.assertIn("`parent` IN ", where)
+        self.assertNotIn("ORDER BY", sql)
+        self.assertEqual(len(runtime.permission_reads), 1)
+
+    def test_scope_values_with_quotes_stay_values_in_compiled_query(self):
+        runtime, child_doctype, columns = self.make_runtime()
+        parenttype = "Material Request' OR '1'='1"
+        parentfield = "items'; SELECT 1 --"
+        wanted = runtime.data[child_doctype][0]
+        wanted.parenttype = parenttype
+        wanted.parentfield = parentfield
+        with projected_child_reader(runtime, child_doctype, columns):
+            resolver = runtime.service.ApprovalRoutingResolver(runtime.frappe, A, runtime.service.get_workflow_safe_globals)
+            rows = resolver._child_rows(child_doctype, parenttype, parentfield, [wanted.parent])
+        self.assertEqual([row["name"] for row in rows], ["normal"])
+        self.assertEqual(rows[0]["parenttype"], parenttype)
+        self.assertEqual(rows[0]["parentfield"], parentfield)
+
+    def test_other_databases_and_nonstandard_columns_keep_the_original_reader(self):
+        for mode in ("postgres", "unusual-column", "arabic-doctype", "punctuation-doctype"):
+            runtime, child_doctype, columns = self.make_runtime()
+            if mode in ("arabic-doctype", "punctuation-doctype"):
+                replacement = "بنود طلب المواد" if mode == "arabic-doctype" else "Material Request Item (Legacy)"
+                runtime.data[replacement] = runtime.data.pop(child_doctype)
+                child_doctype = replacement
+                runtime.child_tables["Material Request"] = [("items", child_doctype)]
+            if mode == "unusual-column":
+                columns.append("odd`column")
+                runtime.data[child_doctype][0]["odd`column"] = "preserved"
+            with projected_child_reader(runtime, child_doctype, columns):
+                if mode == "postgres":
+                    runtime.frappe.db.db_type = "postgres"
+                runtime.approvals()
+            self.assertEqual(runtime.projection_sql, [])
+            calls = [options for _, doctype, options in runtime.calls if doctype == child_doctype]
+            self.assertTrue(calls)
+            self.assertTrue(all(options["fields"] == ["*"] for options in calls))
+
+    def test_unicode_column_names_remain_projected_when_the_doctype_is_supported(self):
+        runtime, child_doctype, columns = self.make_runtime()
+        columns.append("ملاحظة")
+        runtime.data[child_doctype][0]["ملاحظة"] = "قيمة محفوظة"
+        with projected_child_reader(runtime, child_doctype, columns):
+            runtime.approvals()
+        self.assertTrue(runtime.projection_sql)
+        normal = next(row for row in runtime.constructed_docs[0]["items"] if row["name"] == "normal")
+        self.assertEqual(normal["ملاحظة"], "قيمة محفوظة")
 
 
 if __name__ == "__main__":
