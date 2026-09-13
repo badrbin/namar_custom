@@ -726,11 +726,12 @@ def get_approvals(
         limit_start=start,
         limit_page_length=query_length,
     )
+    routing = resolver.route_rows(rows) if visibility is not None else {}
     reference_title_cache: dict[tuple[str, str], str] = {}
     result = pagination(
         [
             _serialize_workflow_action(
-                row, reference_title_cache, visibility.routing.get(row["name"]) if visibility is not None else None
+                row, reference_title_cache, routing.get(row["name"])
             )
             for row in rows
         ],

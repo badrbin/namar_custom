@@ -31,7 +31,16 @@ TARGET_LABELS = {
 @dataclass
 class ApprovalVisibility:
     excluded_names: set[str]
-    routing: dict[str, dict[str, Any]]
+
+
+@dataclass
+class PreparedApproval:
+    reference: dict[str, Any]
+    targets: list
+    users: dict
+    roles: dict
+    permitted_roles: set
+    transitions: list
 
 
 def _batches(values: Iterable[Any]):
@@ -76,6 +85,7 @@ class ApprovalRoutingResolver:
         self._condition_results = {}
         self._workflow_globals_factory = workflow_globals_factory
         self._visibility: ApprovalVisibility | None = None
+        self._prepared: dict[str, PreparedApproval] = {}
         self._load_rules()
 
     def _meta(self, doctype):
@@ -170,20 +180,20 @@ class ApprovalRoutingResolver:
                 if len(batch) < BATCH_SIZE:
                     break
                 offset += len(batch)
-        routing = self.route_rows(rows)
+        self._prepare_rows(rows)
         self._visibility = ApprovalVisibility(
-            excluded_names={row["name"] for row in rows} - routing.keys(),
-            routing=routing,
+            excluded_names={row["name"] for row in rows if not self._is_visible(row)},
         )
         return self._visibility
 
-    def route_rows(self, rows) -> dict[str, dict[str, Any]]:
-        """Return routing metadata only for visible, already-permitted rows."""
-        rows = [
-            row for row in rows
+    def _prepare_rows(self, rows):
+        """Load native-check inputs once for this request, without output metadata."""
+        configured = [
+            row for row in rows if row["name"] not in self._prepared and self._rule(row)
             if (row.get("reference_doctype"), row.get("workflow_state")) not in self.hidden_states
         ]
-        configured = [row for row in rows if self._rule(row)]
+        if not configured:
+            return
         headers = self._reference_headers(configured)
         targets_by_action = {
             row["name"]: self._resolve_targets(row, headers) for row in configured
@@ -199,6 +209,41 @@ class ApprovalRoutingResolver:
         references = self._reference_values(
             row for row in configured if candidates_by_action[row["name"]]
         )
+        for row in configured:
+            self._prepared[row["name"]] = PreparedApproval(
+                reference=references.get((row.get("reference_doctype"), row.get("reference_name")), {}),
+                targets=candidates_by_action[row["name"]], users=users, roles=roles,
+                permitted_roles=permitted_roles.get(row["name"], set()),
+                transitions=self.transitions.get((row.get("reference_doctype"), row.get("workflow_state")), ()),
+            )
+
+    def _is_visible(self, row) -> bool:
+        if (row.get("reference_doctype"), row.get("workflow_state")) in self.hidden_states:
+            return False
+        if not self._rule(row):
+            return True  # Default roles and malformed-rule fallback.
+        context = self._prepared[row["name"]]
+        candidates = {name for _, members in context.targets for name in members}
+        # The viewer may come from a later target. Check the entire union
+        # before any early exclusion based on another eligible recipient.
+        if self.user in candidates and self._can_approve_reference(
+            context.reference, self.user, context.roles, context.permitted_roles, context.transitions,
+        ):
+            return True
+        for name in sorted(candidates - {self.user}):
+            if self._can_approve_reference(
+                context.reference, name, context.roles, context.permitted_roles, context.transitions,
+            ):
+                return False
+        return True  # No eligible target: retain the standard-role fallback.
+
+    def route_rows(self, rows) -> dict[str, dict[str, Any]]:
+        """Build full metadata only for the requested page/detail rows."""
+        rows = [
+            row for row in rows
+            if (row.get("reference_doctype"), row.get("workflow_state")) not in self.hidden_states
+        ]
+        self._prepare_rows(rows)
         visible = {}
         for row in rows:
             targets = self._rule(row)
@@ -211,11 +256,10 @@ class ApprovalRoutingResolver:
             recipients = set()
             valid_targets = []
             personal_users = set()
-            allowed = permitted_roles.get(row["name"], set())
-            state_key = (row.get("reference_doctype"), row.get("workflow_state"))
-            transitions = self.transitions.get(state_key, ())
-            reference = references.get((row.get("reference_doctype"), row.get("reference_name")), {})
-            for target, candidates in candidates_by_action[row["name"]]:
+            context = self._prepared[row["name"]]
+            users, roles = context.users, context.roles
+            allowed, transitions, reference = context.permitted_roles, context.transitions, context.reference
+            for target, candidates in context.targets:
                 mode = target["type"]
                 if mode == ROLE_TARGET:
                     role = target.get("role")

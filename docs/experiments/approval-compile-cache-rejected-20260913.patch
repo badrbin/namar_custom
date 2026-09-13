@@ -1,0 +1,371 @@
+diff --git a/namar_test/followups/approval_routing.py b/namar_test/followups/approval_routing.py
+index 012430f..3d1d57a 100644
+--- a/namar_test/followups/approval_routing.py
++++ b/namar_test/followups/approval_routing.py
+@@ -2,7 +2,11 @@ from __future__ import annotations
+ 
+ from collections import defaultdict
+ from dataclasses import dataclass
++import ast
++import builtins
++import importlib
+ import re
++from types import CodeType, FunctionType
+ from typing import Any, Iterable
+ 
+ from namar_test.followups.approval_routing_settings import (
+@@ -50,6 +54,133 @@ def role_routing(*, fallback: bool = False) -> dict[str, Any]:
+     }
+ 
+ 
++def _standard_safe_eval_facade(code, eval_globals=None, eval_locals=None):
++    """Shape reference only; never executed instead of Frappe's evaluator."""
++    from frappe.utils.safe_exec import safe_eval
++
++    return safe_eval(code, eval_globals, eval_locals)
++
++
++def _function_stamp(function):
++    if not isinstance(function, FunctionType):
++        return function
++    return (
++        function, function.__code__, function.__defaults__,
++        tuple((function.__kwdefaults__ or {}).items()),
++        tuple(cell.cell_contents for cell in function.__closure__ or ()),
++    )
++
++
++def _restriction_value(value):
++    if isinstance(value, dict):
++        return tuple((key, _restriction_value(item)) for key, item in value.items())
++    if isinstance(value, (set, frozenset)):
++        return frozenset(_restriction_value(item) for item in value)
++    if isinstance(value, (tuple, list)):
++        return tuple(_restriction_value(item) for item in value)
++    return value
++
++
++class RequestLocalSafeEval:
++    """Memoize successful native compilation, never validation or evaluation.
++
++    Unknown/custom entry points retain the original path. Changing the native
++    compiler/policy during this request permanently disables this optimization.
++    """
++
++    def __init__(self, frappe):
++        self.frappe = frappe
++        self._compiled = {}
++        self._signature = None
++        self._disabled = False
++
++    def _native_context(self):
++        facade = self.frappe.safe_eval
++        expected = _standard_safe_eval_facade.__code__
++        if not isinstance(facade, FunctionType) or facade.__globals__ is not self.frappe.__dict__:
++            return None
++        code = facade.__code__
++        if (
++            code.co_code != expected.co_code or code.co_names != expected.co_names
++            or code.co_consts[1:] != expected.co_consts[1:]
++            or code.co_argcount != 3 or code.co_kwonlyargcount or code.co_freevars
++            or facade.__defaults__ != (None, None) or facade.__kwdefaults__
++            or getattr(facade, "__wrapped__", None) is not None
++        ):
++            return None
++        native_module = importlib.import_module("frappe.utils.safe_exec")
++        compiler_module = importlib.import_module("RestrictedPython.compile")
++        transformer_module = importlib.import_module("RestrictedPython.transformer")
++        package = importlib.import_module("RestrictedPython")
++        native = native_module.safe_eval
++        compiler = native.__globals__.get("compile_restricted") if isinstance(native, FunctionType) else None
++        policy = native.__globals__.get("FrappeTransformer") if isinstance(native, FunctionType) else None
++        helper = compiler_module._compile_restricted_mode
++        if (
++            not isinstance(native, FunctionType) or native.__globals__ is not vars(native_module)
++            or getattr(native, "__wrapped__", None) is not None
++            or not isinstance(compiler, FunctionType)
++            or compiler is not compiler_module.compile_restricted or compiler is not package.compile_restricted
++            or compiler.__globals__ is not vars(compiler_module)
++            or compiler.__code__.co_filename != compiler_module.__file__
++            or not isinstance(helper, FunctionType) or helper.__globals__ is not vars(compiler_module)
++            or not isinstance(policy, type) or policy.__module__ != native_module.__name__
++            or policy.__bases__ != (transformer_module.RestrictingNodeTransformer,)
++        ):
++            return None
++        methods = tuple(
++            (cls, name, _function_stamp(value))
++            for cls in policy.__mro__ for name, value in vars(cls).items()
++            if name not in {"__doc__", "__dict__", "__weakref__", "__annotations__"}
++        )
++        restrictions = tuple(
++            (name, _restriction_value(getattr(transformer_module, name)))
++            for name in ("FORBIDDEN_FUNC_NAMES", "INSPECT_ATTRIBUTES", "ALLOWED_FUNC_NAMES", "IOPERATOR_TO_STR")
++        )
++        signature = (
++            _function_stamp(native), _function_stamp(compiler), _function_stamp(helper), methods,
++            restrictions, _function_stamp(transformer_module.copy_locations),
++            _function_stamp(ast.parse), builtins.compile,
++        )
++        hash(signature)  # Unknown mutable custom state follows the uncached path.
++        return native, compiler, policy, signature
++
++    def __call__(self, code, eval_globals=None, eval_locals=None):
++        if self._disabled:
++            return self.frappe.safe_eval(code, eval_globals, eval_locals)
++        try:
++            context = self._native_context()
++        except (ImportError, AttributeError, TypeError):
++            context = None
++        if context is None or (self._signature is not None and self._signature != context[3]):
++            self._compiled.clear()
++            self._disabled = True
++            return self.frappe.safe_eval(code, eval_globals, eval_locals)
++        native, compiler, policy, signature = context
++        self._signature = signature
++
++        def cached_compile(*args, **kwargs):
++            key = (native.__code__, compiler, compiler.__code__, policy, args, tuple(sorted(kwargs.items())))
++            try:
++                hash(key)
++            except TypeError:
++                return compiler(*args, **kwargs)
++            if key not in self._compiled:
++                compiled = compiler(*args, **kwargs)
++                if isinstance(compiled, CodeType):
++                    self._compiled[key] = compiled
++                return compiled
++            return self._compiled[key]
++
++        # Use the current native body, validator and guard globals each time.
++        # Only this private function's compiler binding changes.
++        namespace = dict(native.__globals__)
++        namespace["compile_restricted"] = cached_compile
++        evaluate = FunctionType(native.__code__, namespace, native.__name__, native.__defaults__, native.__closure__)
++        evaluate.__kwdefaults__ = dict(native.__kwdefaults__) if native.__kwdefaults__ is not None else None
++        return evaluate(code, eval_globals, eval_locals)
++
++
+ class ApprovalRoutingResolver:
+     """Narrow My Followups visibility after the normal Workflow Action query.
+ 
+@@ -74,6 +205,7 @@ class ApprovalRoutingResolver:
+         self._documents = {}
+         self._read_permissions = {}
+         self._condition_results = {}
++        self._condition_evaluator = RequestLocalSafeEval(frappe)
+         self._workflow_globals_factory = workflow_globals_factory
+         self._visibility: ApprovalVisibility | None = None
+         self._load_rules()
+@@ -491,7 +623,7 @@ class ApprovalRoutingResolver:
+         previous_error = flags.get("error_message", missing) if flags is not None else missing
+         try:
+             doc = self._documents[(reference["doctype"], reference["name"])]
+-            result = bool(self.frappe.safe_eval(condition, globals_, {"doc": doc.as_dict()}))
++            result = bool(self._condition_evaluator(condition, globals_, {"doc": doc.as_dict()}))
+         except (
+             SyntaxError, NameError, AttributeError, TypeError, ValueError,
+             LookupError, ArithmeticError,
+
+diff --git a/tests/test_approval_safe_eval_cache.py b/tests/test_approval_safe_eval_cache.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_approval_safe_eval_cache.py
+@@ -0,0 +1,198 @@
++from __future__ import annotations
++
++import ast
++from contextlib import contextmanager
++import importlib
++import os
++from pathlib import Path
++import sys
++import types
++import unittest
++from unittest.mock import patch
++
++from test_followup_approval_counts import load_service
++
++
++SOURCE = Path(os.environ.get("FRAPPE_TEST_SOURCE_ROOT", "/nonexistent"))
++try:
++    import RestrictedPython
++    import RestrictedPython.Guards
++    from RestrictedPython.transformer import RestrictingNodeTransformer
++except ImportError:
++    RestrictedPython = None
++
++
++@contextmanager
++def native_evaluator():
++    """Use actual Frappe source AST and actual RestrictedPython, not builtin eval."""
++    service, _ = load_service()
++    RequestLocalSafeEval = service.ApprovalRoutingResolver.__init__.__globals__["RequestLocalSafeEval"]
++
++    frappe = types.ModuleType("frappe")
++    utils = types.ModuleType("frappe.utils")
++    native = types.ModuleType("frappe.utils.safe_exec")
++    native.__file__ = str(SOURCE / "utils" / "safe_exec.py")
++    inplace = {}
++    exec(compile((SOURCE / "utils" / "inplacevar.py").read_text(), str(SOURCE / "utils" / "inplacevar.py"), "exec"), inplace)
++    native.__dict__.update(
++        ast=ast, types=types, RestrictedPython=RestrictedPython,
++        RestrictingNodeTransformer=RestrictingNodeTransformer,
++        compile_restricted=RestrictedPython.compile_restricted,
++        ARGUMENT_NOT_SET=object(), protected_inplacevar=inplace["protected_inplacevar"],
++    )
++    selected = {
++        "FrappeTransformer", "safe_eval", "_validate_safe_eval_syntax", "_getitem",
++        "UNSAFE_ATTRIBUTES", "_get_attr_for_eval", "_validate_attribute_read", "WHITELISTED_SAFE_EVAL_GLOBALS",
++    }
++    tree = ast.parse(Path(native.__file__).read_text())
++    nodes = [node for node in tree.body if getattr(node, "name", None) in selected or (
++        isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id in selected for target in node.targets)
++    )]
++    exec(compile(ast.Module(body=nodes, type_ignores=[]), native.__file__, "exec"), native.__dict__)
++    facade_source = SOURCE / "__init__.py"
++    facade = next(node for node in ast.parse(facade_source.read_text()).body if isinstance(node, ast.FunctionDef) and node.name == "safe_eval")
++    exec(compile(ast.Module(body=[facade], type_ignores=[]), str(facade_source), "exec"), frappe.__dict__)
++    utils.safe_exec = native
++    frappe.utils = utils
++    with patch.dict(sys.modules, {"frappe": frappe, "frappe.utils": utils, "frappe.utils.safe_exec": native}):
++        yield frappe, native, RequestLocalSafeEval(frappe)
++
++
++@contextmanager
++def call_counts(*functions):
++    counts = {function.__code__: 0 for function in functions}
++    previous = sys.getprofile()
++
++    def count(frame, event, arg):
++        if event == "call" and frame.f_code in counts:
++            counts[frame.f_code] += 1
++
++    sys.setprofile(count)
++    try:
++        yield counts
++    finally:
++        sys.setprofile(previous)
++
++
++@unittest.skipUnless(RestrictedPython is not None and (SOURCE / "utils" / "safe_exec.py").is_file(), "Provide Frappe source and its RestrictedPython dependency for native security checks")
++class NativeSafeEvalCacheTestCase(unittest.TestCase):
++    def test_compiles_once_but_validates_and_uses_current_data_every_time(self):
++        with native_evaluator() as (frappe, native, evaluate):
++            original_globals = dict(native.__dict__)
++            compiler = native.compile_restricted
++            validator = native._validate_safe_eval_syntax
++            with call_counts(compiler, validator) as counts:
++                for value in (1, 3, 5, 8):
++                    self.assertEqual(evaluate("value > 3", {}, {"value": value}), value > 3)
++            self.assertEqual(counts[compiler.__code__], 1)
++            self.assertEqual(counts[validator.__code__], 4)
++            self.assertFalse(evaluate._disabled)
++            self.assertEqual(native.__dict__, original_globals)
++
++    def test_native_parity_for_nfkc_and_blocked_syntax_on_first_and_repeated_use(self):
++        expressions = (
++            "value + 1", "ｖａｌｕｅ + 1", "(lambda: 1)()", "(value := 3)",
++            "_private", "value.__class__", "mapping['_private']", "__import__('os')", "missing_name",
++        )
++        with native_evaluator() as (_, native, evaluate):
++            for expression in expressions:
++                for repeat in range(2):
++                    outcomes = []
++                    for engine in (native.safe_eval, evaluate):
++                        try:
++                            outcomes.append(("value", engine(expression, {}, {"value": 2, "mapping": {"_private": 3}})))
++                        except Exception as error:
++                            outcomes.append(("error", type(error)))
++                    with self.subTest(expression=expression, repeat=repeat):
++                        self.assertEqual(*outcomes)
++
++    def test_fresh_globals_guard_overrides_and_mutable_locals_are_not_shared(self):
++        with native_evaluator() as (_, native, evaluate):
++            for user in ("A", "B"):
++                values = []
++                globals_ = {"who": lambda: user, "__builtins__": {"__import__": __import__}, "_getitem_": lambda *args: "bypass"}
++                self.assertEqual(evaluate("who()", globals_, {}), user)
++                self.assertEqual(globals_["__builtins__"], {})
++                self.assertIs(globals_["_getitem_"], native.WHITELISTED_SAFE_EVAL_GLOBALS["_getitem_"])
++                self.assertIsNone(evaluate("values.append(1)", {}, {"values": values}))
++                self.assertEqual(values, [1])
++
++    def test_bad_compilation_is_not_cached_and_execution_result_is_never_cached(self):
++        with native_evaluator() as (_, native, evaluate):
++            compiler = native.compile_restricted
++            with call_counts(compiler) as counts:
++                for _ in range(2):
++                    with self.assertRaises(SyntaxError):
++                        evaluate("_blocked", {}, {})
++            self.assertEqual(counts[compiler.__code__], 2)
++            with self.assertRaises(ZeroDivisionError):
++                evaluate("1 / value", {}, {"value": 0})
++            self.assertEqual(evaluate("1 / value", {}, {"value": 2}), 0.5)
++
++    def test_policy_method_hardening_invalidates_cached_code_for_the_rest_of_request(self):
++        with native_evaluator() as (_, native, evaluate):
++            policy = native.FrappeTransformer
++            original = policy.check_name
++            self.assertTrue(evaluate("allowed_name", {}, {"allowed_name": True}))
++
++            def reject(self, node, name, *args, **kwargs):
++                if name == "allowed_name":
++                    self.error(node, "new restriction")
++                else:
++                    original(self, node, name, *args, **kwargs)
++
++            with patch.object(policy, "check_name", reject):
++                with self.assertRaises(SyntaxError):
++                    evaluate("allowed_name", {}, {"allowed_name": True})
++            self.assertTrue(evaluate._disabled)
++            self.assertEqual(evaluate._compiled, {})
++            with call_counts(native.compile_restricted) as counts:
++                self.assertTrue(evaluate("allowed_name", {}, {"allowed_name": True}))
++            self.assertEqual(counts[native.compile_restricted.__code__], 1)
++
++    def test_changed_restriction_constants_invalidate_cache(self):
++        transformer = importlib.import_module("RestrictedPython.transformer")
++        with native_evaluator() as (_, native, evaluate):
++            self.assertTrue(evaluate("allowed_name", {}, {"allowed_name": True}))
++            with patch.object(transformer, "FORBIDDEN_FUNC_NAMES", transformer.FORBIDDEN_FUNC_NAMES | {"allowed_name"}):
++                with self.assertRaises(SyntaxError):
++                    evaluate("allowed_name", {}, {"allowed_name": True})
++            self.assertTrue(evaluate._disabled)
++
++    def test_validator_and_whitelist_changes_take_effect_on_every_evaluation(self):
++        with native_evaluator() as (_, native, evaluate):
++            self.assertEqual(evaluate("int(value)", {}, {"value": "2"}), 2)
++            with patch.dict(native.WHITELISTED_SAFE_EVAL_GLOBALS, {"int": lambda value: 9}):
++                self.assertEqual(evaluate("int(value)", {}, {"value": "2"}), 9)
++            def reject(code):
++                raise SyntaxError("current validator")
++            with patch.object(native, "_validate_safe_eval_syntax", reject):
++                with self.assertRaisesRegex(SyntaxError, "current validator"):
++                    evaluate("int(value)", {}, {"value": "2"})
++
++    def test_custom_facade_and_compiler_paths_are_not_bypassed(self):
++        with native_evaluator() as (frappe, native, evaluate):
++            self.assertEqual(evaluate("1 + 1", {}, {}), 2)
++            calls = []
++            original = frappe.safe_eval
++            def custom(code, globals_, locals_):
++                calls.append(code)
++                return original(code, globals_, locals_)
++            with patch.object(frappe, "safe_eval", custom):
++                self.assertEqual(evaluate("1 + 1", {}, {}), 2)
++            self.assertEqual(calls, ["1 + 1"])
++            self.assertTrue(evaluate._disabled)
++        with native_evaluator() as (_, native, evaluate):
++            original = native.compile_restricted
++            calls = []
++            def custom_compile(*args, **kwargs):
++                calls.append(args[0])
++                return original(*args, **kwargs)
++            with patch.object(native, "compile_restricted", custom_compile):
++                self.assertEqual(evaluate("1 + 1", {}, {}), 2)
++                self.assertEqual(evaluate("1 + 1", {}, {}), 2)
++            self.assertEqual(calls, ["1 + 1", "1 + 1"])
++
++
++if __name__ == "__main__":
++    unittest.main()

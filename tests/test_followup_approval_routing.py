@@ -725,6 +725,83 @@ class ApprovalRoutingTestCase(unittest.TestCase):
         self.assertEqual(len(runtime.constructed_docs), 4250)
         self.assertEqual(len(runtime.permission_reads), 4250)
 
+    def test_bulk_visibility_checks_viewer_before_other_targets_in_the_whole_union(self):
+        alternatives = (
+            [{"type": "user", "user": B}, {"type": "user", "user": A}],
+            [{"type": "role", "role": "Only B"}, {"type": "user", "user": A}],
+            [{"type": "user", "user": B}, {"type": "role", "role": "Branch"}],
+        )
+        for targets in alternatives:
+            for sequence in (targets, list(reversed(targets))):
+                runtime = RoutingRuntime(sequence)
+                runtime.data["Role"].append(FakeFrappeDict(name="Only B"))
+                runtime.data["Has Role"].append(FakeFrappeDict(parent=B, parenttype="User", role="Only B"))
+                with self.subTest(targets=sequence):
+                    self.assertEqual(runtime.service._approval_counts(), {"open": 1})
+                    self.assertEqual([user for _, _, user in runtime.permission_reads], [A])
+
+    def test_bulk_excludes_only_after_viewer_fails_and_another_recipient_passes(self):
+        for failure in ("read", "self", "condition", "all"):
+            runtime = RoutingRuntime([{"type": "user", "user": B}, {"type": "user", "user": A}])
+            reference = runtime.data["Material Request"][0]
+            if failure in ("read", "all"):
+                runtime.read_denied.add((reference.name, A))
+            if failure == "all":
+                runtime.read_denied.add((reference.name, B))
+            elif failure == "self":
+                runtime.data["Workflow Transition"][0].allow_self_approval = 0
+            elif failure == "condition":
+                runtime.data["Workflow Transition"][0].condition = f"frappe.session.user == '{B}'"
+            with self.subTest(failure=failure):
+                self.assertEqual(runtime.service._approval_counts(), {"open": 1 if failure == "all" else 0})
+                self.assertEqual([user for _, _, user in runtime.permission_reads], [A, B])
+
+    def test_bulk_decision_is_boolean_only_but_page_metadata_contains_all_valid_targets(self):
+        runtime = RoutingRuntime([{"type": "user", "user": B}, {"type": "user", "user": A}], size=60)
+        expected_resolver = runtime.service.ApprovalRoutingResolver(runtime.frappe, A, runtime.service.get_workflow_safe_globals)
+        expected = expected_resolver.route_rows(runtime.data["Workflow Action"])
+        runtime.permission_reads.clear()
+        runtime.constructed_docs.clear()
+        resolver = runtime.service.ApprovalRoutingResolver(runtime.frappe, A, runtime.service.get_workflow_safe_globals)
+        visibility = resolver.exclusions()
+        self.assertEqual(visibility.excluded_names, set())
+        self.assertFalse(hasattr(visibility, "routing"))
+        self.assertEqual(Counter(user for _, _, user in runtime.permission_reads), {A: 60})
+        calls_after_bulk = len(runtime.calls)
+        page_rows = runtime.data["Workflow Action"][:2]
+        page = resolver.route_rows(page_rows)
+        self.assertEqual(page, {row.name: expected[row.name] for row in page_rows})
+        self.assertEqual([target["user"] for target in page[page_rows[0].name]["targets"]], [B, A])
+        self.assertEqual(Counter(user for _, _, user in runtime.permission_reads), {A: 60, B: 2})
+        self.assertEqual(len(runtime.calls), calls_after_bulk)
+        self.assertEqual(len(runtime.constructed_docs), 60)
+
+    def test_boolean_decisions_match_full_routing_for_mixed_rules_and_native_guards(self):
+        alternatives = (
+            [{"type": "user", "user": B}, {"type": "owner"}],
+            [{"type": "role", "role": "Branch"}, {"type": "field", "field": "responsible_user"}],
+            [{"type": "user", "user": "missing@example.com"}, {"type": "user", "user": B}],
+        )
+        for targets in alternatives:
+            for self_approval in (0, 1):
+                runtime = RoutingRuntime(targets, size=7)
+                runtime.data["Workflow Transition"][0].allow_self_approval = self_approval
+                runtime.data["Workflow Transition"][0].condition = "doc.owner == frappe.session.user or doc.responsible_user == frappe.session.user"
+                for index, reference in enumerate(runtime.data["Material Request"]):
+                    reference.owner = (A, B, C)[index % 3]
+                    reference.responsible_user = (B, C, A)[index % 3]
+                    if index % 2:
+                        runtime.read_denied.add((reference.name, A))
+                    if index % 3 == 0:
+                        runtime.read_denied.add((reference.name, B))
+                resolver = runtime.service.ApprovalRoutingResolver(runtime.frappe, A, runtime.service.get_workflow_safe_globals)
+                full = resolver.route_rows(runtime.data["Workflow Action"])
+                boolean = runtime.service.ApprovalRoutingResolver(runtime.frappe, A, runtime.service.get_workflow_safe_globals)
+                excluded = boolean.exclusions().excluded_names
+                with self.subTest(targets=targets, self_approval=self_approval):
+                    self.assertEqual(excluded, {row.name for row in runtime.data["Workflow Action"]} - full.keys())
+                    self.assertEqual(boolean.route_rows([row for row in runtime.data["Workflow Action"] if row.name not in excluded]), full)
+
 
 @contextmanager
 def projected_child_reader(runtime, child_doctype, columns):
