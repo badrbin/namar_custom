@@ -166,6 +166,32 @@ class RoutingRuntime:
 
 
 class ApprovalRoutingTestCase(unittest.TestCase):
+    def test_site_switch_skips_routing_queries_and_keeps_native_permissions(self):
+        runtime = RoutingRuntime([{"type": "owner"}], size=4)
+        saved = runtime.data["Workflow Document State"][0][FIELD]
+        runtime.frappe.conf.disable_followup_approval_routing = True
+        runtime.denied.add("WA-00000")
+        with patch.object(runtime.frappe, "get_meta", side_effect=AssertionError("Routing metadata must not load")):
+            self.assertEqual(runtime.service._approval_counts(), {"open": 3})
+            result = runtime.approvals(page_length=2)
+        self.assertEqual(result["counts"], {"open": 3})
+        self.assertEqual(len(result["items"]), 2)
+        self.assertTrue(result["has_more"])
+        self.assertTrue(all(item["routing"]["mode"] == "Role" for item in result["items"]))
+        self.assertTrue(all(kind == "list" and doctype == "Workflow Action" for kind, doctype, _ in runtime.calls))
+        self.assertEqual(runtime.doc_reads, [])
+        self.assertEqual(runtime.permission_reads, [])
+        self.assertEqual(runtime.data["Workflow Document State"][0][FIELD], saved)
+
+    def test_missing_or_false_site_switch_preserves_saved_recipients(self):
+        for config in ({}, {"disable_followup_approval_routing": False}):
+            runtime = RoutingRuntime([{"type": "user", "user": B}])
+            runtime.frappe.conf.update(config)
+            with self.subTest(config=config):
+                self.assertEqual(runtime.ids(), [])
+                runtime.frappe.session.user = B
+                self.assertEqual(runtime.ids(), ["WA-00000"])
+
     def test_default_roles_keep_original_aggregate_and_pagination(self):
         runtime = RoutingRuntime(size=4)
         result = runtime.approvals(page_length=2)

@@ -76,6 +76,9 @@ class ApprovalRoutingResolver:
         return bool(self.rules)
 
     def _load_rules(self) -> None:
+        # Emergency site switch: retain saved recipients and use native roles.
+        if self.frappe.conf.get("disable_followup_approval_routing"):
+            return
         if not self._meta("Workflow Document State").has_field(ROUTING_FIELD):
             return
         workflows = self.frappe.get_all(
