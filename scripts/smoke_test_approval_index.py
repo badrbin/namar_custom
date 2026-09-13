@@ -195,7 +195,7 @@ class Runner:
         self.sources = {actor: self.prefix + " Source " + actor for actor in self.users}
 
     def allowed(self, dt, name):
-        if dt == "User":
+        if dt in ("User", "Raven User"):
             return name in self.users.values()
         return dt in {self.fixture, "Role", "DocType", "Workflow", "Workflow State", "Workflow Action Master"} and (
             name == self.prefix or name.startswith(self.prefix + " "))
@@ -468,14 +468,45 @@ class Runner:
         ensure(all(state == "ready" for rows in observations for _, state in rows), "Concurrent normal/indexed read failed")
         self.journal.event("assertion_passed", scenario="three_actor_concurrent_bounded_read", observations=observations)
 
+    def capture_user_dependents(self):
+        """Journal only Raven profiles auto-created for these new fixture users.
+
+        Raven's User.on_trash hook can modify its parent User while deleting the
+        Raven profile. Delete that proven dependent first; never force-delete a
+        linked User or touch a real Raven profile. Discovery is read-only until
+        the ordinary, fingerprint-checked cleanup loop executes its deletion.
+        """
+        users = [row for row in self.journal.data["targets"] if row["doctype"] == "User" and not row["deleted"]]
+        if not users or not self.admin.doc("DocType", "Raven User", missing=True):
+            return
+        for target in users:
+            user = target["name"]
+            if any(row["doctype"] == "Raven User" and row["name"] == user for row in self.journal.data["targets"]):
+                continue
+            _, parent = self.target("User", user)
+            dependent = self.admin.doc("Raven User", user, missing=True)
+            if dependent is None:
+                continue
+            ensure(parent and dependent.get("user") == user and dependent.get("type") == "User"
+                   and str(dependent.get("full_name") or "").startswith(self.prefix + " ")
+                   and dependent.get("creation") and parent.get("creation")
+                   and dependent["creation"] >= parent["creation"], "Raven dependent is not a proven fixture side effect")
+            ensure(len(self.journal.data["targets"]) < MAX_TARGETS, "Excessive fixture dependents")
+            self.journal.data["targets"].append({"doctype": "Raven User", "name": user, "deleted": False,
+                "fingerprint": {key: dependent[key] for key in ("user", "type", "full_name", "creation")}})
+            self.journal.event("fixture_dependent_discovered", doctype="Raven User", name=user, before=dependent)
+
     def cleanup(self):
+        self.capture_user_dependents()
         order = {self.fixture: 0, "Workflow": 1, "Workflow State": 2, "Workflow Action Master": 3,
-                 "DocType": 4, "User": 5, "Role": 6}
+                 "DocType": 4, "Raven User": 5, "User": 6, "Role": 7}
         errors = []
         for target in sorted(self.journal.data["targets"], key=lambda row: order.get(row["doctype"], 99)):
             if target["deleted"]:
                 continue
             try:
+                if target["doctype"] == "Role":
+                    self.cleanup_role_orphans(target["name"])
                 self.delete(target["doctype"], target["name"])
             except Exception as exc:
                 errors.append({"doctype": target["doctype"], "name": target["name"],
@@ -489,6 +520,41 @@ class Runner:
                                  standard_frappe_retention={"deleted_document_recovery_rows": True, "empty_custom_table": True, "sql_drop": False})
         self.journal.flush()
         ensure(self.journal.data["cleanup_complete"], "Cleanup incomplete; inspect journal and use --cleanup-manifest")
+
+    def cleanup_role_orphans(self, role):
+        """Remove only native child rows orphaned by deletion of our sources.
+
+        Native clear_workflow_actions deletes the parent table directly. Use
+        the standard single-item list deletion endpoint for a proven orphan;
+        REST child deletion would try to save its now-missing parent. One item
+        avoids the bulk endpoint's implicit partial-batch retry or queued jobs.
+        """
+        ensure(role in (self.review_role, self.read_role), "Orphan cleanup role is outside this fixture")
+        _, role_doc = self.target("Role", role)
+        if role_doc is None:
+            return
+        childtype = "Workflow Action Permitted Role"
+        fields = ["name", "parent", "parenttype", "role", "creation"]
+        def rows(filters):
+            return self.admin.call("frappe.client.get_list", {"doctype": childtype, "parent": "Workflow Action",
+                "filters": json.dumps(filters), "fields": json.dumps(fields), "limit_page_length": 50})
+        candidates = rows({"role": role})
+        ensure(isinstance(candidates, list) and len(candidates) < 50, "Invalid or excessive fixture orphan rows")
+        for child in candidates:
+            ensure(child.get("parenttype") == "Workflow Action" and child.get("role") == role
+                   and child.get("name") and child.get("parent") and child.get("creation") and role_doc.get("creation")
+                   and child["creation"] >= role_doc["creation"], "Workflow role child is not a proven fixture side effect")
+            ensure(self.admin.doc("Workflow Action", child["parent"], missing=True) is None,
+                   "Workflow role child still has a live parent; cleanup stopped")
+            ensure(rows({"name": child["name"], "role": role}) == [child], "Orphan changed before deletion")
+            self.journal.event("mutation_before", operation="delete_fixture_orphan_role_child", doctype=childtype,
+                               name=child["name"], before=child)
+            undeleted = self.admin.call("frappe.desk.reportview.delete_items", {
+                "doctype": childtype, "items": json.dumps([child["name"]])}, post=True)
+            ensure(undeleted == [], "Standard single-item orphan deletion did not succeed")
+            ensure(rows({"name": child["name"], "role": role}) == [], "Orphan remained after deletion")
+            self.journal.event("mutation_after", operation="delete_fixture_orphan_role_child", doctype=childtype,
+                               name=child["name"], after=None)
 
 
 def parse_args(argv=None):
