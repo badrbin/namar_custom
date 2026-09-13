@@ -12,6 +12,7 @@ from contextlib import contextmanager
 import hashlib
 import inspect
 import operator
+from pathlib import Path
 import textwrap
 from types import CodeType, FunctionType, MethodType
 
@@ -26,6 +27,11 @@ _NATIVE_BODIES = {
     "_filter": "29beb0f45f629423b5e34394b037e23bedd555677ab54d8c46c56449d3289337",
     "compare": "7c8fb975819d26a417308a50f97e26c7b18284a9d26f4996ae6ff4d2ed43ef4d",
     "hget": "e1943ed90a27846ba86ff1f359d6598bb9288151d77450184c486e7b7867d031",
+}
+_CODE_PATHS = {
+    "get_link_fields": ("Meta", "get_link_fields"), "get_meta": ("get_meta",),
+    "get": ("BaseDocument", "get"), "_filter": ("_filter",),
+    "compare": ("compare",), "hget": ("RedisWrapper", "hget"),
 }
 
 
@@ -49,7 +55,7 @@ def _code_shape(code):
     )
 
 
-def _known_body(function, name, diagnostic=None):
+def _known_body(function, name, diagnostic=None, *, compiled_sources=None):
     def reject(reason):
         if diagnostic is not None:
             diagnostic["reject_step"] = reason
@@ -74,19 +80,24 @@ def _known_body(function, name, diagnostic=None):
     keyword_defaults = {arg.arg: ast.literal_eval(value) for arg, value in zip(node.args.kwonlyargs, node.args.kw_defaults) if value is not None}
     if (function.__kwdefaults__ or {}) != keyword_defaults:
         return reject("keyword_defaults")
-    # Source alone is not authority for an in-memory __code__ replacement.
-    node.decorator_list = []
+    # Preserve the module symbol table: CPython optimizes calls on imported
+    # modules differently from calls in a standalone function AST fragment.
+    # Compilation executes no imports or module statements. The caller owns
+    # this code-only cache for the current request, never across requests.
     if function.__closure__:
         owner = function.__closure__[0].cell_contents
         if vars(owner).get(name) is not function:
             return reject("class_closure_owner")
-        wrapper = ast.ClassDef(name=owner.__name__, bases=[], keywords=[], body=[node], decorator_list=[], type_params=[])
-        tree = ast.fix_missing_locations(ast.Module(body=[wrapper], type_ignores=[]))
-        compiled = compile(tree, "<native-body-check>", "exec")
-        compiled = next(value for value in compiled.co_consts if isinstance(value, CodeType))
-    else:
-        compiled = compile(ast.Module(body=[node], type_ignores=[]), "<native-body-check>", "exec")
-    expected = next(value for value in compiled.co_consts if isinstance(value, CodeType))
+    sources = compiled_sources if compiled_sources is not None else {}
+    source_file = inspect.getsourcefile(function)
+    if source_file not in sources:
+        sources[source_file] = compile(Path(source_file).read_text(encoding="utf-8"), source_file, "exec", dont_inherit=True)
+    expected = sources[source_file]
+    for part in _CODE_PATHS[name]:
+        candidates = [value for value in expected.co_consts if isinstance(value, CodeType) and value.co_name == part]
+        if len(candidates) != 1:
+            return reject("source_code_path")
+        expected = candidates[0]
     current_shape, expected_shape = _code_shape(function.__code__), _code_shape(expected)
     matched = current_shape == expected_shape
     if diagnostic is not None:
@@ -108,6 +119,7 @@ class NativeLinkFieldScope:
         self._context = None
         self._checked = False
         self._builtin_guards = ()
+        self._compiled_sources = {}
         # Temporary TEST diagnostic; remove this opt-in instrumentation before
         # the final release. Never include users, documents or decisions.
         self._probe = None
@@ -142,7 +154,7 @@ class NativeLinkFieldScope:
                         node = ast.parse(textwrap.dedent(inspect.getsource(function))).body[0]
                         source = _native_ast_dump(node.args) + "\n" + _native_ast_dump(ast.Module(body=node.body, type_ignores=[]))
                         details = {}
-                        checks[name] = {"native_match": _known_body(function, name, details),
+                        checks[name] = {"native_match": _known_body(function, name, details, compiled_sources=self._compiled_sources),
                                         "observed_hash": hashlib.sha256(source.encode()).hexdigest(),
                                         "approved_hash": _NATIVE_BODIES[name], "details": details}
                     except Exception as error:
@@ -151,7 +163,7 @@ class NativeLinkFieldScope:
             guards = []
             for owner, name in bindings:
                 function = getattr(owner, name)
-                if not _known_body(function, name):
+                if not _known_body(function, name, compiled_sources=self._compiled_sources):
                     return None
                 guards.append((owner, name, function, function.__code__, function.__defaults__,
                                function.__kwdefaults__, tuple(cell.cell_contents for cell in function.__closure__ or ())))
