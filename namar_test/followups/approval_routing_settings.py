@@ -23,8 +23,9 @@ ROUTING_DESCRIPTION = (
     '<div dir="rtl" style="text-align:right">'
     "حدد من تظهر له موافقة هذه المرحلة في متابعاتي. يمكنك اختيار أكثر من موظف أو دور، "
     "ويكفي تطابق أحد الاختيارات. تبقى صلاحيات الاعتماد في المستند كما هي. "
-    "عند عدم تحديد مستلمين، أو تعذر تحديد جميع المستلمين المؤهلين، "
-    "تظهر الموافقة للمؤهلين حسب أدوار المرحلة."
+    "عند عدم تحديد مستلمين تظهر الموافقة للمؤهلين حسب أدوار المرحلة. "
+    "عند تعذر تحديد جميع المستلمين المؤهلين تظهر مشكلة توجيه للمسؤول، "
+    "ولا توزع الموافقة تلقائيًا على أصحاب الأدوار."
     "</div>"
 )
 
@@ -32,8 +33,8 @@ ROUTING_DESCRIPTION = (
 def parse_routing_targets(value) -> tuple[dict, ...]:
     """Parse and de-duplicate the versioned configuration; blanks use workflow roles.
 
-    Invalid configuration raises ValueError. Runtime readers may fall back to the
-    workflow roles, while the Workflow validate hook rejects invalid new settings.
+    Invalid configuration raises ValueError. The indexed reader fails closed;
+    the Workflow validate hook rejects invalid new settings.
     """
     if value is None or (isinstance(value, str) and not value.strip()):
         return ()
@@ -179,7 +180,7 @@ def get_approval_visibility_field_definitions() -> list[dict]:
 
 
 def configure_approval_visibility_fields() -> None:
-    """Add the visibility setting without rewriting v8 fields or workflow data."""
+    """Add the visibility setting without rewriting existing routing/workflows."""
     _create_missing_custom_fields(get_approval_visibility_field_definitions())
 
 

@@ -87,6 +87,7 @@ class FakeLifecycleDatabase:
 
 def load_service(*, action_rows=None, count_rows=None):
     fake_frappe = ModuleType("frappe")
+    fake_frappe.conf = FakeFrappeDict()
     fake_frappe.session = SimpleNamespace(user="employee@example.com")
     fake_frappe.PermissionError = type("PermissionError", (Exception,), {})
     fake_frappe.ValidationError = type("ValidationError", (Exception,), {})
@@ -527,6 +528,8 @@ class ApprovalCountsTestCase(unittest.TestCase):
                     "approvals": 6,
                     "total": 11,
                 },
+                "approval_status": "ready",
+                "approval_message": "",
             },
         )
         self.assertNotIn("items", result)

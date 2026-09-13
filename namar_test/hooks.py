@@ -77,6 +77,11 @@ override_whitelisted_methods = {
     "frappe.desk.form.activity.get_activity_timeline": "namar_test.activity_permissions.get_activity_timeline",
     "frappe.desk.form.activity.get_more_email_activities": "namar_test.activity_permissions.get_more_email_activities",
     "frappe.desk.form.activity.get_more_milestone_activities": "namar_test.activity_permissions.get_more_milestone_activities",
+    "frappe.core.page.permission_manager.permission_manager.update": "namar_test.followups.approval_index_permission_events.update_role_permission",
+    "frappe.core.page.permission_manager.permission_manager.remove": "namar_test.followups.approval_index_permission_events.remove_role_permission",
+    "frappe.core.page.permission_manager.permission_manager.reset": "namar_test.followups.approval_index_permission_events.reset_role_permissions",
+    "frappe.core.doctype.user_permission.user_permission.clear_user_permissions": "namar_test.followups.approval_index_permission_events.clear_user_permissions",
+    "frappe.core.doctype.user_permission.user_permission.add_user_permissions": "namar_test.followups.approval_index_permission_events.update_user_permissions",
     "apply_material_request_scenario_bypass": "namar_test.api.apply_material_request_scenario_bypass",
     "backfill_material_request_state_duration": "namar_test.api.backfill_material_request_state_duration",
     "get_cutting_report": "namar_test.api.get_cutting_report",
@@ -126,7 +131,14 @@ doc_events = {
         "validate": ["namar_test.followups.approval_routing_settings.validate_workflow_approval_routing"],
     },
     "*": {
-        "after_delete": ["namar_test.mentions.reference_cleanup.cleanup_deleted_reference"],
+        "on_change": ["namar_test.followups.approval_index.on_document_change"],
+        "on_update_after_submit": ["namar_test.followups.approval_index.on_document_change"],
+        "on_cancel": ["namar_test.followups.approval_index.on_document_change"],
+        "after_rename": ["namar_test.followups.approval_index.on_document_rename"],
+        "after_delete": [
+            "namar_test.mentions.reference_cleanup.cleanup_deleted_reference",
+            "namar_test.followups.approval_index.on_document_change",
+        ],
     },
     "ToDo": {
         "on_change": [
@@ -186,7 +198,13 @@ doc_events = {
 
 scheduler_events = {
     "hourly": ["namar_test.scheduler.scheduled_sync_material_request_state_duration"],
+    # Durable Pending rows recover even after Redis/RQ restarts.
+    "cron": {
+        "* * * * *": ["namar_test.followups.approval_index.recover_pending"],
+    },
 }
+
+after_migrate = ["namar_test.followups.approval_index.invalidate_after_migrate"]
 
 doctype_js = {
     "Workflow": "public/js/doctype/workflow_approval_routing.js",

@@ -102,6 +102,9 @@ const open = async () => {
   assert.match(controls.custom_followups_routing_summary.$wrapper.content, /dir="rtl"/);
 
   const group = await open();
+  assert.match(group.fields_dict.explanation.df.options, /تُسجّل مشكلة توجيه ولا يتوسع العرض إلى الأدوار تلقائيًا/);
+  assert.match(group.fields_dict.explanation.df.options, /لإشراك دور مع المستلمين أضفه صراحةً/);
+  assert.doesNotMatch(group.fields_dict.explanation.df.options, /إذا تعذر تحديد جميع المستلمين المؤهلين يعود العرض للأدوار/);
   const first = await add(group);
   assert.equal(first.values.type, "user", "type is assigned after construction instead of Frappe's user default keyword");
   assert.equal(first.fields_dict.type.df.default, undefined);
@@ -288,7 +291,6 @@ const open = async () => {
   pendingGroup.hide();
   row[hideField] = 0;
   events[hideField](frm, row.doctype, row.name);
-
   frm.perm[0].write = 0;
   const count = dialogs.length;
   await events.custom_followups_routing_edit(frm, row.doctype, row.name);

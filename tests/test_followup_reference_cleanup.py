@@ -358,9 +358,13 @@ class ReferenceCleanupTests(unittest.TestCase):
 
     def test_patch_and_after_delete_hook_are_registered_without_cancel_hook(self):
         hooks = runpy.run_path(str(ROOT / "namar_test" / "hooks.py"))["doc_events"]
-        self.assertEqual(hooks["*"], {
-            "after_delete": ["namar_test.mentions.reference_cleanup.cleanup_deleted_reference"]
-        })
+        cleanup = "namar_test.mentions.reference_cleanup.cleanup_deleted_reference"
+        self.assertIn(cleanup, hooks["*"].get("after_delete", []))
+        # Other independent projections may register their own lifecycle hooks;
+        # reference cleanup itself must still run only after final deletion.
+        for event, handlers in hooks["*"].items():
+            if event != "after_delete":
+                self.assertNotIn(cleanup, handlers if isinstance(handlers, list) else [handlers])
         parser = ConfigParser(allow_no_value=True)
         parser.read(ROOT / "namar_test" / "patches.txt")
         self.assertIn("namar_test.patches.v0_0_7.purge_deleted_reference_followups", parser["post_model_sync"])

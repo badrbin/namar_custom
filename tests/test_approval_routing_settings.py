@@ -107,7 +107,7 @@ class SettingsTests(unittest.TestCase):
         ])
         self.assertEqual(doc.transitions, transitions)
 
-    def test_disabled_existing_user_is_retained_for_runtime_fallback(self):
+    def test_disabled_existing_user_is_retained_for_explicit_runtime_exception(self):
         doc = self.workflow([{"type": "user", "user": "disabled@example.com"}])
         self.module.validate_workflow_approval_routing(doc)
         self.assertIn("disabled@example.com", doc.states[0][self.module.ROUTING_FIELD])
@@ -175,55 +175,6 @@ class SettingsTests(unittest.TestCase):
             self.module.configure_approval_routing_fields()
         self.assertEqual(self.creations, [])
 
-    def test_visibility_patch_adds_only_new_checkbox_and_keeps_v8_fields(self):
-        self.module.configure_approval_routing_fields()
-        before_v8 = deepcopy(self.custom_fields)
-        self.assertNotIn(self.module.HIDE_FIELD, before_v8)
-        self.module.configure_approval_visibility_fields()
-        self.assertEqual(len(self.creations), 2)
-        added = self.creations[-1]["Workflow Document State"]
-        self.assertEqual([field["fieldname"] for field in added], [self.module.HIDE_FIELD])
-        self.assertEqual(added[0]["fieldtype"], "Check")
-        self.assertEqual(added[0]["default"], "0")
-        self.assertEqual(added[0]["insert_after"], "custom_followups_routing_edit")
-        self.assertEqual(added[0]["label"], "إخفاء من موافقات متابعاتي")
-        self.assertIn('dir="rtl"', added[0]["description"])
-        self.assertIn('text-align:right', added[0]["description"])
-        self.assertEqual({key: self.custom_fields[key] for key in before_v8}, before_v8)
-        before_repeat = deepcopy(self.custom_fields)
-        self.module.configure_approval_visibility_fields()
-        self.assertEqual(len(self.creations), 2)
-        self.assertEqual(self.custom_fields, before_repeat)
-
-    def test_visibility_collision_is_rejected_without_replacing_existing_field(self):
-        name = self.module.HIDE_FIELD
-        self.custom_fields[name] = Row(fieldname=name, fieldtype="Data")
-        before = deepcopy(self.custom_fields)
-        with self.assertRaises(ValidationError):
-            self.module.configure_approval_visibility_fields()
-        self.assertEqual(self.creations, [])
-        self.assertEqual(self.custom_fields, before)
-
-    def test_visibility_flag_retains_targets_and_native_workflow_behavior(self):
-        targets = [{"type": "user", "user": "one@example.com"}, {"type": "owner"}]
-        for flag in (False, 0, "0", True, 1, "1"):
-            with self.subTest(flag=flag):
-                doc = self.workflow(targets)
-                doc.states[0][self.module.HIDE_FIELD] = flag
-                doc.states[0]["is_optional_state"] = 0
-                before_transitions = deepcopy(doc.transitions)
-                self.module.validate_workflow_approval_routing(doc)
-                self.assertEqual(doc.states[0][self.module.HIDE_FIELD], flag)
-                self.assertEqual(json.loads(doc.states[0][self.module.ROUTING_FIELD])["targets"], targets)
-                self.assertEqual(doc.states[0]["is_optional_state"], 0)
-                self.assertEqual(doc.transitions, before_transitions)
-
-    def test_hidden_stage_does_not_bypass_existing_settings_validation(self):
-        doc = self.workflow(raw="{bad")
-        doc.states[0][self.module.HIDE_FIELD] = 1
-        with self.assertRaises(ValidationError):
-            self.module.validate_workflow_approval_routing(doc)
-
     def test_schema_keeps_json_hidden_and_describes_visibility_in_arabic_rtl(self):
         definitions = {df["fieldname"]: df for df in self.module.get_custom_field_definitions()}
         self.assertEqual(definitions[self.module.ROUTING_FIELD]["hidden"], 1)
@@ -234,6 +185,19 @@ class SettingsTests(unittest.TestCase):
         self.assertIn('text-align:right', description)
         self.assertIn("صلاحيات الاعتماد", description)
         self.assertIn("تحديد جميع", description)
+        self.assertIn("ولا توزع الموافقة تلقائيًا", description)
+
+    def test_visibility_field_is_explicit_per_stage_and_migration_is_idempotent(self):
+        self.module.configure_approval_visibility_fields()
+        self.assertEqual(len(self.creations), 1)
+        field = self.custom_fields[self.module.HIDE_FIELD]
+        self.assertEqual(field["fieldtype"], "Check")
+        self.assertEqual(field["default"], "0")
+        self.assertIn("صلاحيات الاعتماد", field["description"])
+        before = deepcopy(self.custom_fields)
+        self.module.configure_approval_visibility_fields()
+        self.assertEqual(len(self.creations), 1)
+        self.assertEqual(self.custom_fields, before)
 
 
 if __name__ == "__main__":

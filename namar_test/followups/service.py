@@ -8,7 +8,7 @@ from frappe.desk.form import assign_to
 from frappe.model.workflow import get_transitions, get_workflow_name, get_workflow_safe_globals, get_workflow_state_field
 from frappe.utils import get_absolute_url, nowdate
 
-from namar_test.followups.approval_routing import ApprovalRoutingResolver, role_routing
+from namar_test.followups.approval_routing import role_routing
 from namar_test.followups.reference_access import quiet_reference_errors, reference_exists
 from namar_test.followups.logic import (
     APPROVAL_SEARCH_SCOPES,
@@ -325,10 +325,26 @@ def _approval_search_filters(search: str, search_scope: str = "all") -> list[lis
     ]
 
 
-def _approval_counts(
-    resolver: ApprovalRoutingResolver | None = None,
-) -> dict[str, int]:
-    resolver = resolver or ApprovalRoutingResolver(frappe, frappe.session.user, get_workflow_safe_globals)
+def _approval_index_enabled() -> bool:
+    return frappe.conf.get("followup_approval_index_enabled") in (True, 1, "1")
+
+
+def _index_unavailable() -> dict[str, Any]:
+    # A worklist failure must not break the inbox/followups or silently return
+    # the old, expensive resolver. Unknown is not a successful zero count.
+    return {"open": None, "state": "error", "message": "تعذر تحديث الموافقات. حاول مجددًا لاحقًا."}
+
+
+def _approval_counts() -> dict[str, Any]:
+    if _approval_index_enabled():
+        try:
+            from namar_test.followups import approval_index
+
+            return approval_index.read_counts(frappe.session.user)
+        except Exception:
+            return _index_unavailable()
+    # Disabled means the native, permission-aware SQL path only. Removing the
+    # emergency flag must NEVER reactivate synchronous all-document routing.
     # get_list تُبقي Permission Query القياسي لـ Workflow Action مطبقًا حتى
     # مع حقل تجميعي؛ لذلك يطابق العدد نفس نطاق العناصر المرئية للمستخدم.
     rows = frappe.get_list(
@@ -338,8 +354,7 @@ def _approval_counts(
         limit_page_length=1,
     )
     open_count = rows[0].get("count") if rows else 0
-    excluded_count = len(resolver.exclusions().excluded_names) if resolver.has_policy else 0
-    return {"open": max(0, int(open_count or 0) - excluded_count)}
+    return {"open": int(open_count or 0)}
 
 
 def _followup_open_count(user: str) -> int:
@@ -367,18 +382,21 @@ def _followup_overdue_count(user: str, current_date: str) -> int:
     return int(overdue_count or 0)
 
 
-def get_my_followups_counts() -> dict[str, dict[str, int]]:
+def get_my_followups_counts() -> dict[str, Any]:
     user = _assert_authenticated()
 
     # Import محلي لتجنب الدوران؛ mentions.service يعتمد أصلًا على هذه الخدمة.
     from namar_test.mentions import service as mention_service
 
+    approval_counts = _approval_counts()
+    approval_status = approval_counts.get("state", "ready")
+    approval_count = approval_counts.get("open") if approval_status == "ready" else None
     counts = {
         "mentions": int(mention_service.get_open_mention_count()),
         "followups": _followup_open_count(user),
-        "approvals": int(_approval_counts()["open"]),
+        "approvals": int(approval_count) if approval_count is not None else None,
     }
-    counts["total"] = sum(counts.values())
+    counts["total"] = sum(counts.values()) if counts["approvals"] is not None else None
 
     # نحافظ على counts بوصفها كل المفتوح حتى لا يتغير عقد عدادات الصفحة.
     # attention_counts هي العقد المخصص للشارات الملونة في الشريط العلوي.
@@ -387,8 +405,13 @@ def get_my_followups_counts() -> dict[str, dict[str, int]]:
         "followups": _followup_overdue_count(user, nowdate()),
         "approvals": counts["approvals"],
     }
-    attention_counts["total"] = sum(attention_counts.values())
-    return {"counts": counts, "attention_counts": attention_counts}
+    attention_counts["total"] = sum(attention_counts.values()) if counts["approvals"] is not None else None
+    return {
+        "counts": counts,
+        "attention_counts": attention_counts,
+        "approval_status": approval_status,
+        "approval_message": approval_counts.get("message", ""),
+    }
 
 
 def _followup_counts(user: str, current_date: str, priority: str = "") -> dict[str, int]:
@@ -709,14 +732,12 @@ def get_approvals(
     )
     start, length, query_length = page_window(limit_start, page_length)
 
-    resolver = ApprovalRoutingResolver(frappe, user, get_workflow_safe_globals)
-    counts = _approval_counts(resolver) if resolver.has_policy else None
-    visibility = resolver.exclusions() if resolver.has_policy else None
+    if _approval_index_enabled():
+        return _get_indexed_approvals(
+            user, normalized_search, normalized_search_scope, start, length, query_length
+        )
+
     filters = {"status": "Open"}
-    if visibility is not None and visibility.excluded_names:
-        filters["name"] = ["not in", sorted(visibility.excluded_names)]
-    # Reuse the normal SQL search and pagination only after routing. The
-    # permission query is applied here again; routing never broadens its scope.
     rows = frappe.get_list(
         "Workflow Action",
         fields=list(WORKFLOW_ACTION_FIELDS),
@@ -726,13 +747,10 @@ def get_approvals(
         limit_start=start,
         limit_page_length=query_length,
     )
-    routing = resolver.route_rows(rows) if visibility is not None else {}
     reference_title_cache: dict[tuple[str, str], str] = {}
     result = pagination(
         [
-            _serialize_workflow_action(
-                row, reference_title_cache, routing.get(row["name"])
-            )
+            _serialize_workflow_action(row, reference_title_cache)
             for row in rows
         ],
         start,
@@ -740,8 +758,82 @@ def get_approvals(
     )
     result["search"] = normalized_search
     result["search_scope"] = normalized_search_scope
-    result["counts"] = counts if counts is not None else _approval_counts(resolver)
+    result["counts"] = _approval_counts()
     return result
+
+
+def _pending_approval_page(search, scope, start, length, state="updating", message=""):
+    result = pagination([], start, length)
+    result.update({
+        "search": search,
+        "search_scope": scope,
+        "status": state,
+        "message": message or "جار تحديث الموافقات",
+        "counts": {"open": None},
+    })
+    return result
+
+
+def _get_indexed_approvals(user, search, scope, start, length, query_length):
+    try:
+        from namar_test.followups import approval_index
+
+        page = approval_index.read_page(
+            user, search=search, search_field=scope, start=start, page_length=query_length
+        )
+        state = page.get("state", "error")
+        if state != "ready":
+            return _pending_approval_page(search, scope, start, length, state, page.get("message", ""))
+        rows = page.get("items", [])
+        # Revalidate only this bounded page with the CURRENT native permission
+        # query. Recipient projection is routing, never authorization.
+        names = [row["name"] for row in rows]
+        permitted = frappe.get_list(
+            "Workflow Action",
+            filters={"name": ["in", names], "status": "Open"},
+            fields=list(WORKFLOW_ACTION_FIELDS),
+            limit_page_length=query_length,
+        ) if names else []
+        permitted_by_name = {row["name"]: row for row in permitted}
+        titles = {}
+        serialized = []
+        for row in rows:
+            current = permitted_by_name.get(row["name"])
+            if current is None or any(
+                str(current.get(field) or "") != str(row.get(field) or "")
+                for field in ("modified", "workflow_state", "reference_doctype", "reference_name")
+            ):
+                return _pending_approval_page(search, scope, start, length)
+            key = (current.get("reference_doctype"), current.get("reference_name"))
+            if key not in titles:
+                with quiet_reference_errors(frappe):
+                    document = frappe.get_doc(*key)
+                    document.check_permission("read")
+                title_field = document.meta.get_title_field()
+                titles[key] = plain_text(document.get(title_field), 500) if title_field else document.name
+                titles[key] = titles[key] or document.name
+            serialized.append(_serialize_workflow_action(current, titles, row.get("routing")))
+        # Prevent a policy/permission invalidation committed during page hydration
+        # from being returned as a fresh count/list generation.
+        final_counts = approval_index.read_counts(user)
+        if final_counts.get("state") != "ready" or final_counts.get("generation") != page.get("generation"):
+            return _pending_approval_page(search, scope, start, length)
+        if not approval_index.verify_snapshot(
+            page.get("generation"), {row["name"]: row.get("_index_revision") for row in rows}
+        ):
+            return _pending_approval_page(search, scope, start, length)
+        result = pagination(serialized, start, length)
+        result.update({
+            "search": search, "search_scope": scope, "status": "ready",
+            "counts": {"open": final_counts.get("open")},
+        })
+        return result
+    except (frappe.PermissionError, frappe.DoesNotExistError):
+        return _pending_approval_page(search, scope, start, length)
+    except Exception:
+        return _pending_approval_page(
+            search, scope, start, length, "error", _index_unavailable()["message"]
+        )
 
 
 def get_approval_detail(action_name: str) -> dict[str, Any]:
@@ -761,13 +853,16 @@ def get_approval_detail(action_name: str) -> dict[str, Any]:
             frappe.PermissionError,
         )
 
-    resolver = ApprovalRoutingResolver(frappe, user, get_workflow_safe_globals)
-    visible = resolver.route_rows(permitted)
-    if name not in visible:
-        frappe.throw(
-            "الموافقة غير متاحة لك أو لم تعد مفتوحة",
-            frappe.PermissionError,
-        )
+    if _approval_index_enabled():
+        from namar_test.followups import approval_index
+
+        index_state = approval_index.read_counts(user, verify_current=False)
+        if index_state.get("state") != "ready":
+            return {"status": index_state.get("state", "error"), "message": index_state.get("message", "جار تحديث الموافقات")}
+        action_snapshot = approval_index.assert_visible(user, name, with_snapshot=True)
+        routing = action_snapshot["routing"]
+    else:
+        routing = role_routing()
 
     action = frappe.get_doc("Workflow Action", name)
     if not action.reference_doctype or not action.reference_name:
@@ -785,10 +880,18 @@ def get_approval_detail(action_name: str) -> dict[str, Any]:
         for row in transitions
         if row.get("action")
     ]
-    return {
-        "approval": _serialize_workflow_action(action, routing=visible[name]),
+    detail = {
+        "approval": _serialize_workflow_action(action, routing=routing),
         "reference": _reference_summary(reference_doc),
         "available_actions": available_actions,
         "permitted_roles": [row.role for row in action.get("permitted_roles") or []],
         "timeline": _get_timeline(reference_doc),
     }
+    if _approval_index_enabled():
+        approval_index.assert_visible(user, name)
+        final_state = approval_index.read_counts(user)
+        if final_state.get("state") != "ready" or final_state.get("generation") != index_state.get("generation"):
+            return {"status": "updating", "message": "جار تحديث الموافقات"}
+        if not approval_index.verify_snapshot(action_snapshot["generation"], {name: action_snapshot["revision"]}):
+            return {"status": "updating", "message": "جار تحديث الموافقات"}
+    return detail

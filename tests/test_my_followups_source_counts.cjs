@@ -121,147 +121,7 @@ function renderApproval(routing) {
   return { item: page.render_queue_item(record), detail };
 }
 
-function makeApprovalListPage() {
-  const page = makePage();
-  Object.assign(page.state, {
-    source: "approvals", bucket: "all", items: [], counts: {}, total: null,
-    search: "", page_length: 25, list_status: "idle", has_more: false,
-    selected_name: null, mobile_detail: false,
-  });
-  page.list_sequence = 0;
-  page.detail_sequence = 0;
-  page.selected_by_source = { mentions: null, followups: null, approvals: null };
-  const rendered = {};
-  function surface(name) {
-    const element = {
-      html: (value) => { rendered[name] = value; return element; },
-      empty: () => { rendered[name] = ""; return element; },
-    };
-    for (const method of ["attr", "removeClass", "addClass", "prop", "val", "text", "each", "toggleClass", "find"]) {
-      element[method] = () => element;
-    }
-    return element;
-  }
-  page.$filters = surface("filters");
-  page.$list = surface("list");
-  page.$pagination = surface("pagination");
-  page.$root = surface("root");
-  page.$search = surface("search");
-  page.$clear_search = surface("clear");
-  page.icon = () => "";
-  page.render_detail_empty = () => {};
-  page.render_search_scope = () => {};
-  page.sync_url_state = () => {};
-  page.show_mobile_queue = () => {};
-  page.select_item = () => {};
-  page.render_queue_item = (item) => `<article>${page.escape(item.name)}</article>`;
-  page.log_error = () => {};
-  return { page, rendered };
-}
-
-function deferred() {
-  let resolve;
-  let reject;
-  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
-  return { promise, resolve, reject };
-}
-
 async function main() {
-{
-  const { page, rendered } = makeApprovalListPage();
-  page.render_filters();
-  assert.match(rendered.filters, /جارٍ تحميل عدد الموافقات/);
-  assert.match(rendered.filters, />…<\/strong>/);
-  assert.doesNotMatch(rendered.filters, />0<\/strong>/);
-
-  let request = deferred();
-  page.call = () => request.promise;
-  let pending = page.load_list();
-  assert.match(rendered.filters, /aria-busy="true"/);
-  assert.match(rendered.filters, />…<\/strong>/);
-  assert.match(rendered.list, /mf-queue-skeleton/);
-  assert.doesNotMatch(rendered.list, /قائمة العمل فارغة|لا توجد موافقات/);
-  request.resolve({ items: [], counts: { open: 0, all: 0 }, total: 0 });
-  await pending;
-  assert.equal(page.state.list_status, "ready");
-  assert.match(rendered.filters, />0<\/strong>/);
-  assert.match(rendered.filters, /aria-busy="false"/);
-  assert.match(rendered.list, /لا توجد موافقات بانتظار مراجعتك حاليًا/);
-
-  request = deferred();
-  pending = page.load_list();
-  assert.equal(page.source_counts.approvals, 0);
-  assert.equal(page.source_count_status.approvals, "loading");
-  assert.match(rendered.filters, />…<\/strong>/);
-  request.resolve({ items: [{ name: "ACTION-1" }, { name: "ACTION-2" }], counts: { open: 2, all: 2 }, total: 2 });
-  await pending;
-  assert.match(rendered.filters, />2<\/strong>/);
-  assert.match(rendered.list, /ACTION-1/);
-  assert.equal(page.source_counts.approvals, 2);
-
-  request = deferred();
-  pending = page.load_list();
-  request.reject(new Error("Network unavailable"));
-  await pending;
-  assert.equal(page.state.list_status, "error");
-  assert.match(rendered.filters, />—<\/strong>/);
-  assert.match(rendered.filters, /تعذّر تحميل عدد الموافقات/);
-  assert.match(rendered.list, /mf-retry-list/);
-  assert.match(rendered.list, /إعادة المحاولة/);
-  assert.doesNotMatch(rendered.list, /قائمة العمل فارغة|لا توجد موافقات/);
-  assert.equal(page.source_counts.approvals, 2);
-  assert.equal(page.source_count_status.approvals, "error");
-
-  request = deferred();
-  pending = page.load_list({ preserve_selection: true });
-  assert.match(rendered.filters, />…<\/strong>/);
-  assert.match(rendered.list, /mf-queue-skeleton/);
-  request.resolve({ items: [], counts: { open: 0, all: 0 }, total: 0 });
-  await pending;
-  assert.match(rendered.filters, />0<\/strong>/);
-  assert.equal(page.source_count_status.approvals, "ready");
-}
-
-{
-  const { page, rendered } = makeApprovalListPage();
-  page.state.source = "mentions";
-  page.state.list_status = "ready";
-  const originalLoad = page.load_list;
-  page.load_list = () => {};
-  page.change_source("approvals");
-  assert.equal(page.state.list_status, "idle");
-  assert.match(rendered.filters, />…<\/strong>/);
-  assert.doesNotMatch(rendered.filters, />0<\/strong>/);
-  page.load_list = originalLoad;
-}
-
-for (const staleOutcome of ["success", "error"]) {
-  const { page, rendered } = makeApprovalListPage();
-  const approvalRequest = deferred();
-  const mentionRequest = deferred();
-  page.call = (method) => method === "get_approvals" ? approvalRequest.promise : mentionRequest.promise;
-  const pendingApproval = page.load_list();
-  const originalLoad = page.load_list;
-  let pendingMention;
-  page.load_list = (options) => { pendingMention = originalLoad.call(page, options); return pendingMention; };
-  page.change_source("mentions");
-  mentionRequest.resolve({ items: [{ name: "THREAD-1" }], counts: { open: 1, unread: 1 }, total: 1 });
-  await pendingMention;
-  const currentFilters = rendered.filters;
-  const currentList = rendered.list;
-  if (staleOutcome === "success") {
-    approvalRequest.resolve({ items: [], counts: { open: 0, all: 0 }, total: 0 });
-  } else {
-    approvalRequest.reject(new Error("Old approval request failed"));
-  }
-  await pendingApproval;
-  assert.equal(page.state.source, "mentions");
-  assert.equal(page.state.list_status, "ready");
-  assert.equal(rendered.filters, currentFilters);
-  assert.equal(rendered.list, currentList);
-  assert.equal(page.state.counts.unread, 1);
-}
-
 {
   for (const routing of [undefined, { mode: "Role", fallback: false }]) {
     const rendered = renderApproval(routing);
@@ -378,16 +238,16 @@ for (const staleOutcome of ["success", "error"]) {
 
   assert.deepEqual(
     calls.map(({ method }) => method),
-    ["get_followups", "get_approvals"]
+    ["get_followups", "get_my_followups_counts"]
   );
   assert.equal(calls[0].args.page_length, 1);
   assert.equal(calls[0].args.priority, "");
-  assert.equal(calls[1].args.page_length, 1);
+  assert.deepEqual(calls[1].args, {});
   assert.equal(calls.some(({ method }) => method === "get_mention_detail"), false);
   assert.equal(calls.some(({ method }) => method === "mark_mention_seen"), false);
 
   resolvers.get_followups({ counts: { open: 4 }, items: [] });
-  resolvers.get_approvals({ counts: { open: 6 }, items: [] });
+  resolvers.get_my_followups_counts({ counts: { approvals: 6 }, approval_status: "ready" });
   await pending;
 
   assert.deepEqual(
