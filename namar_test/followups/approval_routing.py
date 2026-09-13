@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+import re
 from typing import Any, Iterable
 
 from namar_test.followups.approval_routing_settings import (
@@ -69,6 +70,7 @@ class ApprovalRoutingResolver:
         self.transitions: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
         self._user_fields: dict[str, set[str]] = {}
         self._metadata = {}
+        self._table_columns = {}
         self._documents = {}
         self._read_permissions = {}
         self._condition_results = {}
@@ -360,16 +362,8 @@ class ApprovalRoutingResolver:
                         continue
                     for parent in parents.values():
                         parent[field.fieldname] = []
-                    for child in self.frappe.get_all(
-                        field.options,
-                        fields=["*"],
-                        filters={
-                            "parenttype": doctype,
-                            "parentfield": field.fieldname,
-                            "parent": ["in", list(parents)],
-                        },
-                        order_by=None,
-                        limit_page_length=0,
+                    for child in self._child_rows(
+                        field.options, doctype, field.fieldname, list(parents),
                     ) if parents else ():
                         child["doctype"] = field.options
                         parents[child["parent"]][field.fieldname].append(child)
@@ -385,6 +379,54 @@ class ApprovalRoutingResolver:
                     doc["doctype"] = doctype
                     references[(doctype, doc["name"])] = doc
         return references
+
+    def _child_rows(self, doctype, parenttype, parentfield, parents):
+        filters = {"parenttype": parenttype, "parentfield": parentfield, "parent": ["in", parents]}
+        if getattr(self.frappe.db, "db_type", None) != "mariadb":
+            return self.frappe.get_all(
+                doctype, fields=["*"], filters=filters, order_by=None, limit_page_length=0,
+            )
+        if doctype not in self._table_columns:
+            self._table_columns[doctype] = tuple(self.frappe.db.get_table_columns(doctype))
+        columns = self._table_columns[doctype]
+        # Preserve the ordinary reader if a schema uses identifiers outside
+        # Frappe's normal field naming rules. Never omit an unknown column.
+        if not {"parenttype", "parentfield"}.issubset(columns) or not re.fullmatch(r"[\w -]*", doctype, flags=re.ASCII) or any(
+            not isinstance(column, str) or not column.isidentifier() for column in columns
+        ):
+            return self.frappe.get_all(
+                doctype, fields=["*"], filters=filters, order_by=None, limit_page_length=0,
+            )
+        from frappe.query_builder import Case
+        from frappe.query_builder.functions import Cast
+
+        table = self.frappe.qb.DocType(doctype)
+        constants = {"parenttype": parenttype, "parentfield": parentfield}
+        fields = []
+        for column in columns:
+            field = table[column]
+            if column in constants:
+                field = Case().when(
+                    Cast(field, "BINARY") == Cast(constants[column], "BINARY"), None,
+                ).else_(field).as_(column)
+            fields.append(field)
+        rows = (
+            self.frappe.qb.from_(table)
+            .select(*fields)
+            .where(table.parenttype == parenttype)
+            .where(table.parentfield == parentfield)
+            .where(table.parent.isin(parents))
+            .run(as_dict=True)
+        )
+        # WHERE retains its normal collation. Only a byte-identical constant
+        # is encoded as NULL; case/trailing-space variants travel unchanged.
+        # Original NULL cannot match either nonempty equality in WHERE.
+        # Restore the complete original row before any child controller runs.
+        for row in rows:
+            for column, value in constants.items():
+                if row[column] is None:
+                    row[column] = value
+        return rows
 
     def _can_read_reference(self, reference, user: str) -> bool:
         if not reference:
