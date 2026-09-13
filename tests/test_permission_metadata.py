@@ -62,6 +62,29 @@ def fixture():
 
 
 class PermissionMetadataScopeTest(unittest.TestCase):
+    def test_temporary_probe_requires_explicit_administrator_request(self):
+        for user, flag, enabled in (("Administrator", "1", True), ("Administrator", None, False),
+                                    ("ordinary@example.com", "1", False), ("Guest", "1", False)):
+            f, doc, parent, _, _ = fixture()
+            f.session = SimpleNamespace(user=user)
+            f.local.site = "testnamar.u.frappe.cloud"
+            f.form_dict = {"namar_metadata_probe": flag}
+            f.response = {}
+            with Scope(f).for_document(doc):
+                self.assertEqual("namar_metadata_probe" in f.response, enabled)
+            if enabled:
+                self.assertTrue(f.response["namar_metadata_probe"]["any_scope_active"])
+                self.assertEqual(f.response["namar_metadata_probe"]["scope"]["reason"], "active")
+                self.assertNotIn(user, str(f.response))
+
+    def test_temporary_probe_is_never_enabled_on_production(self):
+        f, doc, _, _, _ = fixture()
+        f.session = SimpleNamespace(user="Administrator")
+        f.local.site = "zawaya7.frappe.cloud"
+        f.form_dict = {"namar_metadata_probe": "1"}
+        f.response = {}
+        with Scope(f).for_document(doc):
+            self.assertNotIn("namar_metadata_probe", f.response)
     def test_native_ast_fingerprint_keeps_empty_fields_on_all_python_versions(self):
         node = ast.parse("f()").body[0].value
         self.assertEqual(_native_ast_dump(node), "Call(func=Name(id='f', ctx=Load()), args=[], keywords=[])")

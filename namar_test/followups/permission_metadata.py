@@ -91,6 +91,17 @@ class NativeLinkFieldScope:
         self._context = None
         self._checked = False
         self._builtin_guards = ()
+        # Temporary TEST diagnostic; remove this opt-in instrumentation before
+        # the final release. Never include users, documents or decisions.
+        self._probe = None
+        try:
+            if (frappe.session.user == "Administrator"
+                    and frappe.local.site == "testnamar.u.frappe.cloud"
+                    and str(frappe.form_dict.get("namar_metadata_probe")) == "1"):
+                self._probe = {"temporary": True, "any_scope_active": False}
+                frappe.response["namar_metadata_probe"] = self._probe
+        except AttributeError:
+            pass
 
     def _prepare(self):
         if self._checked:
@@ -106,6 +117,19 @@ class NativeLinkFieldScope:
                 (base_document.BaseDocument, "get"), (base_document, "_filter"),
                 (data, "compare"), (RedisWrapper, "hget"),
             )
+            if self._probe is not None:
+                checks = {}
+                for owner, name in bindings:
+                    try:
+                        function = getattr(owner, name)
+                        node = ast.parse(textwrap.dedent(inspect.getsource(function))).body[0]
+                        source = _native_ast_dump(node.args) + "\n" + _native_ast_dump(ast.Module(body=node.body, type_ignores=[]))
+                        checks[name] = {"native_match": _known_body(function, name),
+                                        "observed_hash": hashlib.sha256(source.encode()).hexdigest(),
+                                        "approved_hash": _NATIVE_BODIES[name]}
+                    except Exception as error:
+                        checks[name] = {"native_match": False, "reason": type(error).__name__}
+                self._probe["body_checks"] = checks
             guards = []
             for owner, name in bindings:
                 function = getattr(owner, name)
@@ -125,6 +149,8 @@ class NativeLinkFieldScope:
             self._context = (meta.Meta, base_document, data, RedisWrapper, guards)
         except (ImportError, AttributeError, OSError, SyntaxError, TypeError, ValueError, StopIteration):
             self._context = None
+            if self._probe is not None:
+                self._probe["reason"] = "unsupported_native_context"
         return self._context
 
     def _unchanged(self, context, *, selection_only=False):
@@ -148,23 +174,64 @@ class NativeLinkFieldScope:
     def for_document(self, document):
         """Keep original Meta identity and restore even on permission errors."""
         installed = []
+        probe = None
+        if self._probe is not None and "scope" not in self._probe:
+            probe = self._probe["scope"] = {"reason": "native_context_unavailable"}
         try:
             context = self._prepare()
+            if probe is not None:
+                probe["context_ready"] = context is not None
+                if context is not None:
+                    probe["bindings_unchanged"] = self._unchanged(context)
+                    probe["reason"] = "native_binding_guard" if not probe["bindings_unchanged"] else "cache_guard"
+                    try:
+                        _, base, data, _, guards = context
+                        probe["bindings"] = {
+                            name: {"identity": getattr(owner, name) is function, "code": function.__code__ is code,
+                                   "defaults": function.__defaults__ is defaults, "keyword_defaults": function.__kwdefaults__ is keyword_defaults,
+                                   "closure": not closure or tuple(cell.cell_contents for cell in function.__closure__ or ()) == closure}
+                            for owner, name, function, code, defaults, keyword_defaults, closure in guards}
+                        probe["aliases"] = {
+                            "base_filter": base.BaseDocument.get.__globals__.get("_filter") is base._filter,
+                            "filter_compare": base._filter.__globals__.get("compare") is data.compare,
+                            "comparison_operators": data.compare.__globals__.get("operator_map") is data.operator_map,
+                            "equals": data.operator_map.get("=") is _EQUAL, "not_equals": data.operator_map.get("!=") is _NOT_EQUAL}
+                        probe["builtins"] = [{"name": name, "unchanged": function.__globals__.get(name, function.__builtins__.get(name)) is expected}
+                                             for function, name, expected in self._builtin_guards]
+                    except (AttributeError, TypeError, KeyError):
+                        probe["binding_diagnostic_available"] = False
             if context is not None and self._unchanged(context):
                 Meta, base, _, RedisWrapper, _ = context
                 cache = self.frappe.cache
+                if probe is not None:
+                    probe["cache_class"] = type(cache).__name__
+                    probe["cache_type_exact"] = type(cache) is RedisWrapper
+                    probe["cache_instance_hget_override"] = "hget" in vars(cache)
                 # RedisWrapper.hget owns these unpickled objects in this HTTP
                 # request. Do not replace its bucket, write Redis, or keep it.
                 if type(cache) is RedisWrapper and "hget" not in vars(cache):
                     local_cache = self.frappe.local.cache
                     bucket = local_cache.get(cache.make_key("doctype_meta"))
                     primary = bucket.get(document.doctype) if isinstance(bucket, dict) else None
+                    if probe is not None:
+                        probe.update({"bucket_present": isinstance(bucket, dict), "primary_present": primary is not None,
+                                      "primary_type_exact": type(primary) is Meta, "primary_class": type(primary).__name__,
+                                      "primary_identity_matches": document.meta is primary, "reason": "primary_meta_guard"})
                     if type(primary) is Meta and document.meta is primary:
                         names = {document.doctype}
                         names.update(field.options for field in primary.get_table_fields())
                         hooks = self.frappe.get_hooks("has_permission") or {}
+                        if probe is not None:
+                            probe.update({"wildcard_hook_present": bool(hooks.get("*")),
+                                          "type_hook_present": any(bool(hooks.get(name)) for name in names), "reason": "permission_hook_guard"})
                         if not hooks.get("*") and not any(hooks.get(name) for name in names):
                             metas = [bucket.get(name) for name in names]
+                            if probe is not None:
+                                probe["metadata"] = [{"present": item is not None, "type_exact": type(item) is Meta,
+                                                       "instance_selector_override": "get_link_fields" in vars(item) if hasattr(item, "__dict__") else False,
+                                                       "get_is_native": getattr(getattr(item, "get", None), "__func__", None) is base.BaseDocument.get}
+                                                      for item in metas]
+                                probe["reason"] = "metadata_guard"
                             if all(type(item) is Meta and "get_link_fields" not in vars(item)
                                    and getattr(item.get, "__func__", None) is base.BaseDocument.get for item in metas):
                                 for item in metas:
@@ -182,7 +249,13 @@ class NativeLinkFieldScope:
                                     method = MethodType(select, item)
                                     item.__dict__["get_link_fields"] = method
                                     installed.append((item, method))
+                                if probe is not None:
+                                    probe["reason"] = "active"
+                                if self._probe is not None:
+                                    self._probe["any_scope_active"] = True
         except (AttributeError, TypeError, KeyError):
+            if probe is not None:
+                probe["reason"] = "unsupported_scope_context"
             # Missing/custom context is not an approval failure. Undo a partial
             # installation before falling back to native permission checks.
             for item, method in installed:
