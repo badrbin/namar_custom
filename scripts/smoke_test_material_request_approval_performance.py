@@ -48,6 +48,19 @@ def target_row(doc, row_name):
     return rows[0]
 
 
+def saved_settings_semantic(doc, row_name):
+    """REST may omit a null routing value on the one row we explicitly change.
+
+    Do not normalize other fields, other rows, or final REST-to-REST restore
+    checks: only absent versus None for this known target routing field.
+    """
+    result = semantic(doc)
+    row = target_row(result, row_name)
+    if row.get(FIELD) is None:
+        row.pop(FIELD, None)
+    return result
+
+
 def active_workflow_name(workflows):
     active = [row.get("name") for row in workflows if row.get("is_active")]
     ensure(len(active) == 1 and isinstance(active[0], str) and active[0],
@@ -226,13 +239,36 @@ class ActualControllerRunner:
                 self.journal.data["mutation_outcome_unknown"] = True
                 self.journal.flush()
             raise
-        self.journal.data["expected"] = saved
-        self.journal.data.pop("pending_intended", None)
-        self.journal.event("mutation_after", phase=phase, after=saved)
-        if semantic(saved) != semantic(intended):
+        # Document.save may return transient fields or another representation
+        # of defaults. Preserve that receipt, but verify the persisted document
+        # by a fresh GET before accepting a new optimistic-lock baseline.
+        self.journal.data["pending_saved_response"] = saved
+        self.journal.flush()
+        self.journal.event("mutation_response", phase=phase, response=saved)
+        self.admin.last_status = None
+        try:
+            verified = self.admin.doc("Workflow", self.workflow_name)
+            ensure(isinstance(verified, dict) and verified.get("name") == self.workflow_name and verified.get("modified"),
+                   "قراءة التحقق بعد الحفظ غير مؤكدة")
+            self.journal.event("post_save_read_received", phase=phase, document=verified)
+            ensure(verified.get("modified") == saved.get("modified")
+                   and saved_settings_semantic(verified, self.journal.data["row_name"])
+                   == saved_settings_semantic(intended, self.journal.data["row_name"]),
+                   "قراءة الحفظ لا تطابق التعديل أو تغير توقيته؛ أوقفت الكتابات للمراجعة")
+        except BaseException:
+            # The POST succeeded, but its persisted state is not yet verified.
+            # Never issue a restoring POST underneath an uncertain GET or use
+            # the response-only representation as authority after a refusal.
             self.journal.data["unsafe_drift"] = True
+            if self.admin.last_status is None or self.admin.last_status in UNCERTAIN_HTTP:
+                self.journal.data["read_request_may_be_running"] = True
+            self.journal.event("post_save_read_failed", phase=phase, http_status=self.admin.last_status)
             self.journal.flush()
-            raise SmokeFailure("الحفظ غيّر حقولًا خارج النطاق؛ أوقفت الكتابات للمراجعة")
+            raise
+        self.journal.data["expected"] = verified
+        self.journal.data.pop("pending_intended", None)
+        self.journal.data.pop("pending_saved_response", None)
+        self.journal.event("mutation_after", phase=phase, after=verified)
         self.journal.flush()
 
     def approval_read(self, endpoint, args):

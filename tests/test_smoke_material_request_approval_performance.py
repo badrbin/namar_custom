@@ -112,6 +112,109 @@ class ActualControllerTests(unittest.TestCase):
         self.assertTrue(self.journal.data["workflow_restored"])
         self.assertTrue(self.journal.data["business_fingerprints_unchanged"])
 
+    def test_save_response_transient_metadata_is_retained_but_fresh_get_is_authoritative(self):
+        original_save = self.runner.admin.call.side_effect
+        def response_only_metadata(*args, **kwargs):
+            response = original_save(*args, **kwargs)
+            response["__unsaved"] = 0
+            response["states"][0]["__islocal"] = 0
+            return response
+        self.runner.admin.call.side_effect = response_only_metadata
+        self.runner.save_settings({actual.FIELD: actual.OWNER}, "owner_unhidden")
+        self.assertEqual(self.journal.data["expected"], self.current)
+        self.assertNotIn("__unsaved", self.journal.data["expected"])
+        self.assertFalse(self.journal.data.get("unsafe_drift"))
+        self.assertEqual(self.runner.admin.call.call_count, 1)
+        self.assertEqual(self.runner.admin.doc.call_count, 2)
+        events = [json.loads(line) for line in self.journal.transcript.read_text().splitlines()]
+        receipts = [row for row in events if row["event"] == "mutation_response"]
+        self.assertEqual(receipts[0]["response"]["__unsaved"], 0)
+        self.assertEqual(receipts[0]["response"]["states"][0]["__islocal"], 0)
+        self.runner.restore()
+        self.assertTrue(self.journal.data["workflow_restored"])
+        self.assertEqual(self.runner.admin.call.call_count, 2)
+
+    def test_original_missing_routing_field_restores_when_rest_omits_written_null(self):
+        for document in (self.current, self.original, self.journal.data["before"], self.journal.data["expected"]):
+            document["states"][0].pop(actual.FIELD)
+        original_save = self.runner.admin.call.side_effect
+        def save_with_null_omitted_from_rest(*args, **kwargs):
+            response = original_save(*args, **kwargs)
+            if self.current["states"][0].get(actual.FIELD) is None:
+                self.current["states"][0].pop(actual.FIELD, None)
+            return response
+        self.runner.admin.call.side_effect = save_with_null_omitted_from_rest
+        self.runner.save_settings({actual.FIELD: actual.OWNER, actual.HIDE_FIELD: 0}, "owner_unhidden")
+        self.runner.save_settings({actual.FIELD: actual.OWNER, actual.HIDE_FIELD: 1}, "hidden")
+        self.runner.restore()
+        self.assertTrue(self.journal.data["workflow_restored"])
+        self.assertTrue(self.journal.data["business_fingerprints_unchanged"])
+        self.assertEqual(actual.semantic(self.current), actual.semantic(self.original))
+        self.assertNotIn(actual.FIELD, self.current["states"][0])
+        self.assertEqual(self.runner.admin.call.call_count, 3)
+
+    def test_only_target_routing_none_and_absent_are_normalized(self):
+        missing = deepcopy(self.original)
+        missing["states"][0].pop(actual.FIELD)
+        self.assertEqual(actual.saved_settings_semantic(missing, "state-1"),
+                         actual.saved_settings_semantic(self.original, "state-1"))
+        self.assertNotEqual(actual.semantic(missing), actual.semantic(self.original))  # Final restore remains strict.
+        for changed in (
+            lambda doc: doc["states"][0].update({actual.FIELD: ""}),
+            lambda doc: doc["states"][0].update({actual.HIDE_FIELD: None}),
+            lambda doc: doc["states"][1].update({actual.FIELD: None}),
+            lambda doc: doc.update(unrelated_default=None),
+        ):
+            value = deepcopy(self.original)
+            changed(value)
+            with self.subTest(value=value):
+                self.assertNotEqual(actual.saved_settings_semantic(value, "state-1"),
+                                    actual.saved_settings_semantic(self.original, "state-1"))
+
+    def test_fresh_get_changed_timestamp_or_unrelated_values_blocks_restoration(self):
+        def read_changed(*args):
+            value = deepcopy(self.current)
+            if self.runner.admin.call.call_count:
+                value["modified"] = "concurrent-after-save"
+            self.runner.admin.last_status = 200
+            return value
+        self.runner.admin.doc.side_effect = read_changed
+        with self.assertRaises(actual.SmokeFailure):
+            self.runner.save_settings({actual.FIELD: actual.OWNER}, "owner_unhidden")
+        self.assertTrue(self.journal.data["unsafe_drift"])
+        self.assertEqual(self.journal.data["expected"], self.original)
+        self.assertIn("pending_saved_response", self.journal.data)
+        self.assertIn("pending_intended", self.journal.data)
+        with self.assertRaises(actual.SmokeFailure):
+            self.runner.restore()
+        self.assertEqual(self.runner.admin.call.call_count, 1)
+
+    def test_fresh_get_refusal_timeout_and_malformed_result_never_retry_post(self):
+        for status in (403, 404, None, 504, 200):
+            with self.subTest(status=status):
+                self.current = deepcopy(self.original)
+                self.journal.data.update(expected=deepcopy(self.original), unsafe_drift=False,
+                                         read_request_may_be_running=False)
+                self.runner.admin.call.reset_mock()
+                self.runner.admin.doc.reset_mock()
+                def post_save_read(*args):
+                    if not self.runner.admin.call.call_count:
+                        return deepcopy(self.current)
+                    self.runner.admin.last_status = status
+                    if status == 200:
+                        return None
+                    raise actual.SmokeFailure("authoritative GET failed")
+                self.runner.admin.doc.side_effect = post_save_read
+                with self.assertRaises(actual.SmokeFailure):
+                    self.runner.save_settings({actual.FIELD: actual.OWNER}, "owner_unhidden")
+                self.assertTrue(self.journal.data["unsafe_drift"])
+                self.assertEqual(bool(self.journal.data.get("read_request_may_be_running")), status in (None, 504))
+                self.assertEqual(self.journal.data["expected"], self.original)
+                self.assertIn("pending_saved_response", self.journal.data)
+                with self.assertRaises(actual.SmokeFailure):
+                    self.runner.restore()
+                self.assertEqual(self.runner.admin.call.call_count, 1)
+
     def test_blank_state_blocks_first_save_and_restoration(self):
         self.runner.count.side_effect = None
         self.runner.count.return_value = 1
