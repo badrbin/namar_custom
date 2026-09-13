@@ -55,6 +55,7 @@ class ApprovalIndexSmokeGuardTests(unittest.TestCase):
         try:
             self.assertTrue(runner.allowed("User", "index-20260913100000-deadbeef-a@example.invalid"))
             self.assertFalse(runner.allowed("User", "Administrator"))
+            self.assertFalse(runner.allowed("Raven User", "Administrator"))
             self.assertFalse(runner.allowed("Material Request", "MREQ-123"))
             self.assertFalse(runner.allowed("Workflow", "طلب مواد"))
             self.assertTrue(runner.allowed("Workflow", runner.prefix + " Flow"))
@@ -158,6 +159,56 @@ class ApprovalIndexSmokeReadinessTests(unittest.TestCase):
         with self.assertRaisesRegex(smoke.Failure, "both bounded"):
             runner.check("scenario", {})
         self.assertEqual(runner.check_ready.call_count, 2)
+
+    def test_cleanup_discovers_only_fixture_raven_side_effect(self):
+        runner = self.runner()
+        runner.prefix = "NAI Smoke 20260913100000 deadbeef"
+        user = "index-20260913100000-deadbeef-a@example.invalid"
+        runner.journal.data = {"targets": [{"doctype": "User", "name": user, "deleted": False}]}
+        parent = {"creation": "2026-09-13 13:00:00.000000"}
+        dependent = {"user": user, "type": "User", "full_name": runner.prefix + " A", "creation": "2026-09-13 13:00:00.000001"}
+        runner.target = Mock(return_value=({}, parent))
+        runner.admin.doc = Mock(side_effect=[{"name": "Raven User"}, dependent])
+        runner.capture_user_dependents()
+        self.assertEqual(runner.journal.data["targets"][-1]["doctype"], "Raven User")
+        self.assertEqual(runner.journal.data["targets"][-1]["fingerprint"], dependent)
+
+    def test_cleanup_refuses_raven_profile_older_than_fixture_user(self):
+        runner = self.runner()
+        runner.prefix = "NAI Smoke 20260913100000 deadbeef"
+        user = "index-20260913100000-deadbeef-a@example.invalid"
+        runner.journal.data = {"targets": [{"doctype": "User", "name": user, "deleted": False}]}
+        runner.target = Mock(return_value=({}, {"creation": "2026-09-13 13:00:00.000001"}))
+        runner.admin.doc = Mock(side_effect=[{"name": "Raven User"}, {
+            "user": user, "type": "User", "full_name": runner.prefix + " A", "creation": "2026-09-13 13:00:00.000000"}])
+        with self.assertRaisesRegex(smoke.Failure, "not a proven fixture"):
+            runner.capture_user_dependents()
+        self.assertEqual(len(runner.journal.data["targets"]), 1)
+
+    def test_orphan_cleanup_refuses_child_with_live_parent(self):
+        runner = self.runner()
+        runner.review_role, runner.read_role = "fixture review", "fixture read"
+        runner.target = Mock(return_value=({}, {"creation": "2026-09-13 13:00:00"}))
+        runner.admin.call.return_value = [{"name": "child", "parent": "WA", "parenttype": "Workflow Action",
+                                         "role": runner.review_role, "creation": "2026-09-13 13:00:01"}]
+        runner.admin.doc = Mock(return_value={"name": "WA"})
+        with self.assertRaisesRegex(smoke.Failure, "live parent"):
+            runner.cleanup_role_orphans(runner.review_role)
+        self.assertTrue(all(call.args[0] == "frappe.client.get_list" for call in runner.admin.call.call_args_list))
+
+    def test_proven_fixture_orphan_uses_one_standard_single_item_delete(self):
+        runner = self.runner()
+        runner.review_role, runner.read_role = "fixture review", "fixture read"
+        runner.target = Mock(return_value=({}, {"creation": "2026-09-13 13:00:00"}))
+        child = {"name": "child", "parent": "WA", "parenttype": "Workflow Action",
+                 "role": runner.review_role, "creation": "2026-09-13 13:00:01"}
+        runner.admin.call.side_effect = [[child], [child], [], []]
+        runner.admin.doc = Mock(return_value=None)
+        runner.cleanup_role_orphans(runner.review_role)
+        writes = [call for call in runner.admin.call.call_args_list if call.kwargs.get("post")]
+        self.assertEqual(len(writes), 1)
+        self.assertEqual(writes[0].args, ("frappe.desk.reportview.delete_items", {
+            "doctype": "Workflow Action Permitted Role", "items": '["child"]'}))
 
 
 if __name__ == "__main__":
