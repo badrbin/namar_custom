@@ -11,6 +11,7 @@ from test_followup_approval_counts import FakeFrappeDict, load_service, workflow
 
 
 FIELD = "custom_followups_routing_targets"
+HIDE = "custom_followups_hide_from_approvals"
 A = "a@example.com"
 B = "b@example.com"
 C = "c@example.com"
@@ -86,7 +87,7 @@ class RoutingRuntime:
 
     def get_meta(self, doctype):
         return SimpleNamespace(
-            has_field=lambda name: doctype == "Workflow Document State" and name == FIELD,
+            has_field=lambda name: doctype == "Workflow Document State" and name in (FIELD, HIDE),
             issingle=False,
             is_virtual=False,
             fields=[SimpleNamespace(fieldname=name, fieldtype="Link", options="User") for name in self.user_fields],
@@ -100,6 +101,8 @@ class RoutingRuntime:
             if isinstance(expected, list):
                 op, value = expected
                 if op == "in" and actual not in value:
+                    return False
+                if op == "not in" and actual in value:
                     return False
             elif actual != expected:
                 return False
@@ -498,8 +501,8 @@ class ApprovalRoutingTestCase(unittest.TestCase):
         self.assertEqual(final_query["or_filters"], [["Workflow Action", "reference_name", "like", "%WA-01%"]])
         self.assertEqual(final_query["limit_start"], 2)
         queries = Counter(doctype for kind, doctype, _ in runtime.calls)
-        self.assertEqual(queries["Workflow Action"], 4)
-        self.assertEqual(queries["Material Request"], 3)
+        self.assertEqual(queries["Workflow Action"], 5)
+        self.assertEqual(queries["Material Request"], 6)
         self.assertEqual(queries["User"], 1)
         self.assertEqual(queries["Has Role"], 1)
         self.assertEqual(runtime.service._approval_counts(), {"open": 554})
@@ -519,6 +522,125 @@ class ApprovalRoutingTestCase(unittest.TestCase):
         runtime = RoutingRuntime()
         runtime.data["Workflow Document State"][0][FIELD] = "{broken"
         self.assertTrue(runtime.approvals()["items"][0]["routing"]["fallback"])
+
+    def test_hide_without_targets_overrides_fallback_and_rejects_detail_without_source_reads(self):
+        for value in (None, "{broken", RoutingRuntime.setting([{"type": "owner"}])):
+            runtime = RoutingRuntime()
+            runtime.data["Workflow Document State"][0].update({HIDE: 1, FIELD: value})
+            with self.subTest(setting=value):
+                result = runtime.approvals()
+                self.assertEqual(result["items"], [])
+                self.assertEqual(result["counts"], {"open": 0})
+                with self.assertRaisesRegex(runtime.frappe.PermissionError, "الموافقة غير متاحة"):
+                    runtime.service.get_approval_detail("WA-00000")
+                self.assertEqual(runtime.doc_reads, [])
+                self.assertEqual(runtime.constructed_docs, [])
+                self.assertFalse(any(call[1] in ("Material Request", "User", "Has Role", "Workflow Transition") for call in runtime.calls))
+                self.assertEqual(runtime.data["Workflow Action"][0].status, "Open")
+
+    def test_hidden_rules_are_scoped_to_actual_doctype_state_pairs(self):
+        runtime = RoutingRuntime()
+        runtime.data["Workflow Document State"][0][HIDE] = 1
+        runtime.data["Workflow"].append(FakeFrappeDict(name="WF-SO", document_type="Sales Order", is_active=1))
+        runtime.data["Workflow Document State"].append(FakeFrappeDict(
+            parent="WF-SO", parenttype="Workflow", state="Another State", **{HIDE: 1},
+        ))
+        action = workflow_action("SO-PENDING")
+        action.reference_doctype = "Sales Order"
+        runtime.data["Workflow Action"].append(action)
+        result = runtime.approvals()
+        self.assertEqual([row["name"] for row in result["items"]], ["SO-PENDING"])
+        self.assertEqual(result["counts"], {"open": 1})
+        self.assertEqual(result["items"][0]["routing"]["mode"], "Role")
+
+    def test_exclusions_preserve_mixed_default_pages_and_search_counts(self):
+        runtime = RoutingRuntime([{"type": "owner"}], size=6)
+        for index, (action, reference) in enumerate(zip(runtime.data["Workflow Action"], runtime.data["Material Request"])):
+            if index % 2:
+                action.workflow_state = "Unconfigured State"
+            elif index != 2:
+                reference.owner = B
+        runtime.denied.add("WA-00000")
+        result = runtime.approvals(limit_start=1, page_length=2)
+        self.assertEqual(result["counts"], {"open": 4})
+        self.assertEqual([row["name"] for row in result["items"]], ["WA-00002", "WA-00003"])
+        self.assertTrue(result["has_more"])
+        self.assertEqual(result["items"][0]["routing"]["mode"], "Targets")
+        self.assertEqual(result["items"][1]["routing"]["mode"], "Role")
+        final_query = [options for kind, doctype, options in runtime.calls if kind == "list"][-1]
+        self.assertEqual(final_query["filters"]["name"], ["not in", ["WA-00004"]])
+        searched = runtime.approvals(search="WA-00005", search_scope="document", page_length=1)
+        self.assertEqual(searched["counts"], {"open": 4})
+        self.assertEqual([row["name"] for row in searched["items"]], ["WA-00005"])
+        self.assertFalse(searched["has_more"])
+
+    def test_7500_actions_hide_4250_without_any_parent_or_child_loading(self):
+        runtime = RoutingRuntime([{"type": "owner"}], size=7500)
+        runtime.data["Workflow Document State"][0][HIDE] = 1
+        runtime.child_tables["Material Request"] = [("items", "Material Request Item")]
+        for action in runtime.data["Workflow Action"][4250:]:
+            action.workflow_state = "Unconfigured State"
+        result = runtime.approvals(page_length=25)
+        self.assertEqual(result["counts"], {"open": 3250})
+        self.assertEqual(result["items"][0]["name"], "WA-04250")
+        self.assertEqual(len(result["items"]), 25)
+        self.assertTrue(result["has_more"])
+        self.assertEqual(runtime.constructed_docs, [])
+        self.assertEqual(runtime.permission_reads, [])
+        self.assertFalse(any(doctype in ("Material Request", "Material Request Item", "User", "Has Role") for _, doctype, _ in runtime.calls))
+        action_queries = [options for kind, doctype, options in runtime.calls if kind == "list"]
+        self.assertEqual(len(action_queries), 11)  # Aggregate + 9 affected batches + final page.
+        self.assertEqual(action_queries[0]["fields"], ["count(name) as count"])
+        self.assertTrue(all(options["filters"].get("workflow_state") == ["in", ["Pending Approval"]] for options in action_queries[1:-1]))
+        self.assertEqual(len(action_queries[-1]["filters"]["name"][1]), 4250)
+
+    def test_7500_actions_only_preload_headers_for_4250_ineligible_owners(self):
+        runtime = RoutingRuntime([{"type": "owner"}], size=7500)
+        runtime.child_tables["Material Request"] = [("items", "Material Request Item")]
+        runtime.data["Has Role"] = [row for row in runtime.data["Has Role"] if row.parent != C]
+        for index, (action, reference) in enumerate(zip(runtime.data["Workflow Action"], runtime.data["Material Request"])):
+            if index >= 4250:
+                action.workflow_state = "Unconfigured State"
+            reference.owner = C
+        result = runtime.approvals(page_length=1)
+        self.assertEqual(result["counts"], {"open": 7500})
+        self.assertTrue(result["items"][0]["routing"]["fallback"])
+        parent_queries = [options for kind, doctype, options in runtime.calls if doctype == "Material Request"]
+        self.assertEqual(len(parent_queries), 9)
+        self.assertEqual(sum(len(options["filters"]["name"][1]) for options in parent_queries), 4250)
+        self.assertTrue(all(options["fields"] == ["name", "owner"] for options in parent_queries))
+        self.assertFalse(any(doctype == "Material Request Item" for _, doctype, _ in runtime.calls))
+        self.assertEqual(runtime.constructed_docs, [])
+        self.assertEqual(runtime.permission_reads, [])
+        final_query = [options for kind, doctype, options in runtime.calls if kind == "list"][-1]
+        self.assertNotIn("name", final_query["filters"])
+
+    def test_full_reference_loading_only_for_initially_eligible_candidates(self):
+        runtime = RoutingRuntime([{"type": "owner"}], size=3)
+        runtime.child_tables["Material Request"] = [("items", "Material Request Item")]
+        runtime.data["Material Request"][1].owner = "missing@example.com"
+        runtime.data["Material Request"][2].owner = "missing@example.com"
+        result = runtime.approvals()
+        self.assertEqual(result["counts"], {"open": 3})
+        parent_queries = [options for _, doctype, options in runtime.calls if doctype == "Material Request"]
+        self.assertEqual(parent_queries[0]["fields"], ["name", "owner"])
+        self.assertEqual(len(parent_queries[0]["filters"]["name"][1]), 3)
+        self.assertEqual(parent_queries[1]["fields"], ["*"])
+        self.assertEqual(parent_queries[1]["filters"]["name"][1], [runtime.data["Material Request"][0].name])
+        self.assertEqual(len(runtime.constructed_docs), 1)
+        self.assertEqual(len(runtime.permission_reads), 1)
+
+    def test_unhide_is_rechecked_next_request_and_preserves_saved_targets(self):
+        runtime = RoutingRuntime([{"type": "user", "user": B}])
+        state = runtime.data["Workflow Document State"][0]
+        original_targets = state[FIELD]
+        state[HIDE] = 1
+        self.assertEqual(runtime.approvals()["counts"], {"open": 0})
+        state[HIDE] = 0
+        self.assertEqual(runtime.ids(), [])
+        runtime.frappe.session.user = B
+        self.assertEqual(runtime.approvals()["counts"], {"open": 1})
+        self.assertEqual(state[FIELD], original_targets)
 
 
 if __name__ == "__main__":

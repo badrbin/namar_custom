@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import Any, Iterable
 
 from namar_test.followups.approval_routing_settings import (
     FIELD_TARGET,
+    HIDE_FIELD,
     OWNER_TARGET,
     ROLE_TARGET,
     ROUTING_FIELD,
@@ -23,6 +25,12 @@ TARGET_LABELS = {
     ROLE_TARGET: "دور محدد",
     FIELD_TARGET: "موظف من حقل",
 }
+
+
+@dataclass
+class ApprovalVisibility:
+    excluded_names: set[str]
+    routing: dict[str, dict[str, Any]]
 
 
 def _batches(values: Iterable[Any]):
@@ -57,6 +65,7 @@ class ApprovalRoutingResolver:
         self.frappe = frappe
         self.user = user
         self.rules: dict[tuple[str, str], tuple[dict[str, str], ...] | None] = {}
+        self.hidden_states: set[tuple[str, str]] = set()
         self.transitions: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
         self._user_fields: dict[str, set[str]] = {}
         self._metadata = {}
@@ -64,6 +73,7 @@ class ApprovalRoutingResolver:
         self._read_permissions = {}
         self._condition_results = {}
         self._workflow_globals_factory = workflow_globals_factory
+        self._visibility: ApprovalVisibility | None = None
         self._load_rules()
 
     def _meta(self, doctype):
@@ -75,8 +85,14 @@ class ApprovalRoutingResolver:
     def has_rules(self) -> bool:
         return bool(self.rules)
 
+    @property
+    def has_policy(self) -> bool:
+        return bool(self.rules or self.hidden_states)
+
     def _load_rules(self) -> None:
-        if not self._meta("Workflow Document State").has_field(ROUTING_FIELD):
+        meta = self._meta("Workflow Document State")
+        setting_fields = [field for field in (ROUTING_FIELD, HIDE_FIELD) if meta.has_field(field)]
+        if not setting_fields:
             return
         workflows = self.frappe.get_all(
             "Workflow",
@@ -88,12 +104,15 @@ class ApprovalRoutingResolver:
         for workflow_names in _batches(workflow_doctypes):
             states = self.frappe.get_all(
                 "Workflow Document State",
-                fields=["parent", "state", ROUTING_FIELD],
+                fields=["parent", "state", *setting_fields],
                 filters={"parent": ["in", workflow_names], "parenttype": "Workflow"},
                 limit_page_length=0,
             )
             for state in states:
                 key = (workflow_doctypes[state["parent"]], state["state"])
+                if int(state.get(HIDE_FIELD) or 0):
+                    self.hidden_states.add(key)
+                    continue
                 try:
                     targets = parse_routing_targets(state.get(ROUTING_FIELD))
                 except ValueError:
@@ -116,36 +135,65 @@ class ApprovalRoutingResolver:
     def _rule(self, action):
         return self.rules.get((action.get("reference_doctype"), action.get("workflow_state")), ())
 
-    def visible_actions(self, fields: list[str]) -> dict[str, dict[str, Any]]:
-        """Fetch all base-permitted open actions without a hidden item cap."""
+    def exclusions(self) -> ApprovalVisibility:
+        """Resolve only policy-affected actions, after standard permissions.
+
+        Unconfigured states stay in the native aggregate/list queries. There is
+        no need to fetch thousands of their IDs or include them in a SQL IN.
+        """
+        if self._visibility is not None:
+            return self._visibility
+        states_by_doctype = defaultdict(set)
+        for doctype, state in set(self.rules) | self.hidden_states:
+            states_by_doctype[doctype].add(state)
         rows = []
-        offset = 0
-        while True:
-            batch = self.frappe.get_list(
-                "Workflow Action",
-                fields=fields,
-                filters={"status": "Open"},
-                order_by="name asc",
-                limit_start=offset,
-                limit_page_length=BATCH_SIZE,
-            )
-            rows.extend(batch)
-            if len(batch) < BATCH_SIZE:
-                break
-            offset += len(batch)
-        return self.route_rows(rows)
+        for doctype, states in states_by_doctype.items():
+            offset = 0
+            while True:
+                batch = self.frappe.get_list(
+                    "Workflow Action",
+                    fields=["name", "reference_doctype", "reference_name", "workflow_state"],
+                    filters={
+                        "status": "Open", "reference_doctype": doctype,
+                        "workflow_state": ["in", sorted(states)],
+                    },
+                    order_by="name asc",
+                    limit_start=offset,
+                    limit_page_length=BATCH_SIZE,
+                )
+                rows.extend(batch)
+                if len(batch) < BATCH_SIZE:
+                    break
+                offset += len(batch)
+        routing = self.route_rows(rows)
+        self._visibility = ApprovalVisibility(
+            excluded_names={row["name"] for row in rows} - routing.keys(),
+            routing=routing,
+        )
+        return self._visibility
 
     def route_rows(self, rows) -> dict[str, dict[str, Any]]:
         """Return routing metadata only for visible, already-permitted rows."""
-        rows = list(rows)
+        rows = [
+            row for row in rows
+            if (row.get("reference_doctype"), row.get("workflow_state")) not in self.hidden_states
+        ]
         configured = [row for row in rows if self._rule(row)]
-        references = self._reference_values(configured)
+        headers = self._reference_headers(configured)
         targets_by_action = {
-            row["name"]: self._resolve_targets(row, references) for row in configured
+            row["name"]: self._resolve_targets(row, headers) for row in configured
         }
         users, roles, known_roles, role_members = self._users_and_roles(targets_by_action)
         permitted_roles = self._permitted_roles(configured)
-        eligible_role_members = {}
+        candidates_by_action = self._candidate_targets(
+            configured, headers, targets_by_action, users, roles,
+            known_roles, role_members, permitted_roles,
+        )
+        # Most owners may have no role for this stage. Decide that using small
+        # headers before loading full parents and children for read/conditions.
+        references = self._reference_values(
+            row for row in configured if candidates_by_action[row["name"]]
+        )
         visible = {}
         for row in rows:
             targets = self._rule(row)
@@ -162,25 +210,15 @@ class ApprovalRoutingResolver:
             state_key = (row.get("reference_doctype"), row.get("workflow_state"))
             transitions = self.transitions.get(state_key, ())
             reference = references.get((row.get("reference_doctype"), row.get("reference_name")), {})
-            owner = reference.get("owner")
-            for target in targets_by_action[row["name"]]:
+            for target, candidates in candidates_by_action[row["name"]]:
                 mode = target["type"]
                 if mode == ROLE_TARGET:
                     role = target.get("role")
-                    cache_key = (role, state_key, frozenset(allowed), owner)
-                    if cache_key not in eligible_role_members:
-                        eligible_role_members[cache_key] = {
-                            name for name in role_members.get(role, ())
-                            if role in known_roles
-                            and self._eligible_user(name, users, roles, allowed, transitions, owner)
-                        }
-                    candidates = eligible_role_members[cache_key]
                     # A role target needs two facts: whether the viewer is an
                     # eligible member, or (otherwise) whether any other member
                     # prevents fallback. It need not enumerate every reader.
-                    ordered = ([self.user] if self.user in candidates else []) + sorted(candidates - {self.user})
                     members = set()
-                    for name in ordered:
+                    for name in candidates:
                         if self._can_approve_reference(reference, name, roles, allowed, transitions):
                             members.add(name)
                             break
@@ -190,7 +228,7 @@ class ApprovalRoutingResolver:
                     valid_targets.append({"type": mode, "label": TARGET_LABELS[mode], "role": role})
                 else:
                     name = target.get("user")
-                    if not self._eligible_user(name, users, roles, allowed, transitions, owner) or not self._can_approve_reference(reference, name, roles, allowed, transitions):
+                    if not self._can_approve_reference(reference, name, roles, allowed, transitions):
                         continue
                     recipients.add(name)
                     personal_users.add(name)
@@ -218,6 +256,66 @@ class ApprovalRoutingResolver:
                 }
         return visible
 
+    def _candidate_targets(self, actions, headers, targets_by_action, users, roles, known_roles, role_members, permitted_roles):
+        eligible_role_members = {}
+        result = {}
+        for action in actions:
+            name = action["name"]
+            state_key = (action.get("reference_doctype"), action.get("workflow_state"))
+            owner = headers.get((action.get("reference_doctype"), action.get("reference_name")), {}).get("owner")
+            transitions = self.transitions.get(state_key, ())
+            allowed = permitted_roles.get(name, set())
+            result[name] = []
+            for target in targets_by_action[name]:
+                if target["type"] == ROLE_TARGET:
+                    role = target.get("role")
+                    cache_key = (role, state_key, frozenset(allowed), owner)
+                    if cache_key not in eligible_role_members:
+                        eligible_role_members[cache_key] = {
+                            member for member in role_members.get(role, ())
+                            if role in known_roles
+                            and self._eligible_user(member, users, roles, allowed, transitions, owner)
+                        }
+                    members = eligible_role_members[cache_key]
+                    candidates = ([self.user] if self.user in members else []) + sorted(members - {self.user})
+                else:
+                    member = target.get("user")
+                    candidates = [member] if self._eligible_user(member, users, roles, allowed, transitions, owner) else []
+                if candidates:
+                    result[name].append((target, candidates))
+        return result
+
+    def _reference_headers(self, actions):
+        names_by_doctype = defaultdict(set)
+        requested_fields = defaultdict(set)
+        for action in actions:
+            doctype = action.get("reference_doctype")
+            name = action.get("reference_name")
+            if doctype and name:
+                names_by_doctype[doctype].add(name)
+                for target in self._rule(action):
+                    if target["type"] == FIELD_TARGET:
+                        requested_fields[doctype].add(target["field"])
+        headers = {}
+        for doctype, names in names_by_doctype.items():
+            try:
+                meta = self._meta(doctype)
+            except self.frappe.DoesNotExistError:
+                continue
+            if meta.issingle or meta.is_virtual:
+                continue
+            self._user_fields[doctype] = {
+                field.fieldname for field in meta.fields
+                if field.fieldtype == "Link" and field.options == "User"
+            }
+            fields = ["name", "owner", *sorted(requested_fields[doctype] & self._user_fields[doctype])]
+            for batch in _batches(names):
+                for row in self.frappe.get_all(
+                    doctype, fields=fields, filters={"name": ["in", batch]}, limit_page_length=0,
+                ):
+                    headers[(doctype, row["name"])] = row
+        return headers
+
     def _reference_values(self, actions) -> dict[tuple[str, str], dict[str, Any]]:
         names_by_doctype = defaultdict(set)
         for action in actions:
@@ -233,11 +331,6 @@ class ApprovalRoutingResolver:
                 continue
             if meta.issingle or meta.is_virtual:
                 continue
-            user_fields = {
-                field.fieldname for field in meta.fields
-                if field.fieldtype == "Link" and field.options == "User"
-            }
-            self._user_fields[doctype] = user_fields
             for batch in _batches(names):
                 parent_rows = self.frappe.get_all(
                     doctype,
