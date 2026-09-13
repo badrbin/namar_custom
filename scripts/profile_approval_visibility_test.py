@@ -21,6 +21,7 @@ def main():
     parser.add_argument("--env-file", type=Path, required=True)
     parser.add_argument("--confirm-site", required=True)
     parser.add_argument("--state-dir", type=Path, required=True)
+    parser.add_argument("--browser-user", action="store_true", help="Profile the existing ordinary TEST browser account; Recorder stays Administrator-owned")
     args = parser.parse_args()
     if not args.run:
         print("Dry run: one TEST request, native Recorder, sanitized profile only.")
@@ -37,6 +38,12 @@ def main():
     journal = Journal(directory / ("recorder-" + stamp + ".json"), {"site": site, "events": []})
     journal.flush()
     client = Client(site, "TEST Recorder", journal, 120, env["FRAPPE_TEST_TOKEN"])
+    request_client = client
+    if args.browser_user:
+        ensure(origin(env["BROWSER_LOGIN_URL"], allow_path=True) == site, "Browser login must target TEST")
+        request_client = Client(site, "TEST ordinary user", journal, 120)
+        request_client.login(env["BROWSER_LOGIN_EMAIL"], env["BROWSER_LOGIN_PASSWORD"])
+        ensure(request_client.call("frappe.auth.get_logged_user") not in ("Administrator", "Guest"), "Ordinary account required")
     target = "/api/method/namar_test.followups.api.get_approvals"
     armed = False
     request_completed = False
@@ -52,7 +59,7 @@ def main():
             "profile": 1, "capture_stack": 0, "explain": 0,
             "request_filter": target,
         })
-        result = client.call("namar_test.followups.api.get_approvals", args={"page_length": 25})
+        result = request_client.call("namar_test.followups.api.get_approvals", args={"page_length": 25})
         request_completed = True
         ensure(isinstance(result, dict) and len(result.get("items", [])) == 25, "Profiled list request did not return 25 rows")
     finally:
@@ -81,6 +88,7 @@ def main():
         "sql_duration_ms": sum(float(call.get("duration") or 0) for call in calls),
         "profile": detail["profile"],
         "not_an_acceptance_timing": True,
+        "ordinary_user_request": args.browser_user,
     }
     output = directory / ("profile-" + stamp + ".json")
     fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -98,6 +106,8 @@ def main():
                       "query_count": safe["query_count"], "sql_duration_ms": safe["sql_duration_ms"],
                       "recorder_clean": True}, ensure_ascii=False))
     client.session.close()
+    if request_client is not client:
+        request_client.session.close()
 
 
 if __name__ == "__main__":
