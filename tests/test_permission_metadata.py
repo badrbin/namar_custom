@@ -3,15 +3,16 @@ from __future__ import annotations
 import ast
 from contextlib import contextmanager
 import os
+import hashlib
 from pathlib import Path
-from types import SimpleNamespace, MethodType, ModuleType
+from types import SimpleNamespace, MethodType, ModuleType, CodeType, FunctionType
 import operator
 import random
 import sys
 import unittest
 from unittest.mock import patch
 
-from namar_custom.followups.permission_metadata import NativeLinkFieldScope, _known_body
+from namar_custom.followups.permission_metadata import NativeLinkFieldScope, _known_body, _native_ast_dump
 
 
 class Base:
@@ -62,6 +63,22 @@ def fixture():
 
 
 class PermissionMetadataScopeTest(unittest.TestCase):
+    def test_native_ast_fingerprint_keeps_empty_fields_on_all_python_versions(self):
+        node = ast.parse("f()").body[0].value
+        self.assertEqual(_native_ast_dump(node), "Call(func=Name(id='f', ctx=Load()), args=[], keywords=[])")
+        original = ast.dump
+
+        def python_311_dump(node, *, include_attributes=False, **kwargs):
+            if "show_empty" in kwargs:
+                raise TypeError("unexpected keyword argument 'show_empty'")
+            try:
+                return original(node, include_attributes=include_attributes, show_empty=True)
+            except TypeError:
+                return original(node, include_attributes=include_attributes)
+
+        with patch("namar_custom.followups.permission_metadata.ast.dump", python_311_dump):
+            self.assertEqual(_native_ast_dump(node), "Call(func=Name(id='f', ctx=Load()), args=[], keywords=[])")
+
     def test_original_identity_fresh_lists_and_native_permission_fields(self):
         f, doc, parent, child, bucket = fixture()
         with Scope(f).for_document(doc):
@@ -192,20 +209,57 @@ SOURCE = Path(os.environ.get("FRAPPE_TEST_SOURCE_ROOT", "/nonexistent"))
 
 @unittest.skipUnless((SOURCE / "model/meta.py").is_file(), "Provide native Frappe source for body guard validation")
 class NativeBodyGuardTest(unittest.TestCase):
-    def load(self, file, name, cls=None):
+    def load_full_source(self, file, name, cls=None):
         path = SOURCE / file
-        tree = ast.parse(path.read_text())
-        nodes = tree.body
+        source = path.read_text()
+        compiled = compile(source, str(path), "exec")
+        nodes = ast.parse(source).body
         if cls:
-            original = next(node for node in nodes if isinstance(node, ast.ClassDef) and node.name == cls)
-            node = next(node for node in original.body if isinstance(node, ast.FunctionDef) and node.name == name)
-            wrapper = ast.ClassDef(name=cls, bases=[], keywords=[], body=[node], decorator_list=[], type_params=[])
-            nodes = [wrapper]
-        else:
-            nodes = [next(node for node in nodes if isinstance(node, ast.FunctionDef) and node.name == name)]
-        namespace = {"Any": object}
-        exec(compile(ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])), str(path), "exec"), namespace)
-        return getattr(namespace[cls], name) if cls else namespace[name]
+            compiled = next(value for value in compiled.co_consts if isinstance(value, CodeType) and value.co_name == cls)
+            nodes = next(node for node in nodes if isinstance(node, ast.ClassDef) and node.name == cls).body
+        code = next(value for value in compiled.co_consts if isinstance(value, CodeType) and value.co_name == name)
+        node = next(node for node in nodes if isinstance(node, ast.FunctionDef) and node.name == name)
+        defaults = tuple(ast.literal_eval(value) for value in node.args.defaults) or None
+        owner = type(cls, (), {}) if cls else None
+        closure = ((lambda: owner).__closure__[0],) if code.co_freevars == ("__class__",) else None
+        function = FunctionType(code, {"__file__": str(path)}, name, defaults, closure)
+        if owner is not None:
+            setattr(owner, name, function)
+        return function
+
+    def test_real_full_source_compilation_is_accepted_not_only_extracted_ast(self):
+        for file, cls, name in (
+            ("model/meta.py", "Meta", "get_link_fields"), ("model/meta.py", None, "get_meta"),
+            ("model/base_document.py", "BaseDocument", "get"), ("model/base_document.py", None, "_filter"),
+            ("utils/data.py", None, "compare"), ("utils/redis_wrapper.py", "RedisWrapper", "hget"),
+        ):
+            with self.subTest(name=name):
+                self.assertTrue(_known_body(self.load_full_source(file, name, cls), name))
+
+    @unittest.skipUnless(sys.version_info[:2] == (3, 11), "Observed live fingerprints belong to Python 3.11")
+    def test_full_source_matches_both_live_python311_bytecode_fingerprints(self):
+        for file, cls, name, expected in (
+            ("utils/data.py", None, "compare", "08dda47611c8cab1b884b6dcb86e9777d163912d869393a2565737139ad7ebfe"),
+            ("utils/redis_wrapper.py", "RedisWrapper", "hget", "0561f9c7996e8dea56aafb34824a020a410a0ff22c8e8e03bab28dc85a2f3a91"),
+        ):
+            function = self.load_full_source(file, name, cls)
+            self.assertEqual(hashlib.sha256(repr(function.__code__.co_code).encode()).hexdigest(), expected)
+            self.assertTrue(_known_body(function, name))
+
+    def test_source_compilation_is_request_owned_and_never_executes_module(self):
+        sources = {}
+        first = self.load_full_source("model/meta.py", "get_meta")
+        second = self.load_full_source("model/meta.py", "get_link_fields", "Meta")
+        with patch("builtins.exec", side_effect=AssertionError("native source must not execute")):
+            self.assertTrue(_known_body(first, "get_meta", compiled_sources=sources))
+            self.assertEqual(len(sources), 1)
+            compiled = next(iter(sources.values()))
+            self.assertTrue(_known_body(second, "get_link_fields", compiled_sources=sources))
+            self.assertEqual(len(sources), 1)
+            self.assertIs(next(iter(sources.values())), compiled)
+
+    def load(self, file, name, cls=None):
+        return self.load_full_source(file, name, cls)
 
     def test_accepts_native_functions_and_super_closure(self):
         for file, cls, name in (

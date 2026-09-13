@@ -12,6 +12,7 @@ from contextlib import contextmanager
 import hashlib
 import inspect
 import operator
+from pathlib import Path
 import textwrap
 from types import CodeType, FunctionType, MethodType
 
@@ -20,13 +21,27 @@ _EQUAL, _NOT_EQUAL = operator.eq, operator.ne
 # Bodies verified against Frappe v15.120.1. A framework change is a safe
 # fallback, not an invitation to approximate a new permission implementation.
 _NATIVE_BODIES = {
-    "get_link_fields": "b071b3e132119dfa36a5ed809c676491a387dcbc7c8bbc7f99a105aa851f4bbd",
-    "get_meta": "48973108864e33283613fcd8d3380a371690dce17ac1d954a4d875aee28cee7b",
-    "get": "b29cde7eb5304860c10504fb85637e68cdbe88178d8b6293280173749f035608",
-    "_filter": "4f5a2bb4737be65e0a1d1473ba3b234698d3a0b1fc63d7e4e1d5dbfa0aba1ec1",
-    "compare": "113339153b3fe2dea449084530f3b178347325c547df8caeacd26f3854721bd6",
-    "hget": "8e4d9589e1123c7c47f142a08dd2436a46c1bc8da0da233492a4bce90c6d5374",
+    "get_link_fields": "b60215fa38c40e92de0c8f3f1dfebce3c3ed3baf24c3251e0007c2bf846b0c31",
+    "get_meta": "5fe0cc1c4005347c1de42da5e69e4bc8f16e643c539add4d0662a93bf9ca672d",
+    "get": "b9e867242708af8e126f8866c91d2dbb2beeb66d40d72945147550e0ca265857",
+    "_filter": "29beb0f45f629423b5e34394b037e23bedd555677ab54d8c46c56449d3289337",
+    "compare": "7c8fb975819d26a417308a50f97e26c7b18284a9d26f4996ae6ff4d2ed43ef4d",
+    "hget": "e1943ed90a27846ba86ff1f359d6598bb9288151d77450184c486e7b7867d031",
 }
+_CODE_PATHS = {
+    "get_link_fields": ("Meta", "get_link_fields"), "get_meta": ("get_meta",),
+    "get": ("BaseDocument", "get"), "_filter": ("_filter",),
+    "compare": ("compare",), "hget": ("RedisWrapper", "hget"),
+}
+
+
+def _native_ast_dump(node):
+    # Python 3.13 omits empty fields by default; 3.11 always included them.
+    # Keep identical source fingerprints without relaxing any body checks.
+    try:
+        return ast.dump(node, include_attributes=False, show_empty=True)
+    except TypeError:
+        return ast.dump(node, include_attributes=False)
 
 
 def _code_shape(code):
@@ -40,7 +55,7 @@ def _code_shape(code):
     )
 
 
-def _known_body(function, name):
+def _known_body(function, name, *, compiled_sources=None):
     if not isinstance(function, FunctionType) or hasattr(function, "__wrapped__"):
         return False
     if function.__closure__ and (function.__code__.co_freevars != ("__class__",)
@@ -50,7 +65,7 @@ def _known_body(function, name):
     if len(tree.body) != 1 or not isinstance(tree.body[0], ast.FunctionDef):
         return False
     node = tree.body[0]
-    body = ast.dump(node.args, include_attributes=False) + "\n" + ast.dump(ast.Module(body=node.body, type_ignores=[]), include_attributes=False)
+    body = _native_ast_dump(node.args) + "\n" + _native_ast_dump(ast.Module(body=node.body, type_ignores=[]))
     if hashlib.sha256(body.encode()).hexdigest() != _NATIVE_BODIES[name]:
         return False
     defaults = tuple(ast.literal_eval(value) for value in node.args.defaults)
@@ -60,19 +75,24 @@ def _known_body(function, name):
     keyword_defaults = {arg.arg: ast.literal_eval(value) for arg, value in zip(node.args.kwonlyargs, node.args.kw_defaults) if value is not None}
     if (function.__kwdefaults__ or {}) != keyword_defaults:
         return False
-    # Source alone is not authority for an in-memory __code__ replacement.
-    node.decorator_list = []
+    # Preserve the module symbol table: CPython optimizes calls on imported
+    # modules differently from calls in a standalone function AST fragment.
+    # Compilation executes no imports or module statements. The caller owns
+    # this code-only cache for the current request, never across requests.
     if function.__closure__:
         owner = function.__closure__[0].cell_contents
         if vars(owner).get(name) is not function:
             return False
-        wrapper = ast.ClassDef(name=owner.__name__, bases=[], keywords=[], body=[node], decorator_list=[], type_params=[])
-        tree = ast.fix_missing_locations(ast.Module(body=[wrapper], type_ignores=[]))
-        compiled = compile(tree, "<native-body-check>", "exec")
-        compiled = next(value for value in compiled.co_consts if isinstance(value, CodeType))
-    else:
-        compiled = compile(ast.Module(body=[node], type_ignores=[]), "<native-body-check>", "exec")
-    expected = next(value for value in compiled.co_consts if isinstance(value, CodeType))
+    sources = compiled_sources if compiled_sources is not None else {}
+    source_file = inspect.getsourcefile(function)
+    if source_file not in sources:
+        sources[source_file] = compile(Path(source_file).read_text(encoding="utf-8"), source_file, "exec", dont_inherit=True)
+    expected = sources[source_file]
+    for part in _CODE_PATHS[name]:
+        candidates = [value for value in expected.co_consts if isinstance(value, CodeType) and value.co_name == part]
+        if len(candidates) != 1:
+            return False
+        expected = candidates[0]
     return _code_shape(function.__code__) == _code_shape(expected)
 
 
@@ -82,6 +102,7 @@ class NativeLinkFieldScope:
         self._context = None
         self._checked = False
         self._builtin_guards = ()
+        self._compiled_sources = {}
 
     def _prepare(self):
         if self._checked:
@@ -100,7 +121,7 @@ class NativeLinkFieldScope:
             guards = []
             for owner, name in bindings:
                 function = getattr(owner, name)
-                if not _known_body(function, name):
+                if not _known_body(function, name, compiled_sources=self._compiled_sources):
                     return None
                 guards.append((owner, name, function, function.__code__, function.__defaults__,
                                function.__kwdefaults__, tuple(cell.cell_contents for cell in function.__closure__ or ())))
