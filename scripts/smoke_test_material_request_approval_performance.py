@@ -28,7 +28,6 @@ from smoke_test_approval_visibility_performance import (
     PerfJournal, PerformanceRunner, TrackedClient, samples_pass,
 )
 
-WORKFLOW = "طلبات المواد"
 STATE = "مكتمل"
 DOCTYPE = "Material Request"
 OWNER = json.dumps({"version": 1, "targets": [{"type": "owner"}]}, separators=(",", ":"))
@@ -47,6 +46,13 @@ def target_row(doc, row_name):
     rows = [row for row in doc.get("states", []) if row.get("name") == row_name and row.get("state") == STATE]
     ensure(len(rows) == 1, "تغير صف المرحلة المستهدف؛ لا كتابة")
     return rows[0]
+
+
+def active_workflow_name(workflows):
+    active = [row.get("name") for row in workflows if row.get("is_active")]
+    ensure(len(active) == 1 and isinstance(active[0], str) and active[0],
+           "يلزم Workflow نشط وحيد لطلبات المواد؛ لا نفترض اسمًا أو نختار بين أكثر من Workflow")
+    return active[0]
 
 
 def assert_canonical_settings(states):
@@ -97,6 +103,12 @@ class ActualControllerRunner:
         self.env, self.args, self.journal = env, args, journal
         self.admin = TrackedClient(env["site"], "Administrator", journal, args.timeout, env["FRAPPE_TEST_TOKEN"])
         self.viewer = TrackedClient(env["site"], "B", journal, args.timeout)
+
+    @property
+    def workflow_name(self):
+        name = self.journal.data.get("workflow_name")
+        ensure(isinstance(name, str) and name, "لم يُثبت اسم Workflow المستهدف بالقراءة")
+        return name
 
     def rows(self, doctype, fields, filters, length=2000):
         result, offset = [], 0
@@ -157,8 +169,8 @@ class ActualControllerRunner:
         patches = self.rows("Patch Log", ["name", "skipped"], {"patch": PATCH})
         ensure(len(patches) == 1 and not patches[0].get("skipped"), "patch الإخفاء لم يُطبق")
         workflows = self.rows("Workflow", ["name", "is_active"], {"document_type": DOCTYPE})
-        ensure([row["name"] for row in workflows if row.get("is_active")] == [WORKFLOW], "Workflow النشط لا يطابق المتوقع")
-        before = self.admin.doc("Workflow", WORKFLOW)
+        self.journal.data["workflow_name"] = active_workflow_name(workflows)
+        before = self.admin.doc("Workflow", self.workflow_name)
         ensure(before.get("is_active") == 1 and before.get("document_type") == DOCTYPE and before.get("modified"), "بصمة Workflow غير صالحة")
         states = [row for row in before.get("states", []) if row.get("state") == STATE]
         ensure(len(states) == 1 and states[0].get("name"), "لا يوجد صف مكتمل وحيد")
@@ -171,9 +183,9 @@ class ActualControllerRunner:
         names.update(row["fieldname"] for row in self.rows("Custom Field", ["fieldname"], {"dt": DOCTYPE}))
         ensure(field and field in names, "حقل حالة طلب المواد غير موجود؛ حفظ Workflow قد ينشئه")
         self.journal.data.update({
-            "workflow_name": WORKFLOW, "row_name": states[0]["name"], "state_field": field,
+            "row_name": states[0]["name"], "state_field": field,
             "before": before, "expected": before,
-            "other_workflows": [self.admin.doc("Workflow", row["name"]) for row in workflows if row["name"] != WORKFLOW],
+            "other_workflows": [self.admin.doc("Workflow", row["name"]) for row in workflows if row["name"] != self.workflow_name],
         })
         self.journal.flush()
         self.blank_guard()
@@ -183,12 +195,12 @@ class ActualControllerRunner:
         self.journal.data["viewer_core_before"] = self.count("Workflow Action", {"status": "Open"}, client=self.viewer)
         self.journal.data["fingerprints_before"] = self.fingerprints()
         self.journal.flush()
-        self.journal.event("preflight_passed", workflow=WORKFLOW, state=STATE)
+        self.journal.event("preflight_passed", workflow=self.workflow_name, state=STATE)
 
     def save_settings(self, values, phase):
         ensure(not self.journal.data.get("mutation_outcome_unknown") and not self.journal.data.get("read_request_may_be_running")
                and not self.journal.data.get("unsafe_drift"), "تعذر الحفظ أو الاستعادة الآلية؛ يلزم حسم طلب غير مؤكد أو تغيير متزامن")
-        current = self.admin.doc("Workflow", WORKFLOW)
+        current = self.admin.doc("Workflow", self.workflow_name)
         expected = self.journal.data["expected"]
         ensure(current.get("modified") == expected.get("modified") and semantic(current) == semantic(expected),
                "تغير Workflow منذ آخر قراءة مؤكدة؛ لم نكتب فوق تعديل آخر")
@@ -204,7 +216,7 @@ class ActualControllerRunner:
 
         def invoke():
             saved = self.admin.call("frappe.client.save", args={"doc": json.dumps(intended, ensure_ascii=False)}, post=True)
-            ensure(isinstance(saved, dict) and saved.get("name") == WORKFLOW and saved.get("modified"), "رد الحفظ غير مؤكد")
+            ensure(isinstance(saved, dict) and saved.get("name") == self.workflow_name and saved.get("modified"), "رد الحفظ غير مؤكد")
             return saved
 
         try:
@@ -261,6 +273,60 @@ class ActualControllerRunner:
             self.journal.data["measurements"].append(row)
             self.journal.flush()
             print(json.dumps(row, ensure_ascii=False), flush=True)
+        return phase_count
+
+    def capture_approval_snapshot(self, phase, expected_count):
+        """Untimed, ordinary-user GET proof that hiding preserves every other ID."""
+        ensure(type(expected_count) is int and expected_count >= 0, "لا يوجد عدد مؤكد لالتقاط الموافقات")
+        seen, target_names, other_names = set(), set(), set()
+        start = 0
+        while True:
+            result = self.approval_read("get_approvals", {
+                "page_length": 100, "limit_start": start, "search": "", "search_scope": "all",
+            })
+            ensure(isinstance(result, dict) and isinstance(result.get("items"), list), "صفحة إثبات الموافقات غير صحيحة")
+            count = (result.get("counts") or {}).get("open")
+            ensure(type(count) is int and count == expected_count, "تغير عدد الموافقات أثناء إثبات الحالات الأخرى")
+            items = result["items"]
+            ensure(len(items) == min(100, expected_count - start), "صفحة إثبات الموافقات ناقصة أو زائدة")
+            for row in items:
+                ensure(isinstance(row, dict) and all(isinstance(row.get(field), str) and row[field]
+                       for field in ("name", "reference_doctype", "workflow_state")), "موافقة بلا هوية أو حالة مؤكدة")
+                name = row["name"]
+                ensure(name not in seen, "تكررت موافقة بين الصفحات؛ لا نعتبر اللقطة مكتملة")
+                seen.add(name)
+                target = row["reference_doctype"] == DOCTYPE and row["workflow_state"] == STATE
+                (target_names if target else other_names).add(name)
+            has_more = start + len(items) < expected_count
+            ensure(type(result.get("has_more")) is bool and result["has_more"] == has_more,
+                   "مؤشر اكتمال صفحات الموافقات لا يطابق العدد")
+            if not has_more:
+                ensure(result.get("next_start") is None, "مؤشر نهاية الصفحات غير صحيح")
+                break
+            next_start = result.get("next_start")
+            ensure(type(next_start) is int and next_start == start + len(items) and next_start > start,
+                   "مؤشر صفحات الموافقات لا يتقدم بالعدد المتوقع")
+            start = next_start
+        ensure(len(seen) == expected_count, "مجموعة الموافقات لا تطابق العدد المؤكد")
+        snapshot = {"count": expected_count, "target_names": sorted(target_names), "other_names": sorted(other_names)}
+        self.journal.data.setdefault("approval_snapshots", {})[phase] = snapshot
+        self.journal.flush()
+        self.journal.event("approval_snapshot_verified", phase=phase, count=expected_count,
+                           target_count=len(target_names), other_count=len(other_names))
+        return snapshot
+
+    def verify_hide_preserves_other_states(self, before, hidden):
+        ensure(before["target_names"] and before["other_names"],
+               "إثبات الإخفاء يتطلب موافقات مكتمل وموافقات أخرى مرئية قبل الإخفاء؛ لا تكفي نتيجة صفر")
+        ensure(not hidden["target_names"], "بقيت موافقات مكتمل بعد الإخفاء")
+        ensure(hidden["other_names"] == before["other_names"], "الإخفاء غيّر موافقات حالات أخرى؛ لم يجتز القبول")
+        ensure(before["count"] - hidden["count"] == len(before["target_names"]),
+               "انخفاض العداد لا يساوي موافقات مكتمل المخفية فقط")
+        self.journal.data["other_state_ids_preserved"] = True
+        self.journal.data["hidden_count_delta_verified"] = True
+        self.journal.flush()
+        self.journal.event("hide_scope_verified", hidden_count=len(before["target_names"]),
+                           other_count=len(hidden["other_names"]))
 
     def verify_hidden_search(self):
         start = 0
@@ -283,7 +349,7 @@ class ActualControllerRunner:
         before = self.journal.data["before"]
         row = target_row(before, self.journal.data["row_name"])
         self.save_settings({FIELD: row.get(FIELD), HIDE_FIELD: row.get(HIDE_FIELD)}, "restore")
-        restored = self.admin.doc("Workflow", WORKFLOW)
+        restored = self.admin.doc("Workflow", self.workflow_name)
         ensure(semantic(restored) == semantic(before), "لم يعد Workflow مطابقًا لكل حقول الأعمال الأصلية")
         for other in self.journal.data["other_workflows"]:
             ensure(semantic(self.admin.doc("Workflow", other["name"])) == semantic(other), "تغير Workflow آخر لطلبات المواد")
@@ -303,9 +369,12 @@ class ActualControllerRunner:
         try:
             self.preflight()
             self.save_settings({FIELD: OWNER, HIDE_FIELD: 0}, "owner_unhidden")
-            self.measure("owner_unhidden")
+            owner_count = self.measure("owner_unhidden")
+            owner_snapshot = self.capture_approval_snapshot("owner_unhidden", owner_count)
             self.save_settings({FIELD: OWNER, HIDE_FIELD: 1}, "hidden")
-            self.measure("hidden")
+            hidden_count = self.measure("hidden")
+            hidden_snapshot = self.capture_approval_snapshot("hidden", hidden_count)
+            self.verify_hide_preserves_other_states(owner_snapshot, hidden_snapshot)
             self.verify_hidden_search()
         finally:
             if self.journal.data.get("fingerprints_before"):
@@ -332,7 +401,8 @@ def parse_args(argv=None):
 def main(argv=None):
     args = parse_args(argv)
     if not args.run:
-        print(json.dumps({"network": False, "writes": False, "workflow": WORKFLOW, "state": STATE,
+        print(json.dumps({"network": False, "writes": False, "document_type": DOCTYPE,
+                          "workflow": "الوحيد النشط، يُحدد بالقراءة دون افتراض الاسم", "state": STATE,
                           "temporary_fields": [FIELD, HIDE_FIELD], "phases": ["owner_unhidden", "hidden", "restore"],
                           "setup_actor": "Administrator", "measurement_actor": "existing TEST browser login",
                           "samples_per_endpoint_per_phase": SAMPLES, "page_length": 25, "max_seconds": MAX_SECONDS}, ensure_ascii=False))

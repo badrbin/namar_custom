@@ -24,7 +24,7 @@ class ActualControllerTests(unittest.TestCase):
     def setUp(self):
         self.network = self.enterContext(patch.object(requests.Session, "request", side_effect=AssertionError("Live network forbidden")))
         self.directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        self.original = {"doctype": "Workflow", "name": actual.WORKFLOW, "document_type": actual.DOCTYPE,
+        self.original = {"doctype": "Workflow", "name": "طلب مواد", "document_type": actual.DOCTYPE,
                          "is_active": 1, "owner": "creator@example.invalid", "creation": "old", "modified": "v1", "modified_by": "old-user",
                          "states": [{"name": "state-1", "state": actual.STATE, actual.FIELD: None, actual.HIDE_FIELD: 0,
                                      "allow_edit": "Approver", "modified": "v1"},
@@ -33,6 +33,7 @@ class ActualControllerTests(unittest.TestCase):
         self.current = deepcopy(self.original)
         self.journal = actual.PerfJournal(self.directory / "manifest.json", {
             "before": deepcopy(self.original), "expected": deepcopy(self.original), "row_name": "state-1",
+            "workflow_name": self.original["name"],
             "state_field": "workflow_state", "other_workflows": [], "measurements": [],
             "fingerprints_before": {"material_requests": [{"name": "MR-1", "workflow_state": actual.STATE}], "workflow_actions": []},
             "actors": {"setup": "Administrator", "measurements": "badr@example.invalid"}, "viewer_core_before": 10,
@@ -74,6 +75,31 @@ class ActualControllerTests(unittest.TestCase):
         args = actual.parse_args(["--confirm-site", "https://erp.namar.net"])
         with patch.object(actual, "read_env", return_value={"FRAPPE_TEST_SITE": "https://erp.namar.net", "FRAPPE_TEST_TOKEN": "placeholder"}), self.assertRaises(actual.SmokeFailure):
             actual.configuration(args)
+
+    def test_active_workflow_is_discovered_without_singular_plural_assumption(self):
+        for name in ("طلب مواد", "طلبات المواد", "Material Request Approval"):
+            self.assertEqual(actual.active_workflow_name([
+                {"name": "Inactive", "is_active": 0}, {"name": name, "is_active": 1},
+            ]), name)
+        for workflows in ([], [{"name": "Inactive", "is_active": 0}], [{"name": None, "is_active": 1}],
+                          [{"name": "One", "is_active": 1}, {"name": "Two", "is_active": 1}]):
+            with self.subTest(workflows=workflows), self.assertRaises(actual.SmokeFailure):
+                actual.active_workflow_name(workflows)
+
+    def test_saved_workflow_name_is_pinned_for_changes_and_restore(self):
+        self.journal.data["workflow_name"] = "طلبات المواد"
+        for document in (self.current, self.original, self.journal.data["before"], self.journal.data["expected"]):
+            document["name"] = "طلبات المواد"
+        self.runner.save_settings({actual.FIELD: actual.OWNER}, "owner_unhidden")
+        self.runner.restore()
+        self.assertTrue(all(call.args == ("Workflow", "طلبات المواد") for call in self.runner.admin.doc.call_args_list))
+        self.assertTrue(all(json.loads(call.kwargs["args"]["doc"])["name"] == "طلبات المواد"
+                            for call in self.runner.admin.call.call_args_list))
+        del self.journal.data["workflow_name"]
+        self.runner.admin.call.reset_mock()
+        with self.assertRaises(actual.SmokeFailure):
+            self.runner.save_settings({actual.FIELD: actual.OWNER}, "unknown_name")
+        self.runner.admin.call.assert_not_called()
 
     def test_standard_save_sends_current_modified_and_restores_only_two_fields(self):
         self.runner.save_settings({actual.FIELD: actual.OWNER, actual.HIDE_FIELD: 0}, "owner_unhidden")
@@ -175,6 +201,10 @@ class ActualControllerTests(unittest.TestCase):
     def test_slow_sample_is_failure_after_successful_restore(self):
         self.runner.preflight = Mock()
         self.runner.verify_hidden_search = Mock()
+        self.runner.capture_approval_snapshot = Mock(side_effect=[
+            {"count": 2, "target_names": ["target"], "other_names": ["other"]},
+            {"count": 1, "target_names": [], "other_names": ["other"]},
+        ])
         def measure(phase):
             self.journal.data["measurements"].extend([
                 {"phase": phase, "get_approvals": 3.1, "get_my_followups_counts": 1.0} for _ in range(5)
@@ -185,6 +215,74 @@ class ActualControllerTests(unittest.TestCase):
         self.assertTrue(self.journal.data["workflow_restored"])
         self.assertFalse(self.journal.data["performance_passed"])
         self.assertEqual(actual.semantic(self.current), actual.semantic(self.original))
+
+    def test_approval_snapshot_reads_all_pages_as_viewer_and_keeps_exact_scope(self):
+        rows = [{"name": f"WA-{i:03}", "reference_doctype": actual.DOCTYPE, "workflow_state": actual.STATE}
+                for i in range(105)]
+        rows[-1]["reference_doctype"] = "Other DocType"  # The same state label is not the target.
+        rows[-2]["workflow_state"] = "Other State"
+        self.runner.approval_read = Mock(side_effect=[
+            {"items": rows[:100], "counts": {"open": 105}, "has_more": True, "next_start": 100},
+            {"items": rows[100:], "counts": {"open": 105}, "has_more": False, "next_start": None},
+        ])
+        snapshot = self.runner.capture_approval_snapshot("owner_unhidden", 105)
+        self.assertEqual(snapshot["target_names"], [f"WA-{i:03}" for i in range(103)])
+        self.assertEqual(snapshot["other_names"], ["WA-103", "WA-104"])
+        self.assertEqual(self.journal.data["approval_snapshots"]["owner_unhidden"], snapshot)
+        self.assertEqual([call.args[1]["limit_start"] for call in self.runner.approval_read.call_args_list], [0, 100])
+        self.assertTrue(all(call.args[0] == "get_approvals" and call.args[1]["page_length"] == 100
+                            and call.args[1]["search"] == "" for call in self.runner.approval_read.call_args_list))
+        self.runner.admin.call.assert_not_called()
+
+    def test_approval_snapshot_rejects_count_drift_duplicates_and_incomplete_pagination(self):
+        row = {"name": "WA-1", "reference_doctype": actual.DOCTYPE, "workflow_state": actual.STATE}
+        cases = [
+            {"items": [row], "counts": {"open": 2}, "has_more": False},
+            {"items": [row], "counts": {"open": 1}},
+            {"items": [row], "counts": {"open": 1}, "has_more": False, "next_start": 100},
+            {"items": [], "counts": {"open": 1}, "has_more": False},
+            {"items": [{"name": "WA-1"}], "counts": {"open": 1}, "has_more": False},
+        ]
+        for result in cases:
+            with self.subTest(result=result):
+                self.runner.approval_read = Mock(return_value=result)
+                with self.assertRaises(actual.SmokeFailure):
+                    self.runner.capture_approval_snapshot("owner_unhidden", 1)
+        self.runner.approval_read = Mock(return_value={
+            "items": [row, row], "counts": {"open": 2}, "has_more": False,
+        })
+        with self.assertRaises(actual.SmokeFailure):
+            self.runner.capture_approval_snapshot("owner_unhidden", 2)
+        self.assertNotIn("approval_snapshots", self.journal.data)
+
+    def test_hide_scope_requires_nonempty_target_and_other_states_then_exact_delta(self):
+        before = {"count": 3, "target_names": ["target"], "other_names": ["other-1", "other-2"]}
+        hidden = {"count": 2, "target_names": [], "other_names": ["other-1", "other-2"]}
+        self.runner.verify_hide_preserves_other_states(before, hidden)
+        self.assertTrue(self.journal.data["other_state_ids_preserved"])
+        self.assertTrue(self.journal.data["hidden_count_delta_verified"])
+        for left, right in (
+            ({"count": 0, "target_names": [], "other_names": []}, {"count": 0, "target_names": [], "other_names": []}),
+            ({"count": 1, "target_names": ["target"], "other_names": []}, {"count": 0, "target_names": [], "other_names": []}),
+            (before, {**hidden, "target_names": ["target"]}),
+            (before, {**hidden, "other_names": ["other-1"]}),
+            (before, {**hidden, "other_names": ["other-1", "unrelated-new"]}),
+            (before, {**hidden, "count": 1}),
+        ):
+            with self.subTest(before=left, hidden=right), self.assertRaises(actual.SmokeFailure):
+                self.runner.verify_hide_preserves_other_states(left, right)
+
+    def test_approval_snapshot_timeout_still_blocks_restore(self):
+        def failure(*args, **kwargs):
+            self.runner.viewer.last_status = None
+            raise actual.SmokeFailure("read timed out")
+        self.runner.viewer.call.side_effect = failure
+        with self.assertRaises(actual.SmokeFailure):
+            self.runner.capture_approval_snapshot("owner_unhidden", 1)
+        self.assertTrue(self.journal.data["read_request_may_be_running"])
+        with self.assertRaises(actual.SmokeFailure):
+            self.runner.restore()
+        self.runner.admin.call.assert_not_called()
 
     def test_incomplete_page_and_changing_phase_counts_are_rejected(self):
         self.runner.approval_read = Mock(return_value={"counts": {"open": 26}, "items": []})
