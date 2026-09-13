@@ -362,7 +362,9 @@ class PerformanceRunner:
         if doc:
             ensure(all(doc.get(k) == v for k, v in target["fingerprint"].items()), "بصمة التعريف الحي لا تطابق الاختبار")
             if dt == "DocType" and target.get("schema_fields") is not None:
-                ensure(self.schema_fields(doc) == target["schema_fields"] and doc.get("permissions", []) == target["schema_permissions"],
+                ensure(self.schema_fields(doc) == target["schema_fields"]
+                       and self.canonical_permissions(doc.get("permissions", []))
+                       == self.canonical_permissions(target["schema_permissions"]),
                        "تغير مخطط أو صلاحيات DocType المعزول؛ توقف التنظيف للمراجعة")
         return target, doc
 
@@ -370,6 +372,24 @@ class PerformanceRunner:
     def schema_fields(doc):
         keys = ("fieldname", "fieldtype", "options", "reqd", "hidden", "read_only", "default")
         return [{key: row.get(key) for key in keys} for row in doc.get("fields", [])]
+
+    @staticmethod
+    def canonical_permissions(permissions):
+        """Normalize only the two observed insert-response / DB-GET differences.
+
+        Frappe's insert response retained the transient __unsaved flag, while
+        DB reads supplied the legacy, no-longer-DocField set_user_permissions
+        column as 0. Keep every real permission, identity, timestamp, unknown
+        key, list order and nonzero legacy value under the exact drift guard.
+        Do not rewrite the original manifest or its raw creation transcript.
+        """
+        normalized = []
+        for permission in permissions:
+            row = dict(permission)
+            row.pop("__unsaved", None)
+            row.setdefault("set_user_permissions", 0)
+            normalized.append(row)
+        return normalized
 
     def create_definition(self, dt, name, payload, fingerprint):
         ensure(self.admin.doc(dt, name, missing=True) is None, "اسم تعريف موجود؛ لن يُستبدل")

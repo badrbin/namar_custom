@@ -93,6 +93,71 @@ class OfflineTestCase(unittest.TestCase):
         return runner
 
 
+class SchemaDriftGuardTests(OfflineTestCase):
+    def definition_fixture(self):
+        runner = self.runner()
+        permission = {"name": "isolated-permission", "role": "Accounts User",
+                      "read": 1, "write": 1, "create": 1, "delete": 1,
+                      "if_owner": 0, "permlevel": 0, "__unsaved": 1}
+        document = {"name": runner.routed, "owner": "Administrator",
+                    "fields": [{"fieldname": "title", "fieldtype": "Data"}],
+                    "permissions": [{**permission, "set_user_permissions": 0}]}
+        document["permissions"][0].pop("__unsaved")
+        target = {"doctype": "DocType", "name": runner.routed,
+                  "fingerprint": {"owner": "Administrator"},
+                  "schema_fields": runner.schema_fields(document),
+                  "schema_permissions": [permission]}
+        runner.journal.data["definitions"] = [target]
+        runner.admin.doc.return_value = document
+        return runner, target, document
+
+    def test_insert_response_and_db_read_normalization_does_not_rewrite_manifest(self):
+        runner, target, document = self.definition_fixture()
+        original_target, original_document = deepcopy(target), deepcopy(document)
+        self.assertEqual(runner.assert_definition("DocType", runner.routed), (target, document))
+        self.assertEqual(target, original_target)
+        self.assertEqual(document, original_document)
+        runner.admin.request.assert_not_called()
+
+    def test_actual_permission_changes_still_block_resume_and_cleanup(self):
+        changes = {"role": "System Manager", "read": 0, "write": 0, "create": 0,
+                   "delete": 0, "if_owner": 1, "permlevel": 1, "name": "other",
+                   "modified": "new timestamp", "unknown_permission": 1,
+                   "set_user_permissions": 1}
+        for key, value in changes.items():
+            with self.subTest(key=key):
+                runner, _, document = self.definition_fixture()
+                document["permissions"][0][key] = value
+                with self.assertRaises(perf.SmokeFailure):
+                    runner.assert_definition("DocType", runner.routed)
+
+    def test_null_legacy_permission_is_not_silently_normalized(self):
+        runner, _, document = self.definition_fixture()
+        document["permissions"][0]["set_user_permissions"] = None
+        with self.assertRaises(perf.SmokeFailure):
+            runner.assert_definition("DocType", runner.routed)
+
+    def test_field_and_permission_row_drift_still_block(self):
+        for kind in ("field", "added_permission", "removed_permission", "missing_grant"):
+            with self.subTest(kind=kind):
+                runner, _, document = self.definition_fixture()
+                if kind == "field":
+                    document["fields"][0]["fieldtype"] = "Link"
+                elif kind == "added_permission":
+                    document["permissions"].append({"role": "System Manager", "read": 1})
+                elif kind == "removed_permission":
+                    document["permissions"] = []
+                else:
+                    document["permissions"][0].pop("read")
+                with self.assertRaises(perf.SmokeFailure):
+                    runner.assert_definition("DocType", runner.routed)
+
+    def test_permission_row_order_is_not_discarded(self):
+        first, second = {"name": "one", "role": "Accounts User"}, {"name": "two", "role": "System Manager"}
+        self.assertNotEqual(perf.PerformanceRunner.canonical_permissions([first, second]),
+                            perf.PerformanceRunner.canonical_permissions([second, first]))
+
+
 class VolumeAndOfflineModeTests(OfflineTestCase):
     def test_full_volume_has_unique_names_owner_halves_and_real_children(self):
         groups = perf.source_groups(PREFIX, USER_B)
