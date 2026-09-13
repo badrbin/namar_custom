@@ -60,6 +60,28 @@
 		return value || "لم يُحدد المستلم";
 	}
 
+	function keep_editor_state_on_refresh(control, frm, cdt, cdn) {
+		if (!control) return;
+		control._namar_followups_context = { frm, cdt, cdn };
+		control._namar_followups_apply_state = () => {
+			const context = control._namar_followups_context;
+			const current_row = locals[context.cdt]?.[context.cdn];
+			const reason = is_hidden(current_row)
+				? "ألغِ الإخفاء لتعديل المستلمين أو إظهار موافقات هذه المرحلة." : "";
+			control.$input?.prop("disabled", !can_edit_recipients(context.frm, current_row)).attr("title", reason);
+		};
+		if (!control._namar_followups_native_refresh_input) {
+			// ControlButton refresh enables its input again; restore this button's state afterwards.
+			control._namar_followups_native_refresh_input = control.refresh_input;
+			control.refresh_input = function (...args) {
+				const result = this._namar_followups_native_refresh_input.apply(this, args);
+				this._namar_followups_apply_state();
+				return result;
+			};
+		}
+		control._namar_followups_apply_state();
+	}
+
 	function render_summary(frm, cdt, cdn) {
 		const row = locals[cdt]?.[cdn];
 		const controls = grid_row(frm, cdn)?.grid_form?.fields_dict;
@@ -83,13 +105,13 @@
 			html = `<p><strong>مخفية من موافقات متابعاتي</strong><br>
 				<span class="text-muted">اختيارات المستلمين محفوظة. ${disabled_reason}</span></p>${html}`;
 		}
-		controls[SUMMARY_FIELD].$wrapper.html(rtl(html));
+		// HTML controls re-render df.options later; keep literal user text out of the template parser.
+		controls[SUMMARY_FIELD].set_value(rtl(html).replace(/[{}]/g, (char) => char === "{" ? "&#123;" : "&#125;"));
 		if (controls[HIDE_FIELD]?.$wrapper) {
 			controls[HIDE_FIELD].$wrapper.attr("dir", "rtl").css("text-align", "right");
 		}
 		controls[EDIT_FIELD]?.$wrapper.attr("dir", "rtl").css("text-align", "right");
-		controls[EDIT_FIELD]?.$input.prop("disabled", !can_edit_recipients(frm, row))
-			.attr("title", hidden ? disabled_reason : "");
+		keep_editor_state_on_refresh(controls[EDIT_FIELD], frm, cdt, cdn);
 	}
 
 	function normalize_targets(rows, allowed_fields) {
