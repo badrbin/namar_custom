@@ -399,6 +399,7 @@ class NamarMyFollowups {
 		this.state.items = [];
 		this.state.counts = {};
 		this.state.total = null;
+		if (source === "approvals") this.state.list_status = "idle";
 		this.state.has_more = false;
 		this.state.next_start = null;
 		this.state.limit_start = 0;
@@ -493,7 +494,7 @@ class NamarMyFollowups {
 			this.state.loading_more = true;
 			this.render_pagination();
 		} else {
-			if (this.source_counts[source] === null) {
+			if (source === "approvals" || this.source_counts[source] === null) {
 				this.source_count_status[source] = "loading";
 				this.render_source_counts();
 			}
@@ -505,6 +506,7 @@ class NamarMyFollowups {
 			}
 			this.state.list_status = "loading";
 			this.state.limit_start = 0;
+			if (source === "approvals") this.render_filters();
 			this.render_list_loading();
 		}
 
@@ -584,10 +586,11 @@ class NamarMyFollowups {
 			if (sequence !== this.list_sequence) return;
 			this.state.list_status = "error";
 			this.state.loading_more = false;
-			if (this.source_counts[source] === null) {
+			if (source === "approvals" || this.source_counts[source] === null) {
 				this.source_count_status[source] = "error";
 				this.render_source_counts();
 			}
+			if (source === "approvals") this.render_filters();
 			this.render_list_error();
 			this.log_error("load_list", error);
 		}
@@ -685,14 +688,20 @@ class NamarMyFollowups {
 		}
 
 		if (this.state.source === "approvals") {
+			const status = this.state.list_status;
+			const is_loading = status === "idle" || status === "loading";
 			const known_total = this.state.counts.all ?? this.state.total;
-			const total = known_total === null || known_total === undefined
-				? `${this.state.items.length}${this.state.has_more ? "+" : ""}`
-				: this.number(known_total);
+			const total = status === "error" ? "—" : status !== "ready" ? "…"
+				: known_total === null || known_total === undefined
+					? `${this.state.items.length}${this.state.has_more ? "+" : ""}`
+					: this.number(known_total);
+			const count_label = status === "error" ? __("تعذّر تحميل عدد الموافقات")
+				: status !== "ready" ? __("جارٍ تحميل عدد الموافقات")
+					: __("عدد الموافقات بانتظار مراجعتي");
 			this.$filters.removeClass("is-mentions").addClass("is-approvals").html(`
 				<button type="button" class="mf-filter-btn is-active" data-bucket="all" role="tab" aria-selected="true">
 					<span>${this.escape(__("بانتظار مراجعتي"))}</span>
-					<strong>${this.escape(total)}</strong>
+					<strong aria-live="polite" aria-busy="${is_loading}" title="${this.escape_attr(count_label)}">${this.escape(total)}</strong>
 				</button>
 			`);
 			return;
