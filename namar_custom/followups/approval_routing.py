@@ -16,7 +16,7 @@ from namar_custom.followups.approval_routing_settings import (
 from namar_custom.followups.reference_access import quiet_reference_errors
 
 
-BATCH_SIZE = 500
+BATCH_SIZE = 2000
 AUTOMATIC_ROLES = {"All", "Guest", "Desk User", "Administrator"}
 FALLBACK_NOTE = "تعذر تحديد مستلمين مؤهلين؛ تظهر الموافقة حسب أدوار سير العمل."
 TARGET_LABELS = {
@@ -98,6 +98,7 @@ class ApprovalRoutingResolver:
             "Workflow",
             fields=["name", "document_type"],
             filters={"is_active": 1},
+            order_by=None,
             limit_page_length=0,
         )
         workflow_doctypes = {row["name"]: row["document_type"] for row in workflows}
@@ -106,6 +107,7 @@ class ApprovalRoutingResolver:
                 "Workflow Document State",
                 fields=["parent", "state", *setting_fields],
                 filters={"parent": ["in", workflow_names], "parenttype": "Workflow"},
+                order_by=None,
                 limit_page_length=0,
             )
             for state in states:
@@ -127,6 +129,7 @@ class ApprovalRoutingResolver:
                     "Workflow Transition",
                     fields=["parent", "state", "allowed", "allow_self_approval", "condition"],
                     filters={"parent": ["in", workflow_names], "parenttype": "Workflow"},
+                    order_by=None,
                     limit_page_length=0,
                 ):
                     key = (workflow_doctypes[transition["parent"]], transition["state"])
@@ -289,11 +292,17 @@ class ApprovalRoutingResolver:
         names_by_doctype = defaultdict(set)
         requested_fields = defaultdict(set)
         for action in actions:
+            targets = self._rule(action)
+            # Fixed recipients need no source value to become candidates. The
+            # unknown owner makes this precheck deliberately overinclusive;
+            # _can_approve_reference rechecks self approval on the full record.
+            if not any(target["type"] in (OWNER_TARGET, FIELD_TARGET) for target in targets):
+                continue
             doctype = action.get("reference_doctype")
             name = action.get("reference_name")
             if doctype and name:
                 names_by_doctype[doctype].add(name)
-                for target in self._rule(action):
+                for target in targets:
                     if target["type"] == FIELD_TARGET:
                         requested_fields[doctype].add(target["field"])
         headers = {}
@@ -311,7 +320,8 @@ class ApprovalRoutingResolver:
             fields = ["name", "owner", *sorted(requested_fields[doctype] & self._user_fields[doctype])]
             for batch in _batches(names):
                 for row in self.frappe.get_all(
-                    doctype, fields=fields, filters={"name": ["in", batch]}, limit_page_length=0,
+                    doctype, fields=fields, filters={"name": ["in", batch]},
+                    order_by=None, limit_page_length=0,
                 ):
                     headers[(doctype, row["name"])] = row
         return headers
@@ -336,6 +346,7 @@ class ApprovalRoutingResolver:
                     doctype,
                     fields=["*"],
                     filters={"name": ["in", batch]},
+                    order_by=None,
                     limit_page_length=0,
                 )
                 parents = {doc["name"]: doc for doc in parent_rows}
@@ -357,11 +368,19 @@ class ApprovalRoutingResolver:
                             "parentfield": field.fieldname,
                             "parent": ["in", list(parents)],
                         },
-                        order_by="idx asc",
+                        order_by=None,
                         limit_page_length=0,
                     ) if parents else ():
                         child["doctype"] = field.options
                         parents[child["parent"]][field.fieldname].append(child)
+                    # Native Document.load_from_db orders each parent's table
+                    # by idx. Sorting small per-parent lists avoids requesting
+                    # one global sort across children of up to 2,000 parents.
+                    # SQL ASC puts NULL before zero; keep that ordering too.
+                    for parent in parents.values():
+                        parent[field.fieldname].sort(
+                            key=lambda row: (row.get("idx") is not None, row.get("idx") or 0)
+                        )
                 for doc in parent_rows:
                     doc["doctype"] = doctype
                     references[(doctype, doc["name"])] = doc
@@ -472,11 +491,13 @@ class ApprovalRoutingResolver:
             users.update({row["name"]: row for row in self.frappe.get_all(
                 "User", fields=fields,
                 filters={"enabled": 1, "user_type": "System User"},
+                order_by=None,
                 limit_page_length=0,
             )})
         for batch in _batches(names - users.keys()):
             users.update({row["name"]: row for row in self.frappe.get_all(
-                "User", fields=fields, filters={"name": ["in", batch]}, limit_page_length=0,
+                "User", fields=fields, filters={"name": ["in", batch]},
+                order_by=None, limit_page_length=0,
             )})
         roles = defaultdict(set)
         role_members = defaultdict(set)
@@ -484,6 +505,7 @@ class ApprovalRoutingResolver:
             for row in self.frappe.get_all(
                 "Has Role", fields=["parent", "role"],
                 filters={"parenttype": "User", "parent": ["in", batch]},
+                order_by=None,
                 limit_page_length=0,
             ):
                 # Named role targets use actual memberships, like Frappe's
@@ -495,7 +517,9 @@ class ApprovalRoutingResolver:
                     roles[row["parent"]].add(row["role"])
         known_roles = set()
         if users and ("Administrator" in users or any(target["type"] == ROLE_TARGET for target in targets)):
-            known_roles = {row["name"] for row in self.frappe.get_all("Role", fields=["name"], limit_page_length=0)}
+            known_roles = {row["name"] for row in self.frappe.get_all(
+                "Role", fields=["name"], order_by=None, limit_page_length=0,
+            )}
         for name, user in users.items():
             if name == "Administrator":
                 roles[name] = set(known_roles)
@@ -511,6 +535,7 @@ class ApprovalRoutingResolver:
             for role in self.frappe.get_all(
                 "Workflow Action Permitted Role", fields=["parent", "role"],
                 filters={"parenttype": "Workflow Action", "parent": ["in", batch]},
+                order_by=None,
                 limit_page_length=0,
             ):
                 roles[role["parent"]].add(role["role"])

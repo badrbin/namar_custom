@@ -501,8 +501,8 @@ class ApprovalRoutingTestCase(unittest.TestCase):
         self.assertEqual(final_query["or_filters"], [["Workflow Action", "reference_name", "like", "%WA-01%"]])
         self.assertEqual(final_query["limit_start"], 2)
         queries = Counter(doctype for kind, doctype, _ in runtime.calls)
-        self.assertEqual(queries["Workflow Action"], 5)
-        self.assertEqual(queries["Material Request"], 6)
+        self.assertEqual(queries["Workflow Action"], 3)
+        self.assertEqual(queries["Material Request"], 2)
         self.assertEqual(queries["User"], 1)
         self.assertEqual(queries["Has Role"], 1)
         self.assertEqual(runtime.service._approval_counts(), {"open": 554})
@@ -589,7 +589,7 @@ class ApprovalRoutingTestCase(unittest.TestCase):
         self.assertEqual(runtime.permission_reads, [])
         self.assertFalse(any(doctype in ("Material Request", "Material Request Item", "User", "Has Role") for _, doctype, _ in runtime.calls))
         action_queries = [options for kind, doctype, options in runtime.calls if kind == "list"]
-        self.assertEqual(len(action_queries), 11)  # Aggregate + 9 affected batches + final page.
+        self.assertEqual(len(action_queries), 5)  # Aggregate + 3 affected batches + final page.
         self.assertEqual(action_queries[0]["fields"], ["count(name) as count"])
         self.assertTrue(all(options["filters"].get("workflow_state") == ["in", ["Pending Approval"]] for options in action_queries[1:-1]))
         self.assertEqual(len(action_queries[-1]["filters"]["name"][1]), 4250)
@@ -606,7 +606,7 @@ class ApprovalRoutingTestCase(unittest.TestCase):
         self.assertEqual(result["counts"], {"open": 7500})
         self.assertTrue(result["items"][0]["routing"]["fallback"])
         parent_queries = [options for kind, doctype, options in runtime.calls if doctype == "Material Request"]
-        self.assertEqual(len(parent_queries), 9)
+        self.assertEqual(len(parent_queries), 3)
         self.assertEqual(sum(len(options["filters"]["name"][1]) for options in parent_queries), 4250)
         self.assertTrue(all(options["fields"] == ["name", "owner"] for options in parent_queries))
         self.assertFalse(any(doctype == "Material Request Item" for _, doctype, _ in runtime.calls))
@@ -641,6 +641,80 @@ class ApprovalRoutingTestCase(unittest.TestCase):
         runtime.frappe.session.user = B
         self.assertEqual(runtime.approvals()["counts"], {"open": 1})
         self.assertEqual(state[FIELD], original_targets)
+
+    def test_fixed_user_skips_headers_but_rechecks_self_approval_on_full_reference(self):
+        runtime = RoutingRuntime([{"type": "user", "user": A}], size=2)
+        runtime.data["Workflow Transition"][0].allow_self_approval = 0
+        runtime.data["Material Request"][1].owner = B
+        result = runtime.approvals()
+        self.assertTrue(result["items"][0]["routing"]["fallback"])
+        self.assertFalse(result["items"][1]["routing"]["fallback"])
+        parent_queries = [options for _, doctype, options in runtime.calls if doctype == "Material Request"]
+        self.assertEqual(len(parent_queries), 1)
+        self.assertEqual(parent_queries[0]["fields"], ["*"])
+        self.assertEqual(len(runtime.constructed_docs), 2)
+
+    def test_fixed_role_coarse_candidates_cannot_bypass_reference_owner_rules(self):
+        runtime = RoutingRuntime([{"type": "role", "role": "Branch"}], size=2)
+        runtime.data["Workflow Transition"][0].allow_self_approval = 0
+        runtime.data["Material Request"][1].owner = B
+        result = runtime.approvals()
+        self.assertEqual([row["name"] for row in result["items"]], ["WA-00001"])
+        self.assertEqual(result["counts"], {"open": 1})
+        parent_queries = [options for _, doctype, options in runtime.calls if doctype == "Material Request"]
+        self.assertEqual(len(parent_queries), 1)
+        self.assertEqual(parent_queries[0]["fields"], ["*"])
+
+    def test_mixed_fixed_and_dynamic_targets_still_read_headers(self):
+        for dynamic in ({"type": "owner"}, {"type": "field", "field": "responsible_user"}):
+            runtime = RoutingRuntime([{"type": "user", "user": A}, dynamic])
+            runtime.approvals()
+            parent_queries = [options for _, doctype, options in runtime.calls if doctype == "Material Request"]
+            with self.subTest(dynamic=dynamic):
+                self.assertNotEqual(parent_queries[0]["fields"], ["*"])
+                self.assertIn("owner", parent_queries[0]["fields"])
+                if dynamic["type"] == "field":
+                    self.assertIn("responsible_user", parent_queries[0]["fields"])
+
+    def test_children_sort_per_parent_and_field_with_sql_null_first_semantics(self):
+        runtime = RoutingRuntime([{"type": "user", "user": A}], size=2)
+        runtime.child_tables["Material Request"] = [("items", "Material Request Item"), ("alternatives", "Material Request Item")]
+        children = []
+        expected = {}
+        for parent in runtime.data["Material Request"]:
+            for field in ("items", "alternatives"):
+                expected[(parent.name, field)] = []
+                for suffix, idx in (("three", 3), ("zero", 0), ("null", None), ("two", 2), ("one", 1)):
+                    child = FakeFrappeDict(
+                        name=f"{parent.name}-{field}-{suffix}", parent=parent.name,
+                        parenttype="Material Request", parentfield=field, idx=idx,
+                        warehouse=f"WH-{suffix}", qty=13,
+                    )
+                    children.append(child)
+                expected[(parent.name, field)] = [f"{parent.name}-{field}-{suffix}" for suffix in ("null", "zero", "one", "two", "three")]
+        runtime.data["Material Request Item"] = list(reversed(children))
+        runtime.approvals()
+        for doc in runtime.constructed_docs:
+            for field in ("items", "alternatives"):
+                self.assertEqual([row["name"] for row in doc[field]], expected[(doc["name"], field)])
+                self.assertTrue(all(row["qty"] == 13 and row["warehouse"].startswith("WH-") for row in doc[field]))
+        for kind, doctype, options in runtime.calls:
+            if kind == "all":
+                self.assertIn("order_by", options)
+                self.assertIsNone(options["order_by"])
+            elif options.get("limit_page_length") == 2000:
+                self.assertEqual(options["order_by"], "name asc")
+
+    def test_4250_fixed_targets_keep_bounded_batches_and_skip_all_header_queries(self):
+        runtime = RoutingRuntime([{"type": "user", "user": A}], size=4250)
+        runtime.approvals(page_length=25)
+        parent_queries = [options for _, doctype, options in runtime.calls if doctype == "Material Request"]
+        self.assertEqual(len(parent_queries), 3)
+        self.assertTrue(all(options["fields"] == ["*"] for options in parent_queries))
+        sizes = [len(options["filters"]["name"][1]) for options in parent_queries]
+        self.assertEqual(sorted(sizes), [250, 2000, 2000])
+        self.assertEqual(len(runtime.constructed_docs), 4250)
+        self.assertEqual(len(runtime.permission_reads), 4250)
 
 
 if __name__ == "__main__":
