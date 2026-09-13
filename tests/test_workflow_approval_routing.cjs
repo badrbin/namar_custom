@@ -9,13 +9,14 @@ const dialogs = [];
 const writes = [];
 const wrapper = () => ({
   html(value) { this.content = value; return this; },
-  attr() { return this; }, css() { return this; },
+  attr(key, value) { this.attributes = { ...this.attributes, [key]: value }; return this; }, css() { return this; },
   prop(key, value) { this[key] = value; return this; },
   find() { return this; },
   on(event, selector, handler) { this.click = handler; return this; },
 });
 const row = { name: "ROW-1", doctype: "Workflow Document State", state: "المراجعة" };
 const controls = {
+  custom_followups_hide_from_approvals: { $wrapper: wrapper() },
   custom_followups_routing_summary: { $wrapper: wrapper() },
   custom_followups_routing_edit: { $wrapper: wrapper(), $input: wrapper() },
 };
@@ -162,6 +163,52 @@ const open = async () => {
   assert.ok(!html(escapedGroup).includes("<script>"));
   assert.ok(html(escapedGroup).includes("&lt;script&gt;"));
   escapedGroup.hide();
+
+  // The native checkbox changes visibility only; it never clears or rewrites recipients.
+  const hideField = "custom_followups_hide_from_approvals";
+  row.custom_followups_routing_targets = JSON.stringify({ version: 1, targets: [{ type: "owner" }] });
+  const retainedTargets = row.custom_followups_routing_targets;
+  const writesBeforeToggle = writes.length;
+  for (const value of [1, "1", true]) {
+    row[hideField] = value;
+    events[hideField](frm, row.doctype, row.name);
+    assert.match(controls.custom_followups_routing_summary.$wrapper.content, /مخفية من موافقات متابعاتي/);
+    assert.match(controls.custom_followups_routing_summary.$wrapper.content, /اختيارات المستلمين محفوظة/);
+    assert.equal(controls.custom_followups_routing_edit.$input.disabled, true);
+    assert.match(controls.custom_followups_routing_edit.$input.attributes.title, /ألغِ الإخفاء/);
+    assert.equal(controls.custom_followups_hide_from_approvals.$wrapper.attributes.dir, "rtl");
+    const dialogCount = dialogs.length;
+    await events.custom_followups_routing_edit(frm, row.doctype, row.name);
+    assert.equal(dialogs.length, dialogCount);
+    assert.equal(row.custom_followups_routing_targets, retainedTargets);
+  }
+  for (const value of [0, "0", false]) {
+    row[hideField] = value;
+    events[hideField](frm, row.doctype, row.name);
+    assert.equal(controls.custom_followups_routing_edit.$input.disabled, false);
+    assert.doesNotMatch(controls.custom_followups_routing_summary.$wrapper.content, /مخفية من موافقات متابعاتي/);
+    const available = await open();
+    assert.match(html(available), /منشئ المستند/);
+    available.hide();
+    assert.equal(row.custom_followups_routing_targets, retainedTargets);
+  }
+  assert.equal(writes.length, writesBeforeToggle);
+
+  // A draft opened before the checkbox changes must not overwrite hidden-stage settings.
+  const pendingGroup = await open();
+  const pendingRecipient = await add(pendingGroup);
+  row[hideField] = 1;
+  events[hideField](frm, row.doctype, row.name);
+  pendingRecipient.primary_action({ type: "user", user: "ignored@example.com" });
+  await click(pendingGroup, "remove", 0);
+  await pendingGroup.primary_action();
+  assert.equal(row.custom_followups_routing_targets, retainedTargets);
+  assert.equal(writes.length, writesBeforeToggle);
+  pendingRecipient.hide();
+  pendingGroup.hide();
+  row[hideField] = 0;
+  events[hideField](frm, row.doctype, row.name);
+
   frm.perm[0].write = 0;
   const count = dialogs.length;
   await events.custom_followups_routing_edit(frm, row.doctype, row.name);
