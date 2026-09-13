@@ -6,3 +6,4 @@
 namar_custom.patches.v0_0_5.sync_converted_mention_followups
 namar_custom.patches.v0_0_7.purge_deleted_reference_followups
 namar_custom.patches.v0_0_8.configure_approval_routing
+namar_custom.patches.v0_0_9.configure_approval_visibility

@@ -10,6 +10,7 @@ import frappe
 
 STATE_DOCTYPE = "Workflow Document State"
 ROUTING_FIELD = "custom_followups_routing_targets"
+HIDE_FIELD = "custom_followups_hide_from_approvals"
 ROLE_TARGET = "role"
 USER_TARGET = "user"
 OWNER_TARGET = "owner"
@@ -157,7 +158,32 @@ def get_custom_field_definitions() -> list[dict]:
 
 def configure_approval_routing_fields() -> None:
     """Create missing fields once; never overwrite a field with another purpose."""
-    definitions = get_custom_field_definitions()
+    _create_missing_custom_fields(get_custom_field_definitions())
+
+
+def get_approval_visibility_field_definitions() -> list[dict]:
+    return [{
+        "fieldname": HIDE_FIELD,
+        "label": "إخفاء من موافقات متابعاتي",
+        "fieldtype": "Check",
+        "default": "0",
+        "insert_after": "custom_followups_routing_edit",
+        "description": (
+            '<div dir="rtl" style="text-align:right">'
+            "تُخفى مستندات هذه المرحلة من موافقات متابعاتي وعداداتها لجميع الموظفين. "
+            "تبقى حالة المستند وصلاحيات الاعتماد كما هي، وتُحفظ اختيارات المستلمين "
+            "لاستخدامها عند إلغاء الإخفاء."
+            "</div>"
+        ),
+    }]
+
+
+def configure_approval_visibility_fields() -> None:
+    """Add the visibility setting without rewriting v8 fields or workflow data."""
+    _create_missing_custom_fields(get_approval_visibility_field_definitions())
+
+
+def _create_missing_custom_fields(definitions: list[dict]) -> None:
     existing = {
         field["fieldname"]: field
         for field in frappe.get_all(

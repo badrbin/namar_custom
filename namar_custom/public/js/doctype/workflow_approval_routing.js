@@ -3,6 +3,7 @@
 	"use strict";
 
 	const TARGETS_FIELD = "custom_followups_routing_targets";
+	const HIDE_FIELD = "custom_followups_hide_from_approvals";
 	const SUMMARY_FIELD = "custom_followups_routing_summary";
 	const EDIT_FIELD = "custom_followups_routing_edit";
 	const MAX_TARGETS = 50;
@@ -18,6 +19,14 @@
 
 	function can_edit(frm) {
 		return !frm.read_only && Boolean(frm.perm?.[0]?.[frm.is_new() ? "create" : "write"]);
+	}
+
+	function is_hidden(row) {
+		return Boolean(Number(row?.[HIDE_FIELD] || 0));
+	}
+
+	function can_edit_recipients(frm, row) {
+		return can_edit(frm) && Boolean(row) && !is_hidden(row);
 	}
 
 	function read_targets(row) {
@@ -68,9 +77,19 @@
 		} catch (_error) {
 			html = '<span class="text-danger">راجع إعداد مستلمي الموافقة قبل حفظ سير العمل.</span>';
 		}
+		const hidden = is_hidden(row);
+		const disabled_reason = "ألغِ الإخفاء لتعديل المستلمين أو إظهار موافقات هذه المرحلة.";
+		if (hidden) {
+			html = `<p><strong>مخفية من موافقات متابعاتي</strong><br>
+				<span class="text-muted">اختيارات المستلمين محفوظة. ${disabled_reason}</span></p>${html}`;
+		}
 		controls[SUMMARY_FIELD].$wrapper.html(rtl(html));
+		if (controls[HIDE_FIELD]?.$wrapper) {
+			controls[HIDE_FIELD].$wrapper.attr("dir", "rtl").css("text-align", "right");
+		}
 		controls[EDIT_FIELD]?.$wrapper.attr("dir", "rtl").css("text-align", "right");
-		controls[EDIT_FIELD]?.$input.prop("disabled", !can_edit(frm));
+		controls[EDIT_FIELD]?.$input.prop("disabled", !can_edit_recipients(frm, row))
+			.attr("title", hidden ? disabled_reason : "");
 	}
 
 	function normalize_targets(rows, allowed_fields) {
@@ -102,13 +121,13 @@
 	}
 
 	async function open_editor(frm, cdt, cdn) {
-		if (!can_edit(frm)) return;
+		const row = locals[cdt]?.[cdn];
+		if (!can_edit_recipients(frm, row)) return;
 		if (!frm.doc.document_type) {
 			frappe.throw(rtl("اختر نوع المستند أولًا لتحديد مستلمي الموافقة."));
 		}
 		await frappe.model.with_doctype(frm.doc.document_type);
-		const row = locals[cdt]?.[cdn];
-		if (!row) return;
+		if (!can_edit_recipients(frm, row)) return;
 		let targets;
 		let invalid_config = false;
 		try {
@@ -157,7 +176,7 @@
 		}
 
 		async function edit_recipient(index = null) {
-			if (!can_edit(frm)) return;
+			if (!can_edit_recipients(frm, row)) return;
 			if (index === null && targets.length >= MAX_TARGETS) {
 				frappe.throw(rtl(`يمكن تحديد ${MAX_TARGETS} مستلمًا أو قاعدة كحد أقصى لكل مرحلة.`));
 			}
@@ -185,7 +204,7 @@
 				],
 				primary_action_label: __("حفظ المستلم"),
 				primary_action(values) {
-					if (!can_edit(frm)) return;
+					if (!can_edit_recipients(frm, row)) return;
 					const [target] = normalize_targets([values], allowed_fields);
 					if (index === null) targets.push(target);
 					else targets[index] = target;
@@ -219,7 +238,7 @@
 			],
 			primary_action_label: __("تطبيق الاختيارات"),
 			async primary_action() {
-				if (!can_edit(frm)) return;
+				if (!can_edit_recipients(frm, row)) return;
 				const normalized = normalize_targets(targets, allowed_fields);
 				await frappe.model.set_value(cdt, cdn, TARGETS_FIELD,
 					JSON.stringify({ version: 1, targets: normalized }));
@@ -228,7 +247,7 @@
 			},
 		});
 		dialog.fields_dict.targets_list.$wrapper.on("click.namar-routing", "button[data-routing-action]", (event) => {
-			if (!can_edit(frm)) return;
+			if (!can_edit_recipients(frm, row)) return;
 			const index = Number(event.currentTarget.dataset.index);
 			if (!Number.isInteger(index) || index < 0 || index >= targets.length) return;
 			if (event.currentTarget.dataset.routingAction === "edit") return edit_recipient(index);
@@ -252,6 +271,7 @@
 	frappe.ui.form.on("Workflow Document State", {
 		form_render: render_summary,
 		custom_followups_routing_targets: render_summary,
+		custom_followups_hide_from_approvals: render_summary,
 		custom_followups_routing_edit: open_editor,
 	});
 })();
