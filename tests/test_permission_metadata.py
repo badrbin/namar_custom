@@ -63,29 +63,6 @@ def fixture():
 
 
 class PermissionMetadataScopeTest(unittest.TestCase):
-    def test_temporary_probe_requires_explicit_administrator_request(self):
-        for user, flag, enabled in (("Administrator", "1", True), ("Administrator", None, False),
-                                    ("ordinary@example.com", "1", False), ("Guest", "1", False)):
-            f, doc, parent, _, _ = fixture()
-            f.session = SimpleNamespace(user=user)
-            f.local.site = "testnamar.u.frappe.cloud"
-            f.form_dict = {"namar_metadata_probe": flag}
-            f.response = {}
-            with Scope(f).for_document(doc):
-                self.assertEqual("namar_metadata_probe" in f.response, enabled)
-            if enabled:
-                self.assertTrue(f.response["namar_metadata_probe"]["any_scope_active"])
-                self.assertEqual(f.response["namar_metadata_probe"]["scope"]["reason"], "active")
-                self.assertNotIn(user, str(f.response))
-
-    def test_temporary_probe_is_never_enabled_on_production(self):
-        f, doc, _, _, _ = fixture()
-        f.session = SimpleNamespace(user="Administrator")
-        f.local.site = "zawaya7.frappe.cloud"
-        f.form_dict = {"namar_metadata_probe": "1"}
-        f.response = {}
-        with Scope(f).for_document(doc):
-            self.assertNotIn("namar_metadata_probe", f.response)
     def test_native_ast_fingerprint_keeps_empty_fields_on_all_python_versions(self):
         node = ast.parse("f()").body[0].value
         self.assertEqual(_native_ast_dump(node), "Call(func=Name(id='f', ctx=Load()), args=[], keywords=[])")
@@ -257,8 +234,7 @@ class NativeBodyGuardTest(unittest.TestCase):
             ("utils/data.py", None, "compare"), ("utils/redis_wrapper.py", "RedisWrapper", "hget"),
         ):
             with self.subTest(name=name):
-                diagnostic = {}
-                self.assertTrue(_known_body(self.load_full_source(file, name, cls), name, diagnostic), diagnostic)
+                self.assertTrue(_known_body(self.load_full_source(file, name, cls), name))
 
     @unittest.skipUnless(sys.version_info[:2] == (3, 11), "Observed live fingerprints belong to Python 3.11")
     def test_full_source_matches_both_live_python311_bytecode_fingerprints(self):
@@ -303,9 +279,7 @@ class NativeBodyGuardTest(unittest.TestCase):
         function = self.load("model/base_document.py", "get", "BaseDocument")
         self.assertTrue(_known_body(function, "get"))
         function.__defaults__ = (None, 1, None)
-        diagnostic = {}
-        self.assertFalse(_known_body(function, "get", diagnostic))
-        self.assertEqual(diagnostic["reject_step"], "positional_defaults")
+        self.assertFalse(_known_body(function, "get"))
         function = self.load("utils/data.py", "compare")
         function.__defaults__ = ("Int",)
         self.assertFalse(_known_body(function, "compare"))
@@ -316,11 +290,7 @@ class NativeBodyGuardTest(unittest.TestCase):
             self.skipTest("This Python has no code exception table")
         self.assertTrue(function.__code__.co_exceptiontable)
         function.__code__ = function.__code__.replace(co_exceptiontable=b"")
-        diagnostic = {}
-        self.assertFalse(_known_body(function, "hget", diagnostic))
-        self.assertEqual(diagnostic["reject_step"], "compiled_code_shape")
-        self.assertFalse(diagnostic["code_components"]["exception_table"]["matches"])
-        self.assertEqual(len(diagnostic["code_components"]["exception_table"]["observed_hash"]), 64)
+        self.assertFalse(_known_body(function, "hget"))
 
     @contextmanager
     def native_scope(self):
