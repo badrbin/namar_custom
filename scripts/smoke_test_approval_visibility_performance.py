@@ -93,6 +93,7 @@ def load_existing_manifest(path, directory, site, *, expected_sha256=""):
 
 
 def validate_resume_manifest(data):
+    ensure(data.get("measurement_mode", "full_suite") == "full_suite", "جولة owner_gate مستقلة ولا تقبل استكمال القياسات؛ يتاح تنظيف manifest فقط")
     ensure(not data.get("cleanup_complete") and not data.get("mutation_outcome_unknown") and not data.get("inflight_mutations"),
            "لا استكمال مع تنظيف منتهٍ أو تعديل غير محسوم")
     ensure(data.get("native_approval_unchanged") is True and len(data.get("completed_sources", [])) == 1,
@@ -236,6 +237,7 @@ def config(args):
     ensure(1 <= args.insert_batch <= 200, "دفعة الإنشاء يجب أن تكون بين 1 و200")
     ensure(1 <= args.cleanup_workers <= 2, "يسمح بعمليتي تنظيف متزامنتين فقط")
     ensure(5 <= args.timeout <= 120, "مهلة HTTP يجب أن تكون بين 5 و120 ثانية")
+    ensure(not args.owner_gate_only or not (args.resume_measurements or args.cleanup_manifest), "owner-gate-only لجولة جديدة فقط؛ لا يُجمع مع استكمال أو تنظيف سجل")
     if args.pause_before_cleanup:
         ensure(not args.cleanup_manifest and sys.stdin.isatty(), "الوقفة تتطلب PTY ولا تُجمع مع استكمال التنظيف")
     if args.resume_measurements:
@@ -720,6 +722,14 @@ class PerformanceRunner:
         a_owned = all_names - b_owned
         ensure(len(all_names) == CONFIGURED and len(a_owned) == len(b_owned) == CONFIGURED // 2
                and self.open_fixture_count() == TOTAL, "يلزم استعادة الحجم وتوزيع الملكية الأصليين قبل القياس")
+        if getattr(self.args, "owner_gate_only", False):
+            ensure(not resume, "جولة owner_gate لا تقبل استكمال القياسات")
+            self.scenario("owner_split", [{"type": "owner"}], {"A": a_owned, "B": b_owned})
+            self.native_approval_proof(sorted(b_owned)[0])
+            self.journal.data.update(correctness_passed=True, performance_passed=not self.performance_failures,
+                                     performance_failures=self.performance_failures)
+            self.journal.flush()
+            return
         both = {"A": all_names, "B": all_names}
         a_only, b_only = {"A": all_names, "B": set()}, {"A": set(), "B": all_names}
         user_a, user_b = {"type": "user", "user": "Administrator"}, {"type": "user", "user": self.user_b}
@@ -1003,6 +1013,7 @@ def parse_args(argv=None):
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--cleanup-manifest", type=Path)
     mode.add_argument("--resume-measurements", type=Path, help="إعادة القياسات على نفس fixtures مع بديل واحد للمصدر المكتمل")
+    parser.add_argument("--owner-gate-only", action="store_true", help="جولة جديدة: قياس منشئ الطلب فقط بالحجم الكامل، مع التحقق الوظيفي والاعتماد القياسي والتنظيف")
     parser.add_argument("--expected-manifest-sha256", default="", help="بصمة manifest بعد التحقق من خروج العملية السابقة")
     parser.add_argument("--stopped-run-evidence", default="", help="مرجع إثبات خروج عملية القياس السابقة؛ pause وحدها لا تكفي")
     parser.add_argument("--runtime-ref", default="", help="commit للـruntime الجديد الذي تحقق root من نشره")
@@ -1021,6 +1032,8 @@ def main(argv=None):
     args = parse_args(argv)
     if not args.run:
         print(json.dumps({"mode": "dry_run", "network": False, "writes": False, "actions": TOTAL,
+                          "measurement_mode": "owner_gate" if args.owner_gate_only else "full_suite",
+                          "timed_scenarios": 1 if args.owner_gate_only else 14,
                           "configured_sources": CONFIGURED, "default_sources": TOTAL - CONFIGURED,
                           "child_rows_per_source": CHILD_ROWS, "total_child_rows": TOTAL * CHILD_ROWS,
                           "measurements_per_endpoint_per_scenario": SAMPLES, "page_length": 25, "max_seconds_each": MAX_SECONDS,
@@ -1060,6 +1073,7 @@ def main(argv=None):
             ensure(not path.exists(), "manifest موجود مسبقًا")
             file_lock = ManifestFileLock(path).acquire()
             data = {"schema": "approval_visibility_performance_v1", "site": env["site"], "prefix": prefix,
+                    "measurement_mode": "owner_gate" if args.owner_gate_only else "full_suite",
                     "definitions": [], "source_batches": [], "baseline": {}, "measurements": [],
                     "payload_generator": {"version": 1, "total": TOTAL, "configured": CONFIGURED, "child_rows": CHILD_ROWS},
                     "cleanup_complete": False}
@@ -1111,6 +1125,7 @@ def main(argv=None):
                     runner.verify_real_workflows()
         passed = data.get("cleanup_complete") and (args.cleanup_manifest or data.get("correctness_passed") and data.get("performance_passed"))
         print(json.dumps({"status": "passed" if passed else "failed", "manifest": str(path),
+                          "measurement_mode": data.get("measurement_mode", "full_suite"),
                           "correctness_passed": data.get("correctness_passed"), "performance_passed": data.get("performance_passed"),
                           "performance_failures": data.get("performance_failures", []), "cleanup_complete": data.get("cleanup_complete")}, ensure_ascii=False, indent=2))
         return 0 if passed else 1

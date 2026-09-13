@@ -273,6 +273,12 @@ class ConfigurationGuardsTests(OfflineTestCase):
                              cleanup_manifest=Path("manifest.json"))
         self.assertEqual(result["site"], SITE)
 
+    def test_owner_gate_cannot_be_used_to_resume_or_change_a_cleanup_mode(self):
+        self.assertEqual(self.config(owner_gate_only=True)["site"], SITE)
+        for existing in ("resume_measurements", "cleanup_manifest"):
+            with self.subTest(existing=existing), self.assertRaises(perf.SmokeFailure):
+                self.config(owner_gate_only=True, **{existing: Path("manifest.json")})
+
     def test_resume_requires_sha_runtime_stopped_evidence_and_pause(self):
         valid = {"resume_measurements": Path("manifest.json"), "pause_before_cleanup": True,
                  "expected_manifest_sha256": "a" * 64, "runtime_ref": "abcdef1234",
@@ -332,6 +338,67 @@ class PrivateJournalTests(OfflineTestCase):
         items = [(entry["worker"], entry["item"]) for entry in entries if entry["event"] == "thread_item"]
         self.assertEqual(len(items), 40)
         self.assertEqual(len(set(items)), 40)
+
+
+class OwnerGateOnlyTests(OfflineTestCase):
+    def test_dry_run_identifies_one_full_volume_scenario_without_network(self):
+        output = io.StringIO()
+        with patch.object(perf, "read_env", side_effect=AssertionError("No environment reads")), redirect_stdout(output):
+            self.assertEqual(perf.main(["--owner-gate-only"]), 0)
+        data = json.loads(output.getvalue())
+        self.assertEqual((data["measurement_mode"], data["timed_scenarios"]), ("owner_gate", 1))
+        self.assertEqual((data["actions"], data["configured_sources"], data["total_child_rows"]), (7500, 4250, 45000))
+        self.assertEqual(data["measurements_per_endpoint_per_scenario"], 5)
+        self.assertEqual((data["page_length"], data["max_seconds_each"]), (25, 3.0))
+        self.network.assert_not_called()
+
+    def test_owner_mode_keeps_both_accounts_split_and_ten_raw_samples_before_native_proof(self):
+        data = legacy_resume_data()
+        data.update(completed_sources=[], measurements=[], measurement_mode="owner_gate")
+        runner = self.runner(**data)
+        runner.args.owner_gate_only = True
+        runner.user_b, runner.role, runner.performance_failures = USER_B, "Accounts User", []
+        runner.set_rule = Mock()
+        runner.verify_actor = Mock(side_effect=lambda actor, names, **kwargs: 3250 + len(names))
+        expected = 3250 + 2125
+        client = SimpleNamespace(call=Mock(return_value={"items": [{}] * 25,
+            "counts": {"open": expected, "approvals": expected}}))
+        runner.clients["B"] = client
+
+        def native_proof(name):
+            self.assertEqual(client.call.call_count, 10)
+            self.assertEqual(name, runner.routed + " 00001")
+            runner.journal.data["native_approval_unchanged"] = True
+
+        runner.native_approval_proof = Mock(side_effect=native_proof)
+        runner.exercise()
+        runner.set_rule.assert_called_once_with([{"type": "owner"}], condition="", hidden=False)
+        self.assertEqual([(call.args[0], len(call.args[1])) for call in runner.verify_actor.call_args_list],
+                         [("A", 2125), ("B", 2125)])
+        a_names, b_names = [call.args[1] for call in runner.verify_actor.call_args_list]
+        self.assertFalse(a_names & b_names)
+        self.assertEqual(len(a_names | b_names), 4250)
+        self.assertEqual(runner.open_fixture_count(), 7500)
+        measurement, = runner.journal.data["measurements"]
+        self.assertEqual(measurement["scenario"], "owner_split")
+        self.assertEqual({k: len(v) for k, v in measurement["samples"].items()}, {"page_25": 5, "counts": 5})
+        self.assertTrue(runner.journal.data["native_approval_unchanged"])
+        self.assertTrue(runner.journal.data["performance_passed"])
+        runner.native_approval_proof.assert_called_once()
+        runner.performance_failures = ["owner_split"]
+        runner.native_approval_proof.side_effect = None
+        runner.exercise()
+        self.assertFalse(runner.journal.data["performance_passed"])
+
+    def test_owner_manifest_cannot_enter_full_suite_resume_or_overwrite_prior_raw_data(self):
+        data = {**legacy_resume_data(), "measurement_mode": "owner_gate"}
+        original = deepcopy(data)
+        journal = self.journal(**data)
+        loaded, _ = perf.load_existing_manifest(journal.path, self.directory, SITE)
+        self.assertEqual(loaded["measurement_mode"], "owner_gate")  # cleanup can still load it
+        with self.assertRaises(perf.SmokeFailure):
+            perf.archive_measurement_run(data, "abcdef1234", "a" * 64)
+        self.assertEqual(data, original)
 
 
 class ResumeArchiveTests(OfflineTestCase):
@@ -840,10 +907,12 @@ class StrictReadContractsTests(OfflineTestCase):
 
 
 class MainLifecycleTests(OfflineTestCase):
-    def run_main(self, mode="normal", *, interrupt_pause=False, resume_data=None, settled_evidence=""):
+    def run_main(self, mode="normal", *, interrupt_pause=False, resume_data=None, settled_evidence="", owner_gate_only=False):
         trace, instances = [], []
         original_manifest_bytes = None
         argv = ["--run", "--pause-before-cleanup"]
+        if owner_gate_only:
+            argv.append("--owner-gate-only")
         if mode == "resume":
             old_journal = self.journal(**(legacy_resume_data() if resume_data is None else resume_data))
             old_journal.event("old_round_finished")
@@ -927,6 +996,16 @@ class MainLifecycleTests(OfflineTestCase):
         self.assertEqual(runner.journal.data["state"], "review_released")
         for client in runner.clients.values():
             client.session.close.assert_called_once()
+        self.network.assert_not_called()
+
+    def test_owner_gate_new_manifest_keeps_standard_pause_cleanup_and_business_verification(self):
+        status, trace, runner, output, _ = self.run_main(owner_gate_only=True)
+        self.assertEqual(status, 0)
+        self.assertEqual(trace, ["preflight", "setup", "exercise", "pause", "cleanup", "verify_real_workflows"])
+        self.assertEqual(runner.journal.data["measurement_mode"], "owner_gate")
+        self.assertEqual(runner.journal.data["schema"], "approval_visibility_performance_v1")
+        self.assertIn('"measurement_mode": "owner_gate"', output)
+        self.assertTrue(runner.journal.data["cleanup_complete"])
         self.network.assert_not_called()
 
     def test_keyboard_interrupt_at_pause_still_cleans_and_closes_sessions(self):
