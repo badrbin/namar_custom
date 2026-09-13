@@ -178,6 +178,24 @@ class ApprovalIndexPolicyTests(unittest.TestCase):
                     runtime.data["Material Request"] = []
                 self.assertEqual((runtime.result()["state"], runtime.result()["reason"]), ("excluded", reason))
 
+    def test_source_docstatus_excludes_cancelled_even_with_matching_open_action(self):
+        for targets in ([], [{"type": "owner"}]):
+            for docstatus in (0, 1, 2, "2"):
+                with self.subTest(targets=targets, docstatus=docstatus):
+                    runtime = IndexPolicyRuntime(targets)
+                    runtime.data["Material Request"][0]["docstatus"] = docstatus
+                    result = runtime.result()
+                    if int(docstatus) == 2:
+                        self.assertEqual((result["state"], result["reason"]), ("excluded", "source_cancelled"))
+                        self.assertEqual(result["recipients"], ())
+                        self.assertFalse(any(call[1] in {"User", "Has Role"} for call in runtime.calls))
+                        self.assertEqual(runtime.permission_reads, [])
+                    else:
+                        self.assertEqual(result["state"], "ready")
+                        self.assertEqual(result["recipients"], (A,) if targets else (A, B, C))
+                    self.assertEqual(runtime.data["Workflow Action"][0]["status"], "Open")
+                    self.assertEqual(runtime.data["Material Request"][0]["workflow_state"], "Pending Approval")
+
     def test_recipient_condition_context_does_not_mutate_original_session(self):
         runtime = IndexPolicyRuntime([{"type": "role", "role": "Approver"}])
         runtime.data["Workflow Transition"][0]["condition"] = "frappe.session.user == doc.responsible_user and doc.grand_total > 100"

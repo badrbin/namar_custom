@@ -209,6 +209,8 @@ class ApprovalIndexPolicyEvaluator:
                     return self._result(action, "error", "unsupported_permission_dependency", **metadata)
                 reference = self.frappe.get_doc(doctype, name)
                 metadata["reference_modified"] = str(reference.get("modified") or "")
+                if int(reference.get("docstatus") or 0) == 2:
+                    return self._result(action, "excluded", "source_cancelled", **metadata)
                 state_field = workflow.get("workflow_state_field")
                 if not state_field or reference.get(state_field) != action.get("workflow_state"):
                     return self._result(action, "excluded", "stale_workflow_action", **metadata)
