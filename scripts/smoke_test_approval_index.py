@@ -44,6 +44,10 @@ class Failure(RuntimeError):
     pass
 
 
+class TransientIndexUpdate(Failure):
+    """Only a validated updating response permits a bounded read-only retry."""
+
+
 def ensure(condition, message):
     if not condition:
         raise Failure(message)
@@ -236,26 +240,62 @@ class Runner:
 
     def wait_ready(self):
         end = time.monotonic() + self.args.wait_seconds
-        checked_loading = False
         while True:
             state = self.admin.call(self.engine + ".status")
-            ensure(state and state.get("state") != "disabled", "Index is disabled; harness never enables it")
-            if state.get("state") == "ready":
-                return state
-            if not checked_loading:
-                # Do not assume a background job is still pending between two
-                # HTTP requests; assert either valid branch of the contract.
-                counts = self.admin.call(self.api + ".get_my_followups_counts")
-                if counts.get("approval_status") != "ready":
-                    ensure(counts["counts"]["approvals"] is None and counts["counts"]["total"] is None,
-                           "Loading/error badge exposed a fake zero or stale total")
-                    ensure(counts["attention_counts"]["approvals"] is None, "Loading/error attention badge was not null")
-                checked_loading = True
-                self.journal.event("loading_contract_observed", approval_status=counts.get("approval_status"))
-            self.journal.event("index_wait", state=state)
-            ensure(state.get("state") != "error", "Index reported error; inspect private status receipt")
+            ensure(state and state.get("state") in ("ready", "updating", "error"), "Index is disabled or status is invalid")
+            ensure(state.get("serving_enabled") is True, "TEST index serving was disabled during acceptance")
+            counts = {actor: client.call(self.api + ".get_my_followups_counts") for actor, client in self.clients.items()}
+            # The administrative status includes unrelated recipient cohorts.
+            # Retain it as evidence but wait only for these actual actors. Their
+            # own error/malformed/null contract still stops the test immediately.
+            self.journal.event("index_wait", administrative_status=state, actor_counts=counts)
+            actor_states = {actor: self.count_state(payload, actor) for actor, payload in counts.items()}
+            if all(value == "ready" for value in actor_states.values()):
+                return {**state, "actor_states": actor_states}
             ensure(time.monotonic() < end, "Bounded index readiness wait expired")
             time.sleep(2)
+
+    @staticmethod
+    def count_state(payload, actor):
+        ensure(isinstance(payload, dict), f"{actor}: invalid count envelope")
+        state = payload.get("approval_status")
+        ensure(state in ("ready", "updating", "error"), f"{actor}: invalid approval status")
+        counts, attention = payload.get("counts"), payload.get("attention_counts")
+        ensure(isinstance(counts, dict) and isinstance(attention, dict), f"{actor}: invalid count maps")
+        if state != "ready":
+            ensure(all(key in values and values[key] is None for values in (counts, attention) for key in ("approvals", "total")),
+                   f"{actor}: loading/error badge exposed a fake zero, stale total or missing null")
+            ensure(state != "error", f"{actor}: index reported error; not a transient retry")
+            return state
+        ensure(all(type(values.get(key)) is int and values[key] >= 0 for values in (counts, attention)
+                   for key in ("mentions", "followups", "approvals", "total")), f"{actor}: ready counts must be nonnegative integers")
+        ensure(all(values["total"] == sum(values[key] for key in ("mentions", "followups", "approvals"))
+                   for values in (counts, attention)), f"{actor}: ready count total disagrees")
+        ensure(attention["approvals"] == counts["approvals"], f"{actor}: attention approval count differs")
+        return state
+
+    @staticmethod
+    def require_page_ready(payload, actor):
+        ensure(isinstance(payload, dict), f"{actor}: invalid list envelope")
+        state = payload.get("status")
+        ensure(state in ("ready", "updating", "error"), f"{actor}: invalid list status")
+        counts = payload.get("counts")
+        ensure(isinstance(counts, dict), f"{actor}: invalid list counts")
+        if state != "ready":
+            ensure(payload.get("items") == [] and "open" in counts and counts["open"] is None,
+                   f"{actor}: unavailable list exposed rows, fake zero or missing null")
+            ensure(state != "error", f"{actor}: list reported error; not a transient retry")
+            raise TransientIndexUpdate(f"{actor}: list generation changed")
+        ensure(type(counts.get("open")) is int and counts["open"] >= 0, f"{actor}: ready list count is invalid")
+
+    @staticmethod
+    def require_detail_ready(payload, actor):
+        ensure(isinstance(payload, dict), f"{actor}: invalid detail envelope")
+        if "status" in payload:
+            ensure(payload["status"] == "updating", f"{actor}: detail reported error or invalid status")
+            ensure(not any(key in payload for key in ("approval", "reference", "timeline", "available_actions")),
+                   f"{actor}: updating detail exposed document information")
+            raise TransientIndexUpdate(f"{actor}: detail generation changed")
 
     def setup(self):
         ensure(self.admin.call("frappe.auth.get_logged_user") == "Administrator", "Dedicated TEST token must be Administrator")
@@ -307,12 +347,23 @@ class Runner:
         return client.call(self.api + ".get_approvals", {"search": self.fixture, "search_scope": "doctype", "page_length": 25, **extra})
 
     def check(self, scenario, expected):
+        # Never repeat a fixture write or silently swallow a correctness/error
+        # failure. Only the typed, validated updating branch retries reads once.
+        for attempt in range(2):
+            try:
+                return self.check_ready(scenario, expected)
+            except TransientIndexUpdate as exc:
+                self.journal.event("read_only_retry", scenario=scenario, attempt=attempt + 1, reason=str(exc))
+                if attempt == 1:
+                    raise Failure("Index changed during both bounded read-only attempts") from None
+
+    def check_ready(self, scenario, expected):
         ready = self.wait_ready()
         actions = self.admin.rows("Workflow Action", {"reference_doctype": self.fixture, "status": "Open"})
         observation = {}
         for actor, client in self.clients.items():
             listing = self.listing(client)
-            ensure(listing.get("status") == "ready", f"{scenario}: list not ready")
+            self.require_page_ready(listing, actor)
             rows = listing.get("items")
             ensure(isinstance(rows, list), "Invalid items contract")
             actual = {row["reference_name"] for row in rows}
@@ -320,14 +371,18 @@ class Runner:
             for row in rows:
                 ensure(not (row.get("routing") or {}).get("fallback"), "Index broadened an explicit recipient as fallback")
                 detail = client.call(self.api + ".get_approval_detail", {"action_name": row["name"]})
+                self.require_detail_ready(detail, actor)
                 ensure(detail and detail.get("approval", {}).get("name") == row["name"], "Detail/list identity mismatch")
             for action in actions:
                 if action["reference_name"] not in expected[actor]:
                     denied = client.request("GET", "/api/method/" + self.api + ".get_approval_detail",
-                                            params={"action_name": action["name"]}, expected=(403,))
+                                            params={"action_name": action["name"]}, expected=(200, 403))
+                    if "message" in denied and isinstance(denied["message"], dict):
+                        self.require_detail_ready(denied["message"], actor)
                     ensure(denied.get("exc_type") == "PermissionError", "Hidden index detail did not fail closed")
             counts = client.call(self.api + ".get_my_followups_counts")
-            ensure(counts.get("approval_status") == "ready", "Badge is not ready")
+            if self.count_state(counts, actor) == "updating":
+                raise TransientIndexUpdate(f"{actor}: count generation changed")
             ensure(counts["counts"]["approvals"] == listing["counts"]["open"], "Badge and list global counts disagree")
             ensure(counts["attention_counts"]["approvals"] == counts["counts"]["approvals"], "Badge attention count differs")
             ensure(counts["counts"]["total"] == sum(counts["counts"][key] for key in ("mentions", "followups", "approvals")),
