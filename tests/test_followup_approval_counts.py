@@ -528,6 +528,8 @@ class ApprovalCountsTestCase(unittest.TestCase):
                     "approvals": 6,
                     "total": 11,
                 },
+                "approval_status": "ready",
+                "approval_message": "",
             },
         )
         self.assertNotIn("items", result)

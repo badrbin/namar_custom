@@ -15,8 +15,15 @@ const testHooks = { skip_auto_start: true };
 const calls = [];
 const pendingResolvers = [];
 const assignedHrefs = [];
+const scheduledTimers = new Map();
+const realtimeHandlers = new Map();
+let timerSerial = 0;
+let now = Date.now();
 const linkState = { active: null, ariaCurrent: null };
 const linkStub = {
+  off: () => linkStub,
+  on: () => linkStub,
+  remove: () => linkStub,
   toggleClass: (_name, active) => {
     linkState.active = active;
     return linkStub;
@@ -32,11 +39,26 @@ const linkStub = {
 };
 const context = {
   console,
-  Date,
+  Date: { now: () => now },
+  Math: Object.assign(Object.create(Math), { random: () => 0 }),
   Promise,
+  setTimeout: (callback, delay) => {
+    const id = ++timerSerial;
+    scheduledTimers.set(id, { callback, delay });
+    return id;
+  },
+  clearTimeout: (id) => scheduledTimers.delete(id),
+  setInterval: () => ++timerSerial,
+  clearInterval: () => {},
   document: { hidden: false },
   location: { assign: (href) => assignedHrefs.push(href) },
   frappe: {
+    realtime: {
+      on: (event, handler) => realtimeHandlers.set(event, handler),
+      off: (event, handler) => {
+        if (realtimeHandlers.get(event) === handler) realtimeHandlers.delete(event);
+      },
+    },
     call: (options) => {
       calls.push(options);
       return new Promise((resolve) => {
@@ -74,12 +96,32 @@ async function main() {
       counts: { mentions: 2, followups: 9, approvals: 6, total: 17 },
       attention_counts: { mentions: 2, followups: 4, approvals: 6, total: 12, unread: 999 },
     } }) },
-    { mentions: 2, followups: 4, approvals: 6, total: 12 }
+    { mentions: 2, followups: 4, approvals: 6, total: 12, approval_status: "ready" }
   );
   assert.equal(normalize_counts({ counts: { mentions: 2, followups: 4, approvals: 6, total: 12 } }), null);
   assert.equal(normalize_counts({ attention_counts: { mentions: 2, followups: 4, approvals: 6, total: 11 } }), null);
   assert.equal(normalize_counts({ attention_counts: { mentions: true, followups: 4, approvals: 6, total: 11 } }), null);
   assert.equal(normalize_counts({ attention_counts: { mentions: 2, followups: -1, approvals: 6, total: 7 } }), null);
+  for (const approval_status of ["updating", "error"]) {
+    const normalized = normalize_counts({ approval_status,
+      attention_counts: { mentions: 2, followups: 4, approvals: null, total: null } });
+    assert.deepEqual({ ...normalized }, { mentions: 2, followups: 4, approvals: null, total: null, approval_status });
+    const unknown = badge_view(normalized);
+    assert.equal(unknown.sources[2].visible, true);
+    assert.equal(unknown.sources[2].text, approval_status === "error" ? "—" : "…");
+    assert.equal(unknown.sources[2].count, null);
+    assert.doesNotMatch(unknown.sources[2].label, /: 0|: null/);
+    assert.equal(unknown.sources[0].text, "2");
+    assert.equal(unknown.sources[1].text, "4");
+    assert.equal(normalize_counts({ approval_status,
+      attention_counts: { mentions: 2, followups: 4, approvals: 0, total: 6 } }), null);
+    assert.equal(normalize_counts({ approval_status,
+      attention_counts: { mentions: 2, followups: 4, approvals: 100, total: 106 } }), null);
+  }
+  assert.equal(normalize_counts({ approval_status: "ready",
+    attention_counts: { mentions: 2, followups: 4, approvals: null, total: null } }), null);
+  assert.equal(normalize_counts({ approval_status: "other",
+    attention_counts: { mentions: 2, followups: 4, approvals: 0, total: 6 } }), null);
 
   const view = badge_view({ mentions: 0, followups: 5, approvals: 100, total: 105 });
   assert.equal(view.visible, true);
@@ -157,10 +199,10 @@ async function main() {
   } });
   await first;
   assert.equal(controller.load_failed, false);
-  assert.deepEqual({ ...controller.counts }, { mentions: 1, followups: 3, approvals: 5, total: 9 });
+  assert.deepEqual({ ...controller.counts }, { mentions: 1, followups: 3, approvals: 5, total: 9, approval_status: "ready" });
 
   controller.merge_source_count({ source: "mentions", count: 4 });
-  assert.deepEqual({ ...controller.counts }, { mentions: 4, followups: 3, approvals: 5, total: 12 });
+  assert.deepEqual({ ...controller.counts }, { mentions: 4, followups: 3, approvals: 5, total: 12, approval_status: "ready" });
   controller.merge_source_count({ source: "mentions", count: true });
   assert.equal(controller.counts.mentions, 4);
 
@@ -187,7 +229,7 @@ async function main() {
   await latestRequest;
   assert.deepEqual(
     { ...raceController.counts },
-    { mentions: 8, followups: 4, approvals: 6, total: 18 }
+    { mentions: 8, followups: 4, approvals: 6, total: 18, approval_status: "ready" }
   );
 
   const followupEventController = new NamarMyFollowupsNavbar();
@@ -215,6 +257,100 @@ async function main() {
   pendingFollowupController.merge_source_count({ source: "followups", count: 99, force: true });
   assert.equal(pendingFollowupController.force_after_pending, true);
   assert.equal(pendingFollowupController.counts.followups, 2);
+
+  const indexController = new NamarMyFollowupsNavbar();
+  indexController.render = () => {};
+  indexController.ensure_node = () => {};
+  indexController.start();
+  assert.equal(typeof realtimeHandlers.get("namar_approvals_changed"), "function");
+  indexController.counts = { mentions: 2, followups: 3, approvals: 9, total: 14, approval_status: "ready" };
+  const indexRequest = indexController.refresh(true);
+  await Promise.resolve();
+  const indexCallsBeforeEvent = calls.length;
+  // Minimal, possibly global invalidation payload never contains trusted counts.
+  realtimeHandlers.get("namar_approvals_changed")({ approvals: 999 });
+  assert.equal(indexController.counts.approvals, null);
+  assert.equal(indexController.counts.total, null);
+  assert.equal(indexController.counts.approval_status, "updating");
+  assert.equal(indexController.counts.mentions, 2);
+  const eventTimer = indexController.approval_refresh_timer;
+  for (let i = 0; i < 20; i += 1) realtimeHandlers.get("namar_approvals_changed")();
+  assert.equal(indexController.approval_refresh_timer, eventTimer);
+  assert.equal(scheduledTimers.get(eventTimer).delay, 30000);
+  assert.equal(calls.length, indexCallsBeforeEvent);
+  pendingResolvers.shift()({ message: {
+    attention_counts: { mentions: 5, followups: 4, approvals: 9, total: 18 }, approval_status: "ready",
+  } });
+  await indexRequest;
+  // A response started before invalidation cannot resurrect the old number.
+  assert.equal(indexController.counts.approvals, null);
+  assert.equal(indexController.counts.approval_status, "updating");
+  assert.equal(indexController.counts.mentions, 5);
+  assert.equal(indexController.counts.followups, 4);
+  indexController.merge_source_count({ source: "mentions", count: 6 });
+  assert.equal(indexController.counts.total, null);
+  indexController.merge_source_count({ source: "approvals", count: 99 });
+  assert.equal(indexController.counts.approvals, null);
+  await indexController.refresh(true);
+  assert.equal(calls.length, indexCallsBeforeEvent);
+  // One coalesced request after the floor accepts a fresh complete generation.
+  now += 30000;
+  scheduledTimers.get(eventTimer).callback();
+  await Promise.resolve();
+  const readyIndexRequest = indexController.pending;
+  pendingResolvers.shift()({ message: {
+    attention_counts: { mentions: 6, followups: 4, approvals: 0, total: 10 }, approval_status: "ready",
+  } });
+  await readyIndexRequest;
+  assert.equal(indexController.counts.approvals, 0);
+  assert.equal(indexController.counts.approval_status, "ready");
+  assert.equal(badge_view(indexController.counts).sources[2].visible, false);
+  assert.equal(indexController.approval_refresh_timer, null);
+
+  // Unknown and failed endpoints cannot silently become zero or retain a number.
+  now += 30000;
+  const updatingRequest = indexController.refresh(true);
+  await Promise.resolve();
+  pendingResolvers.shift()({ message: {
+    attention_counts: { mentions: 6, followups: 4, approvals: null, total: null }, approval_status: "updating",
+  } });
+  await updatingRequest;
+  assert.equal(indexController.counts.approvals, null);
+  assert.equal(scheduledTimers.get(indexController.approval_refresh_timer).delay, 30000);
+  now += 30000;
+  const unavailableRequest = indexController.refresh(true);
+  await Promise.resolve();
+  const previousWarn = context.console.warn;
+  context.console.warn = () => {};
+  pendingResolvers.shift()({ exception: "Not found", http_status_code: 404 });
+  await unavailableRequest;
+  context.console.warn = previousWarn;
+  assert.equal(indexController.counts.approval_status, "error");
+  assert.equal(indexController.counts.approvals, null);
+  assert.equal(indexController.counts.mentions, 6);
+  assert.equal(indexController.counts.followups, 4);
+  assert.equal(badge_view(indexController.counts).sources[2].text, "—");
+  assert.equal(scheduledTimers.get(indexController.approval_refresh_timer).delay, 60000);
+  context.document.hidden = true;
+  now += 60000;
+  const callsBeforeHidden = calls.length;
+  await indexController.refresh(true);
+  assert.equal(calls.length, callsBeforeHidden);
+  context.document.hidden = false;
+  indexController.destroy();
+  assert.equal(realtimeHandlers.has("namar_approvals_changed"), false);
+  assert.equal(indexController.approval_refresh_timer, null);
+
+  const firstFailureController = new NamarMyFollowupsNavbar();
+  firstFailureController.render = () => {};
+  firstFailureController.mark_approvals_unavailable("error");
+  assert.equal(firstFailureController.counts.mentions, null);
+  assert.equal(firstFailureController.counts.followups, null);
+  const firstFailureView = badge_view(firstFailureController.counts);
+  assert.equal(firstFailureView.sources[0].visible, false);
+  assert.equal(firstFailureView.sources[1].visible, false);
+  assert.equal(firstFailureView.sources[2].text, "—");
+  assert.doesNotMatch(firstFailureView.status_label, /: 0|: null/);
 
   assert.match(source, /toolbar_setup\$\{EVENT_NAMESPACE\}/);
   assert.doesNotMatch(source, /get_route_str/);

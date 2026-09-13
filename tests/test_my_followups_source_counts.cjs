@@ -238,16 +238,16 @@ async function main() {
 
   assert.deepEqual(
     calls.map(({ method }) => method),
-    ["get_followups", "get_approvals"]
+    ["get_followups", "get_my_followups_counts"]
   );
   assert.equal(calls[0].args.page_length, 1);
   assert.equal(calls[0].args.priority, "");
-  assert.equal(calls[1].args.page_length, 1);
+  assert.deepEqual(calls[1].args, {});
   assert.equal(calls.some(({ method }) => method === "get_mention_detail"), false);
   assert.equal(calls.some(({ method }) => method === "mark_mention_seen"), false);
 
   resolvers.get_followups({ counts: { open: 4 }, items: [] });
-  resolvers.get_approvals({ counts: { open: 6 }, items: [] });
+  resolvers.get_my_followups_counts({ counts: { approvals: 6 }, approval_status: "ready" });
   await pending;
 
   assert.deepEqual(

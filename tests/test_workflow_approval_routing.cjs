@@ -9,15 +9,31 @@ const dialogs = [];
 const writes = [];
 const wrapper = () => ({
   html(value) { this.content = value; return this; },
-  attr() { return this; }, css() { return this; },
+  attr(key, value) { this.attributes = { ...this.attributes, [key]: value }; return this; }, css() { return this; },
   prop(key, value) { this[key] = value; return this; },
   find() { return this; },
   on(event, selector, handler) { this.click = handler; return this; },
 });
 const row = { name: "ROW-1", doctype: "Workflow Document State", state: "المراجعة" };
 const controls = {
-  custom_followups_routing_summary: { $wrapper: wrapper() },
-  custom_followups_routing_edit: { $wrapper: wrapper(), $input: wrapper() },
+  custom_followups_hide_from_approvals: { $wrapper: wrapper() },
+  custom_followups_routing_summary: {
+    $wrapper: wrapper(), df: { options: "حسب أدوار المرحلة" },
+    set_value(value) { this.df.options = value; this.$wrapper.html(value); return Promise.resolve(); },
+    refresh_input() {
+      assert.ok(!this.df.options.includes("{{") && !this.df.options.includes("{%"), "user text must not enter Frappe template syntax");
+      this.$wrapper.html(this.df.options);
+    },
+  },
+  custom_followups_routing_edit: {
+    $wrapper: wrapper(), $input: wrapper(), native_refresh_calls: 0,
+    refresh_input(...args) {
+      this.native_refresh_calls++;
+      this.native_refresh_arguments = args;
+      this.$input.prop("disabled", false);
+      return "native-refresh-result";
+    },
+  },
 };
 const frm = {
   doc: { document_type: "Material Request", states: [row] },
@@ -86,6 +102,9 @@ const open = async () => {
   assert.match(controls.custom_followups_routing_summary.$wrapper.content, /dir="rtl"/);
 
   const group = await open();
+  assert.match(group.fields_dict.explanation.df.options, /تُسجّل مشكلة توجيه ولا يتوسع العرض إلى الأدوار تلقائيًا/);
+  assert.match(group.fields_dict.explanation.df.options, /لإشراك دور مع المستلمين أضفه صراحةً/);
+  assert.doesNotMatch(group.fields_dict.explanation.df.options, /إذا تعذر تحديد جميع المستلمين المؤهلين يعود العرض للأدوار/);
   const first = await add(group);
   assert.equal(first.values.type, "user", "type is assigned after construction instead of Frappe's user default keyword");
   assert.equal(first.fields_dict.type.df.default, undefined);
@@ -162,6 +181,116 @@ const open = async () => {
   assert.ok(!html(escapedGroup).includes("<script>"));
   assert.ok(html(escapedGroup).includes("&lt;script&gt;"));
   escapedGroup.hide();
+
+  // The native checkbox changes visibility only; it never clears or rewrites recipients.
+  const hideField = "custom_followups_hide_from_approvals";
+  row.custom_followups_routing_targets = JSON.stringify({ version: 1, targets: [{ type: "owner" }] });
+  const retainedTargets = row.custom_followups_routing_targets;
+  const writesBeforeToggle = writes.length;
+  for (const value of [1, "1", true]) {
+    row[hideField] = value;
+    events[hideField](frm, row.doctype, row.name);
+    assert.match(controls.custom_followups_routing_summary.$wrapper.content, /مخفية من موافقات متابعاتي/);
+    assert.match(controls.custom_followups_routing_summary.$wrapper.content, /اختيارات المستلمين محفوظة/);
+    assert.equal(controls.custom_followups_routing_edit.$input.disabled, true);
+    assert.match(controls.custom_followups_routing_edit.$input.attributes.title, /ألغِ الإخفاء/);
+    assert.equal(controls.custom_followups_hide_from_approvals.$wrapper.attributes.dir, "rtl");
+    const dialogCount = dialogs.length;
+    await events.custom_followups_routing_edit(frm, row.doctype, row.name);
+    assert.equal(dialogs.length, dialogCount);
+    assert.equal(row.custom_followups_routing_targets, retainedTargets);
+  }
+  for (const value of [0, "0", false]) {
+    row[hideField] = value;
+    events[hideField](frm, row.doctype, row.name);
+    assert.equal(controls.custom_followups_routing_edit.$input.disabled, false);
+    assert.doesNotMatch(controls.custom_followups_routing_summary.$wrapper.content, /مخفية من موافقات متابعاتي/);
+    const available = await open();
+    assert.match(html(available), /منشئ المستند/);
+    available.hide();
+    assert.equal(row.custom_followups_routing_targets, retainedTargets);
+  }
+  assert.equal(writes.length, writesBeforeToggle);
+
+  // Frappe refreshes controls after form_render: both content and disabled state must survive.
+  const summaryControl = controls.custom_followups_routing_summary;
+  const editControl = controls.custom_followups_routing_edit;
+  row[hideField] = 1;
+  events.form_render(frm, row.doctype, row.name);
+  const nativeRefresh = editControl._namar_followups_native_refresh_input;
+  const refreshCalls = editControl.native_refresh_calls;
+  for (let index = 0; index < 3; index++) {
+    events.form_render(frm, row.doctype, row.name);
+    summaryControl.$wrapper.html("reset by surrounding layout");
+    editControl.$input.prop("disabled", false);
+    summaryControl.refresh_input();
+    assert.equal(editControl.refresh_input("after-form-render"), "native-refresh-result");
+    assert.match(summaryControl.$wrapper.content, /مخفية من موافقات متابعاتي/);
+    assert.match(summaryControl.$wrapper.content, /منشئ المستند/);
+    assert.equal(editControl.$input.disabled, true);
+    assert.equal(editControl._namar_followups_native_refresh_input, nativeRefresh, "bind native refresh only once per control");
+  }
+  assert.equal(editControl.native_refresh_calls, refreshCalls + 3);
+  assert.deepEqual(editControl.native_refresh_arguments, ["after-form-render"]);
+  row[hideField] = 0;
+  events[hideField](frm, row.doctype, row.name);
+  summaryControl.refresh_input();
+  editControl.refresh_input();
+  assert.doesNotMatch(summaryControl.$wrapper.content, /مخفية من موافقات متابعاتي/);
+  assert.equal(editControl.$input.disabled, false);
+  frm.perm[0].write = 0;
+  editControl.refresh_input();
+  assert.equal(editControl.$input.disabled, true, "refresh reads current permission, not cached permission");
+  frm.perm[0].write = 1;
+  editControl.refresh_input();
+  assert.equal(editControl.$input.disabled, false);
+
+  // A reused control must follow the row most recently rendered, including renamed child rows.
+  const renamedRow = {
+    ...row, name: "ROW-AFTER-SAVE", state: "مرحلة أخرى",
+    custom_followups_routing_targets: JSON.stringify({ version: 1, targets: [{ type: "role", role: "Accounts User" }] }),
+    [hideField]: 0,
+  };
+  context.locals[row.doctype][renamedRow.name] = renamedRow;
+  frm.fields_dict.states.grid.grid_rows_by_docname[renamedRow.name] = { grid_form: { fields_dict: controls } };
+  row[hideField] = 1;
+  events.form_render(frm, renamedRow.doctype, renamedRow.name);
+  summaryControl.refresh_input();
+  editControl.refresh_input();
+  assert.match(summaryControl.$wrapper.content, /Accounts User/);
+  assert.equal(editControl.$input.disabled, false, "old hidden row cannot disable the newly rendered row");
+  assert.equal(editControl._namar_followups_context.cdn, renamedRow.name);
+  renamedRow[hideField] = 1;
+  row[hideField] = 0;
+  editControl.refresh_input();
+  assert.equal(editControl.$input.disabled, true, "the wrapper reads the latest row object from locals");
+  assert.equal(editControl._namar_followups_native_refresh_input, nativeRefresh);
+  events.form_render(frm, row.doctype, row.name);
+  editControl.refresh_input();
+  assert.equal(editControl.$input.disabled, false);
+
+  row.custom_followups_routing_targets = JSON.stringify({ version: 1, targets: [{ type: "role", role: "{{alert(1)}} {% code %}" }] });
+  events.form_render(frm, row.doctype, row.name);
+  summaryControl.refresh_input();
+  assert.match(summaryControl.$wrapper.content, /&#123;&#123;alert\(1\)&#125;&#125;/);
+  assert.ok(summaryControl.$wrapper.content.includes("&#123;% code %&#125;"));
+  row.custom_followups_routing_targets = retainedTargets;
+  assert.equal(writes.length, writesBeforeToggle);
+
+  // A draft opened before the checkbox changes must not overwrite hidden-stage settings.
+  const pendingGroup = await open();
+  const pendingRecipient = await add(pendingGroup);
+  row[hideField] = 1;
+  events[hideField](frm, row.doctype, row.name);
+  pendingRecipient.primary_action({ type: "user", user: "ignored@example.com" });
+  await click(pendingGroup, "remove", 0);
+  await pendingGroup.primary_action();
+  assert.equal(row.custom_followups_routing_targets, retainedTargets);
+  assert.equal(writes.length, writesBeforeToggle);
+  pendingRecipient.hide();
+  pendingGroup.hide();
+  row[hideField] = 0;
+  events[hideField](frm, row.doctype, row.name);
   frm.perm[0].write = 0;
   const count = dialogs.length;
   await events.custom_followups_routing_edit(frm, row.doctype, row.name);

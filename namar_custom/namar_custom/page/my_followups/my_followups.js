@@ -52,8 +52,11 @@ class NamarMyFollowups {
 		this.search_timer = null;
 		this.mention_reply_control = null;
 		this.applied_seen_events = new Set();
+		this.approval_refresh_timer = null;
+		this.approval_retry_attempt = 0;
 		this.build();
 		this.bind_events();
+		this.bind_approval_updates();
 	}
 
 	show() {
@@ -191,14 +194,21 @@ class NamarMyFollowups {
 			.then(() => this.fetch_source_summary(source))
 			.then((response) => {
 				if (sequence !== this.source_count_sequence[source]) return null;
+				if (source === "approvals" && this.approval_response_status(response) !== "ready") {
+					this.invalidate_approval_data(this.approval_response_status(response));
+					return null;
+				}
 				const count = this.open_count_from_response(response);
 				this.set_source_count(source, count);
 				return count;
 			})
 			.catch((error) => {
 				if (sequence !== this.source_count_sequence[source]) return null;
-				this.source_count_status[source] = "error";
-				this.render_source_counts();
+				if (source === "approvals") this.invalidate_approval_data("error");
+				else {
+					this.source_count_status[source] = "error";
+					this.render_source_counts();
+				}
 				this.log_error(`load_source_count:${source}`, error);
 				return null;
 			});
@@ -222,7 +232,10 @@ class NamarMyFollowups {
 			args.priority = "";
 			return this.call("get_followups", args);
 		}
-		return this.call("get_approvals", args);
+		return this.call("get_my_followups_counts", {}).then((response) => ({
+			status: response?.approval_status ?? "ready",
+			counts: { open: response?.counts?.approvals },
+		}));
 	}
 
 	open_count_from_response(response) {
@@ -244,14 +257,100 @@ class NamarMyFollowups {
 		this.source_counts[source] = Math.max(0, Math.trunc(Number(count) || 0));
 		this.source_count_status[source] = "ready";
 		this.source_count_loaded_at[source] = Date.now();
+		if (source === "approvals") {
+			if (this.state.source === "approvals" && ["updating", "error"].includes(this.state.list_status)) {
+				this.approval_retry_attempt = 0;
+				this.schedule_approval_refresh();
+			} else this.reset_approval_refresh();
+		}
 		this.render_source_counts();
 		if (typeof $ === "function" && typeof document !== "undefined") {
 			$(document).trigger("namar:my-followups:count-changed", [{
 				source,
 				count: this.source_counts[source],
+				...(source === "approvals" ? { approval_status: "ready" } : {}),
 				force: Boolean(this.state.action_busy),
 			}]);
 		}
+	}
+
+	approval_response_status(response) {
+		const status = response?.status ?? "ready";
+		return ["ready", "updating", "error"].includes(status) ? status : "error";
+	}
+
+	approval_page_is_visible() {
+		if (typeof document !== "undefined" && document.hidden) return false;
+		const route = frappe.get_route?.();
+		return !route || route[0] === "my-followups";
+	}
+
+	reset_approval_refresh() {
+		window.clearTimeout(this.approval_refresh_timer);
+		this.approval_refresh_timer = null;
+		this.approval_retry_attempt = 0;
+	}
+
+	schedule_approval_refresh() {
+		if (this.approval_refresh_timer || !this.approval_page_is_visible()) return;
+		// Missing/dirty projections never trigger a synchronous rebuild or a
+		// rapid retry loop. Realtime bursts share this one bounded timer.
+		const attempt = this.approval_retry_attempt || 0;
+		const delay = Math.min(300000, 30000 * (2 ** Math.min(attempt, 4)));
+		this.approval_refresh_timer = window.setTimeout(() => {
+			this.approval_refresh_timer = null;
+			if (!this.approval_page_is_visible()) return;
+			this.approval_retry_attempt = attempt + 1;
+			if (this.state.source === "approvals") this.load_list();
+			else this.load_source_count("approvals", { force: true });
+		}, delay);
+	}
+
+	invalidate_approval_data(status = "updating", { invalidate_requests = true } = {}) {
+		status = status === "error" ? "error" : "updating";
+		if (invalidate_requests) {
+			this.source_count_sequence.approvals += 1;
+			if (this.state.source === "approvals") this.list_sequence += 1;
+		}
+		this.source_counts.approvals = null;
+		this.source_count_status.approvals = status;
+		this.source_count_loaded_at.approvals = 0;
+		this.render_source_counts();
+		if (typeof $ === "function" && typeof document !== "undefined") {
+			$(document).trigger("namar:my-followups:count-changed", [{
+				source: "approvals", count: null, approval_status: status,
+			}]);
+		}
+		if (this.state.source === "approvals") {
+			this.detail_sequence += 1;
+			this.state.items = [];
+			this.state.counts = { open: null, all: null };
+			this.state.total = null;
+			this.state.selected_name = null;
+			this.selected_by_source.approvals = null;
+			this.state.detail = null;
+			this.state.detail_status = "idle";
+			this.state.has_more = false;
+			this.state.next_start = null;
+			this.state.loading_more = false;
+			this.state.list_status = status;
+			this.last_loaded_at = 0;
+			this.render_filters();
+			this.render_approval_unavailable(status);
+		}
+		if (status === "updating") this.schedule_approval_refresh();
+		else this.reset_approval_refresh();
+	}
+
+	bind_approval_updates() {
+		if (!frappe.realtime?.on) return;
+		this.approval_update_handler = () => this.invalidate_approval_data("updating");
+		frappe.realtime.on("namar_approvals_changed", this.approval_update_handler);
+		// The Desk page is retained between routes. Refresh only when visible;
+		// no private records or counts are persisted in browser storage.
+		$(document).on("visibilitychange.namarMyFollowupsPage", () => {
+			if (this.source_count_status.approvals === "updating") this.schedule_approval_refresh();
+		});
 	}
 
 	sync_source_count_from_list(source, payload) {
@@ -284,16 +383,19 @@ class NamarMyFollowups {
 		Object.keys(labels).forEach((source) => {
 			const status = this.source_count_status[source];
 			const count = this.source_counts[source];
-			const has_count = count !== null && count !== undefined && Number.isFinite(Number(count));
+			const has_count = count !== null && count !== undefined && Number.isFinite(Number(count))
+				&& (source !== "approvals" || status === "ready");
 			const text = has_count ? this.number(count) : status === "error" ? "—" : "…";
 			const aria_label = status === "ready"
 				? __("{0}: {1} مفتوحة", [labels[source], text])
 				: status === "error"
 					? __("تعذّر تحديث عدد {0}", [labels[source]])
-					: __("جارٍ تحميل عدد {0}", [labels[source]]);
+					: source === "approvals" && status === "updating"
+						? __("جار تحديث الموافقات")
+						: __("جارٍ تحميل عدد {0}", [labels[source]]);
 			this.$root.find(`[data-source-count="${source}"]`)
 				.text(text)
-				.toggleClass("is-loading", status === "loading" || status === "idle")
+				.toggleClass("is-loading", ["loading", "idle", "updating"].includes(status))
 				.toggleClass("is-error", status === "error")
 				.attr("aria-label", aria_label)
 				.attr("title", aria_label);
@@ -488,12 +590,25 @@ class NamarMyFollowups {
 		const previous_selection = preserve_selection ? this.state.selected_name : null;
 		const keep_mobile_detail = preserve_selection && this.state.mobile_detail;
 		const limit_start = append ? this.state.next_start ?? this.state.items.length : 0;
+		if (source === "approvals") {
+			window.clearTimeout(this.approval_refresh_timer);
+			this.approval_refresh_timer = null;
+		}
 
 		if (append) {
 			this.state.loading_more = true;
 			this.render_pagination();
 		} else {
-			if (this.source_counts[source] === null) {
+			if (source === "approvals") {
+				this.source_counts.approvals = null;
+				this.state.items = [];
+				this.state.counts = { open: null, all: null };
+				this.state.total = null;
+				this.state.detail = null;
+				this.detail_sequence += 1;
+				this.render_detail_loading();
+			}
+			if (source === "approvals" || this.source_counts[source] === null) {
 				this.source_count_status[source] = "loading";
 				this.render_source_counts();
 			}
@@ -501,7 +616,7 @@ class NamarMyFollowups {
 				this.detail_sequence += 1;
 				this.state.selected_name = null;
 				this.state.detail = null;
-				this.render_detail_empty();
+				if (source !== "approvals") this.render_detail_empty();
 			}
 			this.state.list_status = "loading";
 			this.state.limit_start = 0;
@@ -529,6 +644,15 @@ class NamarMyFollowups {
 
 			const response = await this.call(method, args, api);
 			if (sequence !== this.list_sequence) return;
+			if (source === "approvals") {
+				const status = this.approval_response_status(response);
+				if (status !== "ready") {
+					this.invalidate_approval_data(status, { invalidate_requests: false });
+					return;
+				}
+				// An incomplete ready contract is unavailable, never a ready zero.
+				this.open_count_from_response(response);
+			}
 
 			const payload = this.normalize_list_response(response);
 			this.state.items = append ? this.merge_items(this.state.items, payload.items) : payload.items;
@@ -582,6 +706,11 @@ class NamarMyFollowups {
 			}
 		} catch (error) {
 			if (sequence !== this.list_sequence) return;
+			if (source === "approvals") {
+				this.invalidate_approval_data("error", { invalidate_requests: false });
+				this.log_error("load_list", error);
+				return;
+			}
 			this.state.list_status = "error";
 			this.state.loading_more = false;
 			if (this.source_counts[source] === null) {
@@ -632,6 +761,10 @@ class NamarMyFollowups {
 			}
 			const response = await this.call(method, { [key]: name }, api);
 			if (sequence !== this.detail_sequence || name !== this.state.selected_name) return;
+			if (this.state.source === "approvals" && this.approval_response_status(response) !== "ready") {
+				this.invalidate_approval_data(this.approval_response_status(response));
+				return;
+			}
 
 			const detail = this.normalize_detail_response(response);
 			const should_mark_seen = this.state.source === "mentions" && Boolean(detail.unread);
@@ -686,9 +819,11 @@ class NamarMyFollowups {
 
 		if (this.state.source === "approvals") {
 			const known_total = this.state.counts.all ?? this.state.total;
-			const total = known_total === null || known_total === undefined
-				? `${this.state.items.length}${this.state.has_more ? "+" : ""}`
-				: this.number(known_total);
+			const total = this.state.list_status === "error" ? "—"
+				: this.state.list_status !== "ready" ? "…"
+					: known_total === null || known_total === undefined
+						? `${this.state.items.length}${this.state.has_more ? "+" : ""}`
+						: this.number(known_total);
 			this.$filters.removeClass("is-mentions").addClass("is-approvals").html(`
 				<button type="button" class="mf-filter-btn is-active" data-bucket="all" role="tab" aria-selected="true">
 					<span>${this.escape(__("بانتظار مراجعتي"))}</span>
@@ -723,6 +858,16 @@ class NamarMyFollowups {
 	}
 
 	render_list_loading() {
+		if (this.state.source === "approvals") {
+			this.render_filters();
+			this.$list.attr("aria-busy", "true").html(this.state_markup({
+				icon: "refresh",
+				title: __("جار تحميل الموافقات"),
+				message: __("سيظهر العدد والقائمة بعد التحقق من جاهزية الموافقات."),
+			}));
+			this.$pagination.empty();
+			return;
+		}
 		this.$list.attr("aria-busy", "true").html(
 			Array.from({ length: 5 }, () => `
 				<div class="mf-queue-skeleton ${this.state.source === "mentions" ? "is-mention" : ""}" aria-hidden="true">
@@ -735,6 +880,24 @@ class NamarMyFollowups {
 				</div>
 			`).join("")
 		);
+		this.$pagination.empty();
+	}
+
+	render_approval_unavailable(status) {
+		const updating = status === "updating";
+		const title = updating ? __("جار تحديث الموافقات") : __("تعذر تحديث الموافقات");
+		const message = updating
+			? __("نعيد تجهيز الموافقات وفق أحدث الإعدادات والصلاحيات. ستتحدث القائمة تلقائيًا؛ هذا لا يعني عدم وجود موافقات.")
+			: __("عدد الموافقات غير متاح الآن. يمكنك متابعة عملك ثم إعادة المحاولة؛ لا يعني ذلك أن القائمة فارغة.");
+		this.$list.attr("aria-busy", "false").html(this.state_markup({
+			icon: updating ? "refresh" : "solid-warning",
+			title,
+			message,
+			...(updating ? {} : { action_class: "mf-retry-list", action_label: __("إعادة المحاولة") }),
+		}));
+		this.$detail.attr("aria-busy", "false").html(this.state_markup({
+			icon: updating ? "refresh" : "solid-warning", title, message, show_mobile_back: true,
+		}));
 		this.$pagination.empty();
 	}
 

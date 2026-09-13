@@ -107,7 +107,7 @@ class SettingsTests(unittest.TestCase):
         ])
         self.assertEqual(doc.transitions, transitions)
 
-    def test_disabled_existing_user_is_retained_for_runtime_fallback(self):
+    def test_disabled_existing_user_is_retained_for_explicit_runtime_exception(self):
         doc = self.workflow([{"type": "user", "user": "disabled@example.com"}])
         self.module.validate_workflow_approval_routing(doc)
         self.assertIn("disabled@example.com", doc.states[0][self.module.ROUTING_FIELD])
@@ -185,6 +185,19 @@ class SettingsTests(unittest.TestCase):
         self.assertIn('text-align:right', description)
         self.assertIn("صلاحيات الاعتماد", description)
         self.assertIn("تحديد جميع", description)
+        self.assertIn("ولا توزع الموافقة تلقائيًا", description)
+
+    def test_visibility_field_is_explicit_per_stage_and_migration_is_idempotent(self):
+        self.module.configure_approval_visibility_fields()
+        self.assertEqual(len(self.creations), 1)
+        field = self.custom_fields[self.module.HIDE_FIELD]
+        self.assertEqual(field["fieldtype"], "Check")
+        self.assertEqual(field["default"], "0")
+        self.assertIn("صلاحيات الاعتماد", field["description"])
+        before = deepcopy(self.custom_fields)
+        self.module.configure_approval_visibility_fields()
+        self.assertEqual(len(self.creations), 1)
+        self.assertEqual(self.custom_fields, before)
 
 
 if __name__ == "__main__":

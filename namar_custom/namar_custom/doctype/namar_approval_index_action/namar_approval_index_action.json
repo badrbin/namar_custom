@@ -1,0 +1,137 @@
+{
+ "actions": [],
+ "autoname": "prompt",
+ "creation": "2026-09-13 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 0,
+ "engine": "InnoDB",
+ "field_order": [
+  "requested_revision",
+  "built_revision",
+  "epoch",
+  "state",
+  "reference_doctype",
+  "reference_name",
+  "workflow_state",
+  "source_modified",
+  "projection",
+  "routing",
+  "reason",
+  "retry_count",
+  "retry_after"
+ ],
+ "fields": [
+  {
+   "default": "1",
+   "fieldname": "requested_revision",
+   "fieldtype": "Int",
+   "hidden": 1,
+   "label": "Requested Revision",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "built_revision",
+   "fieldtype": "Int",
+   "hidden": 1,
+   "label": "Built Revision",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "epoch",
+   "fieldtype": "Int",
+   "hidden": 1,
+   "label": "Epoch",
+   "read_only": 1
+  },
+  {
+   "default": "Pending",
+   "fieldname": "state",
+   "fieldtype": "Select",
+   "hidden": 1,
+   "label": "State",
+   "options": "Pending\nReady\nExcluded\nError",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "reference_doctype",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Reference DocType",
+   "read_only": 1
+  },
+  {
+   "fieldname": "reference_name",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Reference Name",
+   "read_only": 1
+  },
+  {
+   "fieldname": "workflow_state",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Workflow State",
+   "read_only": 1
+  },
+  {
+   "fieldname": "source_modified",
+   "fieldtype": "Datetime",
+   "hidden": 1,
+   "label": "Source Modified",
+   "read_only": 1
+  },
+  {
+   "fieldname": "projection",
+   "fieldtype": "Long Text",
+   "hidden": 1,
+   "label": "Projection",
+   "read_only": 1
+  },
+  {
+   "fieldname": "routing",
+   "fieldtype": "Long Text",
+   "hidden": 1,
+   "label": "Routing",
+   "read_only": 1
+  },
+  {
+   "fieldname": "reason",
+   "fieldtype": "Small Text",
+   "hidden": 1,
+   "label": "Reason",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "retry_count",
+   "fieldtype": "Int",
+   "hidden": 1,
+   "label": "Retry Count",
+   "read_only": 1
+  },
+  {
+   "fieldname": "retry_after",
+   "fieldtype": "Datetime",
+   "hidden": 1,
+   "label": "Retry After",
+   "read_only": 1
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-09-13 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Namar Custom",
+ "name": "Namar Approval Index Action",
+ "naming_rule": "Set by user",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0
+}

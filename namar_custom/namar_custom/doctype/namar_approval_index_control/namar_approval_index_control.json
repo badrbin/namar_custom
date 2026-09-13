@@ -1,0 +1,76 @@
+{
+ "actions": [],
+ "autoname": "prompt",
+ "creation": "2026-09-13 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 0,
+ "engine": "InnoDB",
+ "field_order": [
+  "epoch",
+  "scan_cursor",
+  "scan_complete",
+  "requested_at",
+  "finished_at",
+  "last_error"
+ ],
+ "fields": [
+  {
+   "default": "1",
+   "fieldname": "epoch",
+   "fieldtype": "Int",
+   "hidden": 1,
+   "label": "Epoch",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "scan_cursor",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Scan Cursor",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "scan_complete",
+   "fieldtype": "Check",
+   "hidden": 1,
+   "label": "Scan Complete",
+   "read_only": 1
+  },
+  {
+   "fieldname": "requested_at",
+   "fieldtype": "Datetime",
+   "hidden": 1,
+   "label": "Requested At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "finished_at",
+   "fieldtype": "Datetime",
+   "hidden": 1,
+   "label": "Finished At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_error",
+   "fieldtype": "Small Text",
+   "hidden": 1,
+   "label": "Last Error",
+   "read_only": 1
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-09-13 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Namar Custom",
+ "name": "Namar Approval Index Control",
+ "naming_rule": "Set by user",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0
+}

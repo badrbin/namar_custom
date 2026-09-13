@@ -24,6 +24,9 @@
 	};
 	const REFRESH_TTL_MS = 2 * 60 * 1000;
 	const POLL_INTERVAL_MS = 3 * 60 * 1000;
+	const APPROVAL_REFRESH_EVENT = "namar_approvals_changed";
+	const APPROVAL_RETRY_MIN_MS = 30 * 1000;
+	const APPROVAL_RETRY_MAX_MS = 2 * 60 * 1000;
 
 	function valid_count(value) {
 		return Number.isInteger(value) && value >= 0;
@@ -33,15 +36,23 @@
 		const message = response?.message ?? response;
 		const raw = message?.attention_counts;
 		if (!raw || typeof raw !== "object") return null;
-		if (!SOURCE_KEYS.every((key) => valid_count(raw[key]))) return null;
-		if (!valid_count(raw.total)) return null;
-		const expected_total = SOURCE_KEYS.reduce((total, key) => total + raw[key], 0);
-		if (raw.total !== expected_total) return null;
+		const approval_status = message.approval_status === undefined ? "ready" : message.approval_status;
+		if (!["ready", "updating", "error"].includes(approval_status)) return null;
+		if (!["mentions", "followups"].every((key) => valid_count(raw[key]))) return null;
+		if (approval_status === "ready") {
+			if (!valid_count(raw.approvals) || !valid_count(raw.total)) return null;
+			const expected_total = SOURCE_KEYS.reduce((total, key) => total + raw[key], 0);
+			if (raw.total !== expected_total) return null;
+		} else if (raw.approvals !== null || raw.total !== null) {
+			// An unavailable generation must never masquerade as zero or an old count.
+			return null;
+		}
 		return {
 			mentions: raw.mentions,
 			followups: raw.followups,
 			approvals: raw.approvals,
 			total: raw.total,
+			approval_status,
 		};
 	}
 
@@ -51,13 +62,24 @@
 
 	function source_status_label(source, count) {
 		const meta = SOURCE_META[source];
-		return `${meta.attention_label}: ${count}`;
+		return valid_count(count) ? `${meta.attention_label}: ${count}` : `${meta.label}: لم يُحدّث العداد بعد`;
 	}
 
 	function badge_view(counts) {
 		if (!counts) return null;
 		const sources = SOURCE_KEYS.map((source) => {
 			const count = counts[source];
+			const approval_status = counts.approval_status ?? "ready";
+			if (source === "approvals" && approval_status !== "ready") {
+				return {
+					source,
+					count: null,
+					visible: true,
+					text: approval_status === "error" ? "—" : "…",
+					label: approval_status === "error" ? "الموافقات: تعذر تحديث العداد" : "الموافقات: جار تحديث الموافقات",
+					href: SOURCE_META[source].href,
+				};
+			}
 			return {
 				source,
 				count,
@@ -92,6 +114,11 @@
 			this.force_after_pending = false;
 			this.request_serial = 0;
 			this.timer = null;
+			this.approval_revision = 0;
+			this.approval_refresh_timer = null;
+			this.approval_retry_attempt = 0;
+			this.last_requested_at = 0;
+			this.realtime_handler = () => this.invalidate_approvals();
 			this.destroyed = false;
 		}
 
@@ -115,6 +142,7 @@
 				});
 
 			this.ensure_node();
+			frappe.realtime?.on?.(APPROVAL_REFRESH_EVENT, this.realtime_handler);
 			this.timer = window.setInterval(() => {
 				if (!document.hidden) this.refresh();
 			}, POLL_INTERVAL_MS);
@@ -190,7 +218,17 @@
 		merge_source_count(payload) {
 			const source = payload?.source;
 			const count = payload?.count;
+			if (source === "approvals" && ["updating", "error"].includes(payload?.approval_status)) {
+				this.invalidate_approvals(payload.approval_status);
+				return;
+			}
 			if (!SOURCE_KEYS.includes(source) || !valid_count(count)) return;
+			if (source === "approvals") {
+				// Page totals may be filtered or belong to a superseded generation.
+				// Only the unified counter endpoint may publish the navbar number.
+				this.invalidate_approvals();
+				return;
+			}
 			// حدث المتابعات يحمل إجمالي المفتوح، بينما الشارة الصفراء تعرض
 			// المتأخر فقط؛ لذلك نعيد قراءة العقد الموحد بدل دمج رقم مختلف المعنى.
 			if (source === "followups") {
@@ -211,14 +249,60 @@
 			}
 			if (this.pending) this.force_after_pending = true;
 			this.counts[source] = count;
-			this.counts.total = SOURCE_KEYS.reduce((total, key) => total + this.counts[key], 0);
+			this.counts.total = SOURCE_KEYS.every((key) => valid_count(this.counts[key]))
+				? SOURCE_KEYS.reduce((total, key) => total + this.counts[key], 0) : null;
 			this.last_loaded_at = Date.now();
 			this.render();
 		}
 
+		mark_approvals_unavailable(status) {
+			this.counts = {
+				mentions: this.counts?.mentions ?? null,
+				followups: this.counts?.followups ?? null,
+				approvals: null,
+				total: null,
+				approval_status: status,
+			};
+			this.render();
+		}
+
+		invalidate_approvals(status = "updating") {
+			if (this.destroyed) return;
+			this.approval_revision += 1;
+			this.mark_approvals_unavailable(status);
+			this.last_loaded_at = 0;
+			this.schedule_approval_refresh();
+		}
+
+		clear_approval_refresh() {
+			if (this.approval_refresh_timer !== null) window.clearTimeout(this.approval_refresh_timer);
+			this.approval_refresh_timer = null;
+		}
+
+		schedule_approval_refresh(retry = false) {
+			if (this.destroyed || this.approval_refresh_timer !== null) return;
+			// Coalesce event bursts, add per-tab jitter, and never retry an unavailable
+			// generation faster than once per 30 seconds. No private counts are stored.
+			const backoff = retry
+				? Math.min(APPROVAL_RETRY_MAX_MS, APPROVAL_RETRY_MIN_MS * (2 ** this.approval_retry_attempt++))
+				: 1000;
+			const delay = Math.max(backoff, this.last_requested_at + APPROVAL_RETRY_MIN_MS - Date.now())
+				+ Math.floor(Math.random() * 5000);
+			this.approval_refresh_timer = window.setTimeout(() => {
+				this.approval_refresh_timer = null;
+				this.refresh(true);
+			}, delay);
+		}
+
 		refresh(force = false) {
 			if (this.destroyed || document.hidden) return Promise.resolve(null);
-			if (!force && this.counts && Date.now() - this.last_loaded_at < REFRESH_TTL_MS) {
+			if (this.counts?.approval_status && this.counts.approval_status !== "ready"
+				&& Date.now() - this.last_requested_at < APPROVAL_RETRY_MIN_MS) {
+				this.schedule_approval_refresh();
+				return this.pending || Promise.resolve(this.counts);
+			}
+			if (!force && this.counts && (this.counts.approval_status ?? "ready") === "ready"
+				&& Date.now() - this.last_loaded_at < REFRESH_TTL_MS) {
 				return Promise.resolve(this.counts);
 			}
 			if (this.pending) {
@@ -227,6 +311,9 @@
 			}
 
 			const serial = ++this.request_serial;
+			const approval_revision = this.approval_revision;
+			this.last_requested_at = Date.now();
+			this.clear_approval_refresh();
 			this.pending = Promise.resolve()
 				.then(() => frappe.call({
 					method: COUNT_METHOD,
@@ -238,16 +325,30 @@
 					if (this.destroyed || serial !== this.request_serial) return null;
 					const counts = normalize_counts(response);
 					if (!counts) throw new Error("Invalid My Followups counts contract");
+					if (approval_revision !== this.approval_revision) {
+						// A notification received during the request invalidates its approval
+						// snapshot, but does not throw away the other two valid counters.
+						counts.approvals = this.counts?.approvals ?? null;
+						counts.approval_status = this.counts?.approval_status ?? "updating";
+						counts.total = valid_count(counts.approvals)
+							? counts.mentions + counts.followups + counts.approvals : null;
+					}
 					this.counts = counts;
 					this.load_failed = false;
 					this.last_loaded_at = Date.now();
 					this.render();
+					if (counts.approval_status !== "ready") this.schedule_approval_refresh(true);
+					else {
+						this.approval_retry_attempt = 0;
+						this.clear_approval_refresh();
+					}
 					return counts;
 				})
 				.catch((error) => {
-					if (!this.destroyed) {
+					if (!this.destroyed && serial === this.request_serial) {
 						this.load_failed = true;
-						this.render();
+						if (approval_revision === this.approval_revision) this.mark_approvals_unavailable("error");
+						this.schedule_approval_refresh(true);
 						console.warn("[my-followups-navbar] تعذر تحديث العداد", error);
 					}
 					return null;
@@ -293,6 +394,8 @@
 			this.request_serial += 1;
 			$(document).off(EVENT_NAMESPACE);
 			if (this.timer) window.clearInterval(this.timer);
+			this.clear_approval_refresh();
+			frappe.realtime?.off?.(APPROVAL_REFRESH_EVENT, this.realtime_handler);
 			$("#namar-my-followups-nav").remove();
 		}
 	}

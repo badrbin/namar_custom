@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from collections import Counter
 import json
-import sys
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 from test_followup_approval_counts import FakeFrappeDict, load_service, workflow_action
+from namar_custom.followups.logic import page_window, pagination
 
 
 FIELD = "custom_followups_routing_targets"
@@ -22,7 +22,13 @@ class RuntimeDocument(FakeFrappeDict):
 
 
 class RoutingRuntime:
-    """In-memory DB with the standard list-permission boundary preserved."""
+    """Shared in-memory DB; legacy adapters below are NOT service endpoints.
+
+    The original resolver is retained as historical compatibility code only.
+    Its all-document scan and automatic fallback are intentionally absent from
+    HTTP. New index policy tests reuse the DB fixture, not legacy semantics.
+    Service contracts live in test_approval_index_service.py.
+    """
 
     def __init__(self, targets=(), *, size=1):
         self.service, self.frappe = load_service()
@@ -157,22 +163,62 @@ class RoutingRuntime:
         self.condition_evaluations.append((condition, globals_["frappe"].session.user))
         return eval(condition, {"__builtins__": {}, **globals_}, locals_)
 
-    def approvals(self, **kwargs):
-        with patch.object(self.service, "_readable_reference_title", return_value="المستند"):
-            return self.service.get_approvals(**kwargs)
+    def legacy_resolver(self):
+        # load_service() initializes this module under its isolated Frappe stub;
+        # patch.dict restores sys.modules afterward. Reuse that exact object.
+        resolver_class = self.service.role_routing.__globals__["ApprovalRoutingResolver"]
+        return resolver_class(self.frappe, self.frappe.session.user, self.service.get_workflow_safe_globals)
+
+    def legacy_counts(self, resolver=None, visible=None):
+        resolver = resolver or self.legacy_resolver()
+        if resolver.has_rules:
+            visible = resolver.visible_actions(list(self.service.WORKFLOW_ACTION_FIELDS)) if visible is None else visible
+            return {"open": len(visible)}
+        rows = self.get_list("Workflow Action", fields=["count(name) as count"], filters={"status": "Open"}, limit_page_length=1)
+        return {"open": rows[0]["count"] if rows else 0}
+
+    def approvals(self, *, search="", search_scope="all", limit_start=0, page_length=50):
+        """Exercise the retired resolver directly, never get_approvals()."""
+        resolver = self.legacy_resolver()
+        visible = resolver.visible_actions(list(self.service.WORKFLOW_ACTION_FIELDS)) if resolver.has_rules else None
+        filters = {"status": "Open"}
+        if visible is not None:
+            filters["name"] = ["in", list(visible)]
+        start, length, query_length = page_window(limit_start, page_length)
+        rows = [] if visible == {} else self.get_list(
+            "Workflow Action", fields=list(self.service.WORKFLOW_ACTION_FIELDS),
+            filters=filters, or_filters=self.service._approval_search_filters(search, search_scope),
+            order_by="modified desc", limit_start=start, limit_page_length=query_length,
+        )
+        result = pagination([
+            dict(row, routing=visible[row["name"]] if visible is not None else self.service.role_routing())
+            for row in rows
+        ], start, length)
+        result["counts"] = self.legacy_counts(resolver, visible)
+        return result
+
+    def legacy_detail_routing(self, name):
+        rows = self.get_list("Workflow Action", fields=list(self.service.WORKFLOW_ACTION_FIELDS), filters={"name": name, "status": "Open"}, limit_page_length=1)
+        if not rows:
+            raise self.frappe.PermissionError("الموافقة غير متاحة")
+        visible = self.legacy_resolver().route_rows(rows)
+        if name not in visible:
+            raise self.frappe.PermissionError("الموافقة غير متاحة")
+        return {"approval": {"routing": visible[name]}}
 
     def ids(self, **kwargs):
         return [row["name"] for row in self.approvals(**kwargs)["items"]]
 
 
-class ApprovalRoutingTestCase(unittest.TestCase):
+class LegacyApprovalResolverTestCase(unittest.TestCase):
+    """Historical resolver-only tests, not evidence of live endpoint behavior."""
     def test_site_switch_skips_routing_queries_and_keeps_native_permissions(self):
         runtime = RoutingRuntime([{"type": "owner"}], size=4)
         saved = runtime.data["Workflow Document State"][0][FIELD]
         runtime.frappe.conf.disable_followup_approval_routing = True
         runtime.denied.add("WA-00000")
         with patch.object(runtime.frappe, "get_meta", side_effect=AssertionError("Routing metadata must not load")):
-            self.assertEqual(runtime.service._approval_counts(), {"open": 3})
+            self.assertEqual(runtime.legacy_counts(), {"open": 3})
             result = runtime.approvals(page_length=2)
         self.assertEqual(result["counts"], {"open": 3})
         self.assertEqual(len(result["items"]), 2)
@@ -206,26 +252,26 @@ class ApprovalRoutingTestCase(unittest.TestCase):
         for user in (A, B):
             runtime.frappe.session.user = user
             self.assertEqual(len(runtime.ids()), 1)
-            self.assertEqual(runtime.service._approval_counts(), {"open": 1})
+            self.assertEqual(runtime.legacy_counts(), {"open": 1})
         runtime.frappe.session.user = C
         self.assertEqual(runtime.ids(), [])
-        self.assertEqual(runtime.service._approval_counts(), {"open": 0})
+        self.assertEqual(runtime.legacy_counts(), {"open": 0})
 
     def test_target_user_never_expands_base_permission(self):
         runtime = RoutingRuntime([{"type": "user", "user": A}])
         runtime.denied.add("WA-00000")
         self.assertEqual(runtime.ids(), [])
-        self.assertEqual(runtime.service._approval_counts(), {"open": 0})
+        self.assertEqual(runtime.legacy_counts(), {"open": 0})
         self.assertFalse(any(call[1] == "Material Request" for call in runtime.calls))
         with self.assertRaises(runtime.frappe.PermissionError):
-            runtime.service.get_approval_detail("WA-00000")
+            runtime.legacy_detail_routing("WA-00000")
         self.assertEqual(runtime.doc_reads, [])
 
     def test_hidden_detail_rejected_without_loading_reference_or_changing_roles(self):
         runtime = RoutingRuntime([{"type": "user", "user": B}])
         before_roles = list(runtime.data["Has Role"])
         with self.assertRaisesRegex(runtime.frappe.PermissionError, "الموافقة غير متاحة"):
-            runtime.service.get_approval_detail("WA-00000")
+            runtime.legacy_detail_routing("WA-00000")
         self.assertEqual(runtime.doc_reads, [])
         self.assertEqual(runtime.data["Has Role"], before_roles)
 
@@ -240,26 +286,15 @@ class ApprovalRoutingTestCase(unittest.TestCase):
             patch.object(runtime.service, "_readable_reference_title", return_value="المستند"),
             patch.object(runtime.service, "_get_timeline", return_value=[]),
         ):
-            detail = runtime.service.get_approval_detail(action.name)
+            detail = runtime.legacy_detail_routing(action.name)
         self.assertEqual(detail["approval"]["routing"], list_routing)
 
-    def test_navbar_and_tab_counts_use_same_routed_open_actions(self):
+    def test_legacy_count_and_list_use_same_routed_open_actions(self):
         runtime = RoutingRuntime([{"type": "user", "user": B}])
-        mention_service = ModuleType("namar_custom.mentions.service")
-        mention_service.get_open_mention_count = lambda: 0
-        mention_package = ModuleType("namar_custom.mentions")
-        mention_package.service = mention_service
-        with (
-            patch.object(runtime.service, "_followup_open_count", return_value=0),
-            patch.object(runtime.service, "_followup_overdue_count", return_value=0),
-            patch.dict(sys.modules, {"namar_custom.mentions": mention_package, "namar_custom.mentions.service": mention_service}),
-        ):
-            for user, expected in ((A, 0), (B, 1)):
-                runtime.frappe.session.user = user
-                result = runtime.service.get_my_followups_counts()
-                self.assertEqual(result["counts"]["approvals"], expected)
-                self.assertEqual(result["attention_counts"]["approvals"], expected)
-                self.assertEqual(runtime.approvals()["counts"]["open"], expected)
+        for user, expected in ((A, 0), (B, 1)):
+            runtime.frappe.session.user = user
+            self.assertEqual(runtime.legacy_counts()["open"], expected)
+            self.assertEqual(runtime.approvals()["counts"]["open"], expected)
 
     def test_owner_uses_this_document_and_reloads_after_owner_change(self):
         runtime = RoutingRuntime([{"type": "owner"}])
@@ -460,7 +495,7 @@ class ApprovalRoutingTestCase(unittest.TestCase):
             runtime.data["Workflow Transition"][0].condition = condition
             with self.subTest(condition=condition):
                 self.assertTrue(runtime.approvals()["items"][0]["routing"]["fallback"])
-                self.assertEqual(runtime.service._approval_counts(), {"open": 1})
+                self.assertEqual(runtime.legacy_counts(), {"open": 1})
                 self.assertEqual(runtime.frappe.message_log, [{"message": "سابق"}])
                 self.assertEqual(runtime.frappe.flags.error_message, "previous")
 
@@ -528,7 +563,7 @@ class ApprovalRoutingTestCase(unittest.TestCase):
         self.assertEqual(queries["Material Request"], 3)
         self.assertEqual(queries["User"], 1)
         self.assertEqual(queries["Has Role"], 1)
-        self.assertEqual(runtime.service._approval_counts(), {"open": 554})
+        self.assertEqual(runtime.legacy_counts(), {"open": 554})
 
     def test_rules_reloaded_per_request_and_scoped_to_active_workflow_state(self):
         runtime = RoutingRuntime([{"type": "user", "user": A}])

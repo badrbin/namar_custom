@@ -13,6 +13,11 @@ override_whitelisted_methods = {
     "frappe.desk.form.activity.get_activity_timeline": "namar_custom.activity_permissions.get_activity_timeline",
     "frappe.desk.form.activity.get_more_email_activities": "namar_custom.activity_permissions.get_more_email_activities",
     "frappe.desk.form.activity.get_more_milestone_activities": "namar_custom.activity_permissions.get_more_milestone_activities",
+    "frappe.core.page.permission_manager.permission_manager.update": "namar_custom.followups.approval_index_permission_events.update_role_permission",
+    "frappe.core.page.permission_manager.permission_manager.remove": "namar_custom.followups.approval_index_permission_events.remove_role_permission",
+    "frappe.core.page.permission_manager.permission_manager.reset": "namar_custom.followups.approval_index_permission_events.reset_role_permissions",
+    "frappe.core.doctype.user_permission.user_permission.clear_user_permissions": "namar_custom.followups.approval_index_permission_events.clear_user_permissions",
+    "frappe.core.doctype.user_permission.user_permission.add_user_permissions": "namar_custom.followups.approval_index_permission_events.update_user_permissions",
 }
 
 permission_query_conditions = {
@@ -63,7 +68,14 @@ doc_events = {
         "validate": ["namar_custom.followups.approval_routing_settings.validate_workflow_approval_routing"],
     },
     "*": {
-        "after_delete": ["namar_custom.mentions.reference_cleanup.cleanup_deleted_reference"],
+        "on_change": ["namar_custom.followups.approval_index.on_document_change"],
+        "on_update_after_submit": ["namar_custom.followups.approval_index.on_document_change"],
+        "on_cancel": ["namar_custom.followups.approval_index.on_document_change"],
+        "after_rename": ["namar_custom.followups.approval_index.on_document_rename"],
+        "after_delete": [
+            "namar_custom.mentions.reference_cleanup.cleanup_deleted_reference",
+            "namar_custom.followups.approval_index.on_document_change",
+        ],
     },
     "ToDo": {
         "on_change": [
@@ -95,3 +107,13 @@ doc_events = {
 doctype_js = {
     "Workflow": "public/js/doctype/workflow_approval_routing.js",
 }
+
+# The durable Pending rows survive Redis/RQ restarts. A minute recovery tick only
+# dispatches bounded work; it never evaluates business documents in the scheduler.
+scheduler_events = {
+    "cron": {
+        "* * * * *": ["namar_custom.followups.approval_index.recover_pending"],
+    },
+}
+
+after_migrate = ["namar_custom.followups.approval_index.invalidate_after_migrate"]
