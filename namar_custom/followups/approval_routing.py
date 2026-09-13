@@ -15,6 +15,7 @@ from namar_custom.followups.approval_routing_settings import (
     parse_routing_targets,
 )
 from namar_custom.followups.reference_access import quiet_reference_errors
+from namar_custom.followups.permission_metadata import NativeLinkFieldScope
 
 
 BATCH_SIZE = 2000
@@ -83,6 +84,7 @@ class ApprovalRoutingResolver:
         self._documents = {}
         self._read_permissions = {}
         self._condition_results = {}
+        self._permission_metadata = NativeLinkFieldScope(frappe)
         self._workflow_globals_factory = workflow_globals_factory
         self._visibility: ApprovalVisibility | None = None
         self._prepared: dict[str, PreparedApproval] = {}
@@ -482,10 +484,11 @@ class ApprovalRoutingResolver:
                 with quiet_reference_errors(self.frappe):
                     if reference_key not in self._documents:
                         self._documents[reference_key] = self.frappe.get_doc(dict(reference))
-                    allowed = bool(self.frappe.has_permission(
-                        reference["doctype"], "read",
-                        doc=self._documents[reference_key], user=user, throw=False,
-                    ))
+                    document = self._documents[reference_key]
+                    with self._permission_metadata.for_document(document):
+                        allowed = bool(self.frappe.has_permission(
+                            reference["doctype"], "read", doc=document, user=user, throw=False,
+                        ))
             except (self.frappe.PermissionError, self.frappe.DoesNotExistError):
                 allowed = False
             self._read_permissions[permission_key] = allowed
