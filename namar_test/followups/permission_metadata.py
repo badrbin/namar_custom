@@ -49,32 +49,37 @@ def _code_shape(code):
     )
 
 
-def _known_body(function, name):
-    if not isinstance(function, FunctionType) or hasattr(function, "__wrapped__"):
+def _known_body(function, name, diagnostic=None):
+    def reject(reason):
+        if diagnostic is not None:
+            diagnostic["reject_step"] = reason
         return False
+
+    if not isinstance(function, FunctionType) or hasattr(function, "__wrapped__"):
+        return reject("function_type_or_wrapper")
     if function.__closure__ and (function.__code__.co_freevars != ("__class__",)
                                  or not isinstance(function.__closure__[0].cell_contents, type)):
-        return False
+        return reject("unsupported_closure")
     tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
     if len(tree.body) != 1 or not isinstance(tree.body[0], ast.FunctionDef):
-        return False
+        return reject("source_definition_shape")
     node = tree.body[0]
     body = _native_ast_dump(node.args) + "\n" + _native_ast_dump(ast.Module(body=node.body, type_ignores=[]))
     if hashlib.sha256(body.encode()).hexdigest() != _NATIVE_BODIES[name]:
-        return False
+        return reject("source_ast_hash")
     defaults = tuple(ast.literal_eval(value) for value in node.args.defaults)
     actual = function.__defaults__ or ()
     if len(actual) != len(defaults) or any(type(a) is not type(b) or a != b for a, b in zip(actual, defaults)):
-        return False
+        return reject("positional_defaults")
     keyword_defaults = {arg.arg: ast.literal_eval(value) for arg, value in zip(node.args.kwonlyargs, node.args.kw_defaults) if value is not None}
     if (function.__kwdefaults__ or {}) != keyword_defaults:
-        return False
+        return reject("keyword_defaults")
     # Source alone is not authority for an in-memory __code__ replacement.
     node.decorator_list = []
     if function.__closure__:
         owner = function.__closure__[0].cell_contents
         if vars(owner).get(name) is not function:
-            return False
+            return reject("class_closure_owner")
         wrapper = ast.ClassDef(name=owner.__name__, bases=[], keywords=[], body=[node], decorator_list=[], type_params=[])
         tree = ast.fix_missing_locations(ast.Module(body=[wrapper], type_ignores=[]))
         compiled = compile(tree, "<native-body-check>", "exec")
@@ -82,7 +87,19 @@ def _known_body(function, name):
     else:
         compiled = compile(ast.Module(body=[node], type_ignores=[]), "<native-body-check>", "exec")
     expected = next(value for value in compiled.co_consts if isinstance(value, CodeType))
-    return _code_shape(function.__code__) == _code_shape(expected)
+    current_shape, expected_shape = _code_shape(function.__code__), _code_shape(expected)
+    matched = current_shape == expected_shape
+    if diagnostic is not None:
+        labels = ("bytecode", "names", "variable_names", "arg_count", "positional_only", "keyword_only",
+                  "free_variables", "cell_variables", "flags", "stack_size", "exception_table", "constants")
+        diagnostic["code_components"] = {
+            label: {"matches": actual == wanted, **({
+                "observed_hash": hashlib.sha256(repr(actual).encode()).hexdigest(),
+                "expected_hash": hashlib.sha256(repr(wanted).encode()).hexdigest(),
+            } if actual != wanted else {})}
+            for label, actual, wanted in zip(labels, current_shape, expected_shape)}
+        diagnostic["reject_step"] = "accepted" if matched else "compiled_code_shape"
+    return matched
 
 
 class NativeLinkFieldScope:
@@ -124,9 +141,10 @@ class NativeLinkFieldScope:
                         function = getattr(owner, name)
                         node = ast.parse(textwrap.dedent(inspect.getsource(function))).body[0]
                         source = _native_ast_dump(node.args) + "\n" + _native_ast_dump(ast.Module(body=node.body, type_ignores=[]))
-                        checks[name] = {"native_match": _known_body(function, name),
+                        details = {}
+                        checks[name] = {"native_match": _known_body(function, name, details),
                                         "observed_hash": hashlib.sha256(source.encode()).hexdigest(),
-                                        "approved_hash": _NATIVE_BODIES[name]}
+                                        "approved_hash": _NATIVE_BODIES[name], "details": details}
                     except Exception as error:
                         checks[name] = {"native_match": False, "reason": type(error).__name__}
                 self._probe["body_checks"] = checks

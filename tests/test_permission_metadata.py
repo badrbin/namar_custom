@@ -264,7 +264,9 @@ class NativeBodyGuardTest(unittest.TestCase):
         function = self.load("model/base_document.py", "get", "BaseDocument")
         self.assertTrue(_known_body(function, "get"))
         function.__defaults__ = (None, 1, None)
-        self.assertFalse(_known_body(function, "get"))
+        diagnostic = {}
+        self.assertFalse(_known_body(function, "get", diagnostic))
+        self.assertEqual(diagnostic["reject_step"], "positional_defaults")
         function = self.load("utils/data.py", "compare")
         function.__defaults__ = ("Int",)
         self.assertFalse(_known_body(function, "compare"))
@@ -275,7 +277,11 @@ class NativeBodyGuardTest(unittest.TestCase):
             self.skipTest("This Python has no code exception table")
         self.assertTrue(function.__code__.co_exceptiontable)
         function.__code__ = function.__code__.replace(co_exceptiontable=b"")
-        self.assertFalse(_known_body(function, "hget"))
+        diagnostic = {}
+        self.assertFalse(_known_body(function, "hget", diagnostic))
+        self.assertEqual(diagnostic["reject_step"], "compiled_code_shape")
+        self.assertFalse(diagnostic["code_components"]["exception_table"]["matches"])
+        self.assertEqual(len(diagnostic["code_components"]["exception_table"]["observed_hash"]), 64)
 
     @contextmanager
     def native_scope(self):
