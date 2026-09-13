@@ -327,13 +327,8 @@ def _approval_search_filters(search: str, search_scope: str = "all") -> list[lis
 
 def _approval_counts(
     resolver: ApprovalRoutingResolver | None = None,
-    visible: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, int]:
     resolver = resolver or ApprovalRoutingResolver(frappe, frappe.session.user, get_workflow_safe_globals)
-    if resolver.has_rules:
-        if visible is None:
-            visible = resolver.visible_actions(list(WORKFLOW_ACTION_FIELDS))
-        return {"open": len(visible)}
     # get_list تُبقي Permission Query القياسي لـ Workflow Action مطبقًا حتى
     # مع حقل تجميعي؛ لذلك يطابق العدد نفس نطاق العناصر المرئية للمستخدم.
     rows = frappe.get_list(
@@ -343,7 +338,8 @@ def _approval_counts(
         limit_page_length=1,
     )
     open_count = rows[0].get("count") if rows else 0
-    return {"open": int(open_count or 0)}
+    excluded_count = len(resolver.exclusions().excluded_names) if resolver.has_policy else 0
+    return {"open": max(0, int(open_count or 0) - excluded_count)}
 
 
 def _followup_open_count(user: str) -> int:
@@ -714,13 +710,14 @@ def get_approvals(
     start, length, query_length = page_window(limit_start, page_length)
 
     resolver = ApprovalRoutingResolver(frappe, user, get_workflow_safe_globals)
-    visible = resolver.visible_actions(list(WORKFLOW_ACTION_FIELDS)) if resolver.has_rules else None
+    counts = _approval_counts(resolver) if resolver.has_policy else None
+    visibility = resolver.exclusions() if resolver.has_policy else None
     filters = {"status": "Open"}
-    if visible is not None:
-        filters["name"] = ["in", list(visible)]
+    if visibility is not None and visibility.excluded_names:
+        filters["name"] = ["not in", sorted(visibility.excluded_names)]
     # Reuse the normal SQL search and pagination only after routing. The
     # permission query is applied here again; routing never broadens its scope.
-    rows = [] if visible == {} else frappe.get_list(
+    rows = frappe.get_list(
         "Workflow Action",
         fields=list(WORKFLOW_ACTION_FIELDS),
         filters=filters,
@@ -733,7 +730,7 @@ def get_approvals(
     result = pagination(
         [
             _serialize_workflow_action(
-                row, reference_title_cache, visible.get(row["name"]) if visible is not None else None
+                row, reference_title_cache, visibility.routing.get(row["name"]) if visibility is not None else None
             )
             for row in rows
         ],
@@ -742,7 +739,7 @@ def get_approvals(
     )
     result["search"] = normalized_search
     result["search_scope"] = normalized_search_scope
-    result["counts"] = _approval_counts(resolver, visible)
+    result["counts"] = counts if counts is not None else _approval_counts(resolver)
     return result
 
 
