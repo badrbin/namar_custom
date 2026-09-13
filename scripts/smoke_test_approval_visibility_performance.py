@@ -16,11 +16,13 @@ from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import hashlib
+import fcntl
 import json
 import os
 from pathlib import Path
 import re
 import stat
+import subprocess
 import sys
 import threading
 import time
@@ -43,6 +45,95 @@ CONDITION = "doc.lines[0].qty > 0 and frappe.session.user == doc.approver"
 HIDE_FIELD = "custom_followups_hide_from_approvals"
 UNCERTAIN_HTTP = {408, 502, 503, 504, 520, 521, 522, 523, 524}
 PATCH = "namar_test.patches.v0_0_9.configure_approval_visibility"
+LEGACY_RUNTIME_REF = "c08ec77"
+LEGACY_CLI_REF = "68a5c66"
+
+
+class ManifestFileLock:
+    """Cross-process lock separate from the atomically replaced manifest."""
+    def __init__(self, manifest_path):
+        self.path = Path(manifest_path).with_suffix(".lock")
+        self.fd = None
+
+    def acquire(self):
+        flags = os.O_RDWR | os.O_CREAT
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(self.path, flags, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BaseException:
+            os.close(fd)
+            raise SmokeFailure("السجل مملوك لعملية أخرى أو تعذر قفله؛ لم يبدأ الاستكمال") from None
+        self.fd = fd
+        return self
+
+    def release(self):
+        if self.fd is not None:
+            fcntl.flock(self.fd, fcntl.LOCK_UN)
+            os.close(self.fd)
+            self.fd = None
+
+
+def load_existing_manifest(path, directory, site, *, expected_sha256=""):
+    path = Path(path).expanduser()
+    ensure(not path.is_symlink(), "manifest لا يقبل رابطًا رمزيًا")
+    path = path.resolve()
+    ensure(path.parent == directory and stat.S_IMODE(path.stat().st_mode) == 0o600,
+           "manifest يجب أن يكون خاصًا داخل مجلد السجل")
+    raw = path.read_bytes()
+    actual_sha = hashlib.sha256(raw).hexdigest()
+    if expected_sha256:
+        ensure(actual_sha == expected_sha256, "تغير manifest منذ تأكيد خروج العملية القديمة؛ لم يبدأ الاستكمال")
+    data = json.loads(raw)
+    ensure(data.get("schema") == "approval_visibility_performance_v1" and data.get("site") == site
+           and PREFIX_RE.fullmatch(data.get("prefix", "")), "manifest غير صالح للموقع")
+    return data, actual_sha
+
+
+def validate_resume_manifest(data):
+    ensure(not data.get("cleanup_complete") and not data.get("mutation_outcome_unknown") and not data.get("inflight_mutations"),
+           "لا استكمال مع تنظيف منتهٍ أو تعديل غير محسوم")
+    ensure(data.get("native_approval_unchanged") is True and len(data.get("completed_sources", [])) == 1,
+           "يلزم إثبات الاعتماد القياسي السابق ومصدر مكتمل واحد")
+    ensure(data.get("baseline") and data.get("real_workflows_before"), "خط الأساس أو نسخة Workflows الأصلية مفقودان")
+    ensure(not any(row.get("deleted") for row in data.get("definitions", []))
+           and not any(row.get("deleted") for row in data.get("source_batches", []))
+           and not any(row.get("deleted") for row in data.get("workflow_actions", {}).values()),
+           "بدأ تنظيف الموارد؛ لا يمكن استكمال الحجم نفسه")
+    history = data.get("measurement_history", [])
+    measurements = data.get("measurements", [])
+    ensure(len(measurements) == 14 or history, "نتائج الجولة الأصلية الأربعة عشر غير موجودة")
+
+
+def archive_measurement_run(data, runtime_ref, manifest_sha256, *, cli_ref="", stopped_evidence="", previous_snapshot=None):
+    """Keep the complete previous v1 state without recursively copying archives."""
+    validate_resume_manifest(data)
+    previous = deepcopy(data if previous_snapshot is None else previous_snapshot)
+    previous.pop("measurement_history", None)
+    old_run = previous.get("active_measurement_run", {})
+    archive = {"manifest_sha256": manifest_sha256,
+               "runtime_ref": old_run.get("runtime_ref") or LEGACY_RUNTIME_REF,
+               "cli_ref": old_run.get("cli_ref") or LEGACY_CLI_REF,
+               "snapshot": previous}
+    data.setdefault("measurement_history", []).append(archive)
+    run_id = uuid4().hex
+    data["active_measurement_run"] = {"run_id": run_id, "runtime_ref": runtime_ref, "cli_ref": cli_ref,
+        "started_at": datetime.now(timezone.utc).isoformat(), "process_id": os.getpid(),
+        "previous_run_stopped_evidence": stopped_evidence}
+    data["measurements"] = []
+    data["performance_failures"] = []
+    data["correctness_passed"] = None
+    data["performance_passed"] = None
+    data["state"] = "resume_preflight"
+    for key in ("failure", "review_error", "read_request_may_be_running"):
+        data.pop(key, None)
+    return run_id
+
+
+def current_cli_ref():
+    return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parents[1], text=True).strip()
 
 
 def digest(value):
@@ -147,6 +238,11 @@ def config(args):
     ensure(5 <= args.timeout <= 120, "مهلة HTTP يجب أن تكون بين 5 و120 ثانية")
     if args.pause_before_cleanup:
         ensure(not args.cleanup_manifest and sys.stdin.isatty(), "الوقفة تتطلب PTY ولا تُجمع مع استكمال التنظيف")
+    if args.resume_measurements:
+        ensure(args.pause_before_cleanup, "الاستكمال يتطلب الوقفة قبل التنظيف")
+        ensure(re.fullmatch(r"[a-fA-F0-9]{64}", args.expected_manifest_sha256 or ""), "يلزم hash السجل بعد خروج العملية القديمة")
+        ensure(re.fullmatch(r"[a-fA-F0-9]{7,40}", args.runtime_ref or ""), "يلزم مرجع commit للـruntime الجديد")
+        ensure(args.stopped_run_evidence.strip(), "يلزم توثيق خروج العملية القديمة؛ حالة pause وحدها لا تكفي")
     env["site"] = site
     if not args.cleanup_manifest:
         ensure(all(env.get(k) for k in ("BROWSER_LOGIN_URL", "BROWSER_LOGIN_EMAIL", "BROWSER_LOGIN_PASSWORD")),
@@ -176,14 +272,26 @@ class PerformanceRunner:
     def admin(self):
         return self.clients["A"]
 
-    def rows(self, client, dt, fields, filters, *, length=1000, parent=None):
+    def rows(self, client, dt, fields, filters, *, length=1000, parent=None, start=0):
         args = {"doctype": dt, "fields": json.dumps(fields), "filters": json.dumps(filters),
-                "limit_page_length": length, "order_by": "name asc"}
+                "limit_start": start, "limit_page_length": length, "order_by": "name asc"}
         if parent:
             args["parent"] = parent
         result = client.call("frappe.client.get_list", args=args)
         ensure(isinstance(result, list) and all(isinstance(row, dict) for row in result), "قائمة GET غير صحيحة؛ لا يُعامل null كقائمة فارغة")
         return result
+
+    def all_rows(self, client, dt, fields, filters, *, parent=None):
+        result, seen = [], set()
+        while True:
+            page = self.rows(client, dt, fields, filters, start=len(result), parent=parent)
+            ensure(len(page) <= 1000, "رد القائمة تجاوز حجم الصفحة المعتمد")
+            for row in page:
+                ensure(isinstance(row.get("name"), str) and row["name"] not in seen, "تكررت هوية صف بين صفحات القراءة")
+                seen.add(row["name"])
+            result.extend(page)
+            if len(page) < 1000:
+                return result
 
     def count(self, client, dt, filters, *, parent=None):
         rows = self.rows(client, dt, ["count(name) as count"], filters, length=1, parent=parent)
@@ -196,6 +304,20 @@ class PerformanceRunner:
 
     def owned_names(self, dt):
         return {name for batch in self.journal.data["source_batches"] if batch["doctype"] == dt for name in batch["names"]}
+
+    def owned_open_names(self, dt):
+        return self.owned_names(dt) - set(self.journal.data.get("completed_sources", []))
+
+    def open_fixture_count(self):
+        return sum(len(self.owned_open_names(dt)) for dt in (self.routed, self.default))
+
+    def open_routed_action(self):
+        live_sources = self.owned_open_names(self.routed)
+        action = next((row for row in self.journal.data["workflow_actions"].values()
+                       if row["reference_doctype"] == self.routed and row["reference_name"] in live_sources
+                       and row.get("status") == "Open"), None)
+        ensure(action is not None, "لا توجد موافقة مفتوحة صالحة لاختبار الحجب")
+        return action
 
     def definition(self, dt, name):
         return next((row for row in self.journal.data["definitions"] if row["doctype"] == dt and row["name"] == name), None)
@@ -289,6 +411,141 @@ class PerformanceRunner:
         self.journal.flush()
         self.journal.event("preflight_passed", baseline=self.baseline, shared_role=self.role)
 
+    def resume_preflight(self):
+        """Re-authenticate and validate the retained data without rebasing it."""
+        validate_resume_manifest(self.journal.data)
+        ensure(self.admin.call("frappe.auth.get_logged_user") == "Administrator", "يلزم Administrator على TEST")
+        self.clients["B"].login(self.env["BROWSER_LOGIN_EMAIL"], self.env["BROWSER_LOGIN_PASSWORD"])
+        self.user_b = self.clients["B"].call("frappe.auth.get_logged_user")
+        actors = self.journal.data["actors"]
+        ensure(self.user_b == actors["B"] and self.user_b not in ("Administrator", "Guest"), "تغير حساب المقارنة")
+        user = self.admin.doc("User", self.user_b)
+        self.role = actors["role"]
+        ensure(user.get("enabled") == 1 and user.get("user_type") == "System User"
+               and self.role in {row["role"] for row in user.get("roles", [])}, "المستخدم أو الدور الأصلي لم يعد مؤهلًا")
+        ensure(not self.args.role or self.args.role == self.role, "لا يُبدل الدور خلال مقارنة الجولتين")
+        fields = self.rows(self.admin, "Custom Field", ["name"], {"dt": "Workflow Document State", "fieldname": ["in", [FIELD, HIDE_FIELD]]})
+        patches = self.rows(self.admin, "Patch Log", ["name", "skipped"], {"patch": PATCH})
+        ensure(len(fields) == 2 and len(patches) == 1 and int(patches[0].get("skipped") or 0) == 0, "ترحيل حقول التوجيه غير مكتمل")
+        for target in self.journal.data["definitions"]:
+            self.assert_definition(target["doctype"], target["name"])
+        for before in self.journal.data["real_workflows_before"]:
+            ensure(self.admin.doc("Workflow", before["name"]) == before,
+                   "تغير Workflow أعمال؛ لم يُعدل خط الأساس أو المستند")
+        workflow = self.admin.doc("Workflow", self.workflows[self.routed])
+        state = next(row for row in workflow["states"] if row["state"] == self.pending)
+        saved = self.journal.data["qa_routing_snapshot"]["values"]
+        ensure(json.loads(state.get(FIELD) or "{}") == json.loads(saved[FIELD])
+               and int(state.get(HIDE_FIELD) or 0) == int(saved[HIDE_FIELD]) == 0
+               and not any(row.get("condition") for row in workflow["transitions"]),
+               "إعداد QA لم يُستعد قبل الاستكمال؛ لم تُكتب بيانات")
+        if self.journal.data.get("measurement_replacement"):
+            self.ensure_replacement(allow_create=False)
+        self.verify_retained_inventory()
+        self.journal.event("resume_preflight_passed", original_baseline=self.baseline, baseline_rebased=False)
+
+    def validate_source_snapshot(self, dt, row, children, *, expected_owner=None):
+        owners = {name: batch["owner"] for batch in self.journal.data["source_batches"] if batch["doctype"] == dt for name in batch["names"]}
+        name = row.get("name")
+        ensure(name in owners, "مصدر خارج manifest")
+        expected_state = self.approved if name in self.journal.data.get("completed_sources", []) else self.pending
+        approver = self.journal.data.get("source_overrides", {}).get(name, {}).get("approver", self.journal.data["actors"]["B"])
+        expected = source_payload(self.prefix, dt, int(name.rsplit(" ", 1)[1]), expected_state, approver)
+        ensure(row.get("title") == name and row.get("smoke_marker") == self.prefix
+               and row.get("owner") == (expected_owner or owners[name]) and row.get("approver") == approver
+               and row.get("workflow_state") == expected_state, "بصمة المصدر المحتفظ به تغيرت")
+        children = sorted(children, key=lambda child: child["idx"])
+        ensure(len(children) == CHILD_ROWS and all(all(child.get(k) == v for k, v in wanted.items())
+               for child, wanted in zip(children, expected["lines"])), "بصمة أطفال المصدر المحتفظ به تغيرت")
+
+    def verify_retained_inventory(self, *, require_replacement=False):
+        replacement = self.journal.data.get("measurement_replacement")
+        pending_replacement = replacement and not replacement.get("created")
+        omitted = {replacement["name"]} if pending_replacement else set()
+        evidence = {}
+        for dt in (self.routed, self.default):
+            parents = self.all_rows(self.admin, dt, ["*"], {})
+            expected_names = self.owned_names(dt) - omitted
+            # An uncertain-but-settled successful creation is reconciled by
+            # ensure_replacement before this inventory is required again.
+            ensure({row["name"] for row in parents} == expected_names, "مجموعة المصادر المحتفظ بها غير مطابقة")
+            children = self.all_rows(self.admin, self.child, ["*"], {"parenttype": dt}, parent=dt)
+            grouped = {}
+            for child in children:
+                ensure(child.get("parent") in expected_names and child.get("parentfield") == "lines", "طفل خارج المصادر المحتفظ بها")
+                grouped.setdefault(child["parent"], []).append(child)
+            for row in parents:
+                self.validate_source_snapshot(dt, row, grouped.get(row["name"], []))
+            evidence[dt] = {"sources": len(parents), "children": len(children), "sha256": digest([parents, children])}
+        actions = self.remember_actions()
+        expected_sources = {(dt, name) for dt in (self.routed, self.default) for name in self.owned_names(dt) - omitted}
+        ensure(len(actions) == len(expected_sources) and {(row["reference_doctype"], row["reference_name"]) for row in actions.values()} == expected_sources,
+               "يلزم موافقة واحدة لكل مصدر محتفظ به")
+        completed = set(self.journal.data["completed_sources"])
+        for row in actions.values():
+            ensure(row.get("status") == ("Completed" if row["reference_name"] in completed else "Open"), "حالة موافقة غير مطابقة للمصدر")
+        open_count = len(expected_sources) - len(completed)
+        replacement_count = int(bool(replacement and replacement.get("created")))
+        ensure(len(expected_sources) == TOTAL + replacement_count and len(completed) == 1
+               and open_count == TOTAL - 1 + replacement_count, "الحجم الفيزيائي أو المفتوح لا يطابق جولة المقارنة")
+        if require_replacement:
+            ensure(replacement_count == 1 and len(self.owned_open_names(self.routed)) == CONFIGURED
+                   and open_count == TOTAL, "لم يُستعد حجم 7500 موافقة مفتوحة")
+        for actor, client in self.clients.items():
+            scoped = self.count(client, "Workflow Action", {"reference_doctype": ["in", [self.routed, self.default]], "status": "Open"})
+            ensure(scoped == open_count and self.core_count(client) == self.baseline[actor]["core"] + open_count,
+                   "تغيرت الصلاحيات أو الموافقات غير المعزولة؛ لم يُحتسب baseline جديد")
+            visible = client.call(API + ".get_my_followups_counts")["counts"]["approvals"]
+            ensure(visible == self.baseline[actor]["routed"] + open_count, "تغير خط أساس الموافقات المرئية أو إعداد QA")
+        self.journal.data["retained_population"] = {"details": evidence, "physical_sources": len(expected_sources),
+            "physical_actions": len(actions), "open_actions": open_count, "completed_actions": len(completed),
+            "child_rows": sum(row["children"] for row in evidence.values())}
+        self.journal.data["expected_open_fixture_actions"] = open_count
+        self.journal.flush()
+
+    def ensure_replacement(self, *, allow_create=True):
+        """One deterministic B-owned replacement; never auto-retry an attempt."""
+        name = f"{self.routed} {CONFIGURED + 1:05}"
+        replacement = self.journal.data.get("measurement_replacement")
+        payload = source_payload(self.prefix, self.routed, CONFIGURED + 1, self.pending, self.user_b)
+        if replacement:
+            ensure(replacement.get("name") == name and replacement.get("owner") == self.user_b,
+                   "بصمة البديل المسجل غير مطابقة")
+        live = self.admin.doc(self.routed, name, missing=True)
+        if live:
+            ensure(replacement is not None, "اسم البديل موجود بلا سجل سابق؛ لم يُتبنّ أو يُستبدل")
+            self.validate_source_snapshot(self.routed, live, live.get("lines", []), expected_owner=self.user_b)
+            replacement["created"] = True
+            next(batch for batch in self.journal.data["source_batches"] if batch.get("replacement"))["created"] = True
+            self.journal.flush()
+            self.journal.event("replacement_reused", source=name, new_insert=False)
+            return
+        ensure(not replacement or not replacement.get("attempted"),
+               "البديل غير موجود بعد محاولة سابقة؛ لا إعادة إنشاء تلقائية")
+        ensure(not replacement or not replacement.get("created"), "اختفى بديل سبق إثبات إنشائه؛ لن يُنشأ ثانية")
+        if not allow_create:
+            return
+        if not replacement:
+            replacement = {"name": name, "owner": self.user_b, "replaces": self.journal.data["completed_sources"][0],
+                           "created": False, "attempted": False}
+            self.journal.data["measurement_replacement"] = replacement
+            self.journal.data["source_batches"].append({"doctype": self.routed, "actor": "B", "owner": self.user_b,
+                "names": [name], "created": False, "deleted": [], "replacement": True, "payload_sha256": digest([payload])})
+        self.journal.flush()
+        self.journal.event("mutation_before", operation="insert_measurement_replacement", before=None, intended=payload,
+                           replaces=replacement["replaces"])
+        replacement["attempted"] = True
+        self.journal.flush()
+        inserted = self.mutate(self.clients["B"], "insert_measurement_replacement", lambda: self.clients["B"].call(
+            "frappe.client.insert_many", args={"docs": [payload]}, post=True))
+        ensure(inserted == [name], "اسم البديل المنشأ غير مطابق")
+        after = self.admin.doc(self.routed, name)
+        self.validate_source_snapshot(self.routed, after, after.get("lines", []), expected_owner=self.user_b)
+        replacement["created"] = True
+        next(batch for batch in self.journal.data["source_batches"] if batch.get("replacement"))["created"] = True
+        self.journal.flush()
+        self.journal.event("mutation_after", operation="insert_measurement_replacement", after=after)
+
     def setup(self):
         self.create_definition("DocType", self.child, {
             "doctype": "DocType", "name": self.child, "custom": 1, "istable": 1, "module": "Custom", "description": self.prefix,
@@ -380,7 +637,7 @@ class PerformanceRunner:
 
     def verify_actor(self, actor, expected, *, fallback=False):
         client = self.clients[actor]
-        count = self.baseline[actor]["routed"] + TOTAL - CONFIGURED + len(expected)
+        count = self.baseline[actor]["routed"] + len(self.owned_open_names(self.default)) + len(expected)
         page = client.call(API + ".get_approvals", args={"search": self.routed, "search_scope": "doctype", "page_length": 25})
         names = [row["reference_name"] for row in page["items"]]
         ensure(len(names) == min(25, len(expected)) and len(names) == len(set(names)) and set(names) <= expected,
@@ -390,7 +647,7 @@ class PerformanceRunner:
         for item in page["items"]:
             ensure(item["routing"]["fallback"] is fallback, "fallback لا يطابق المستلمين الفعليين")
         if not expected:
-            action = next(row for row in self.journal.data["workflow_actions"].values() if row["reference_doctype"] == self.routed)
+            action = self.open_routed_action()
             refused = client.request("GET", "/api/method/" + API + ".get_approval_detail",
                                      params={"action_name": action["name"]}, expected=(403,))
             ensure(refused.get("exc_type") == "PermissionError", "تفاصيل الموافقة المخفية لم تُرفض بالهوية الحقيقية")
@@ -405,7 +662,7 @@ class PerformanceRunner:
                        and not set(names) & set(second_names), "تداخل أو نقص عند الصفحة الثانية بعد التوجيه")
         counts = client.call(API + ".get_my_followups_counts")
         ensure(counts["counts"]["approvals"] == count == counts["attention_counts"]["approvals"], "العداد والشارة غير مطابقين")
-        ensure(self.core_count(client) == self.baseline[actor]["core"] + TOTAL, "تغير نطاق الموافقات غير المعزولة أثناء القياس")
+        ensure(self.core_count(client) == self.baseline[actor]["core"] + self.open_fixture_count(), "تغير نطاق الموافقات غير المعزولة أثناء القياس")
         return count
 
     def measure(self, label, expected):
@@ -422,9 +679,11 @@ class PerformanceRunner:
                 if endpoint == "page_25":
                     ensure(len(payload["items"]) == 25, "صفحة الأداء لا تحتوي 25 عنصرًا")
                 self.journal.event("performance_sample", scenario=label, actor="B", endpoint=endpoint, sample=index + 1,
-                                   elapsed_seconds=elapsed, budget_seconds=MAX_SECONDS, passed=elapsed <= MAX_SECONDS)
+                                   elapsed_seconds=elapsed, budget_seconds=MAX_SECONDS, passed=elapsed <= MAX_SECONDS,
+                                   run_id=self.journal.data.get("active_measurement_run", {}).get("run_id"))
         passed = all(samples_pass(values) for values in measurements.values())
-        self.journal.data["measurements"].append({"scenario": label, "actor": "B", "samples": measurements, "passed": passed})
+        self.journal.data["measurements"].append({"scenario": label, "actor": "B", "samples": measurements, "passed": passed,
+            "run_id": self.journal.data.get("active_measurement_run", {}).get("run_id")})
         if not passed:
             self.performance_failures.append(label)
         self.journal.flush()
@@ -435,10 +694,12 @@ class PerformanceRunner:
         self.measure(label, expected_counts["B"])
         self.journal.event("scenario_verified", scenario=label, visible_counts={k: len(v) for k, v in visible.items()})
 
-    def exercise(self):
-        all_names = self.owned_names(self.routed)
-        b_owned = {name for batch in self.journal.data["source_batches"] if batch["doctype"] == self.routed and batch["actor"] == "B" for name in batch["names"]}
+    def exercise(self, *, resume=False):
+        all_names = self.owned_open_names(self.routed)
+        b_owned = {name for batch in self.journal.data["source_batches"] if batch["doctype"] == self.routed and batch["actor"] == "B" for name in batch["names"]} & all_names
         a_owned = all_names - b_owned
+        ensure(len(all_names) == CONFIGURED and len(a_owned) == len(b_owned) == CONFIGURED // 2
+               and self.open_fixture_count() == TOTAL, "يلزم استعادة الحجم وتوزيع الملكية الأصليين قبل القياس")
         both = {"A": all_names, "B": all_names}
         a_only, b_only = {"A": all_names, "B": set()}, {"A": set(), "B": all_names}
         user_a, user_b = {"type": "user", "user": "Administrator"}, {"type": "user", "user": self.user_b}
@@ -456,14 +717,19 @@ class PerformanceRunner:
         # Conditions load genuine child rows and evaluate each candidate's own
         # identity. No real user permissions or workflow transitions are changed.
         self.scenario("children_and_candidate_session_condition", [user_a, user_b], b_only, condition=CONDITION)
-        sample = sorted(all_names)[-1]
+        sample = f"{self.routed} {CONFIGURED:05}"
+        ensure(sample in a_owned, "عينة الشرط الأصلية 04250 غير موجودة أو تغير مالكها")
         self.change_approver(sample, "Administrator")
         changed = {"A": {sample}, "B": all_names - {sample}}
         expected = {actor: self.verify_actor(actor, names) for actor, names in changed.items()}
         self.measure("condition_field_change_without_workflow_rename", expected["B"])
         self.change_approver(sample, self.user_b)
         self.scenario("restored_rule_same_workflow_names", [user_b], b_only)
-        self.native_approval_proof(sorted(b_owned)[0])
+        if resume:
+            ensure(self.journal.data.get("native_approval_unchanged") is True, "دليل الاعتماد الأصلي مفقود")
+            self.prepare_visual_qa()
+        else:
+            self.native_approval_proof(sorted(b_owned)[0])
         self.journal.data["correctness_passed"] = True
         self.journal.data["performance_passed"] = not self.performance_failures
         self.journal.data["performance_failures"] = self.performance_failures
@@ -494,14 +760,19 @@ class PerformanceRunner:
         completed = self.admin.doc("Workflow Action", action["name"])
         ensure(completed.get("status") == "Completed", "لم تنته الموافقة بعد الانتقال القياسي")
         self.journal.data["completed_sources"] = [source_name]
+        action["status"] = "Completed"
         self.journal.data["expected_open_fixture_actions"] = TOTAL - 1
         self.journal.flush()
         ensure(self.core_count(client) == self.baseline["B"]["core"] + TOTAL - 1, "العدد القياسي لم ينقص بعد الاعتماد")
         ensure(client.call(API + ".get_my_followups_counts")["counts"]["approvals"] == before_count,
                "العنصر المخفي انتهاؤه غيّر عداد العناصر المرئية")
+        self.journal.data["native_approval_unchanged"] = True
+        self.prepare_visual_qa()
+
+    def prepare_visual_qa(self):
         self.set_rule([{"type": "user", "user": "Administrator"}, {"type": "user", "user": self.user_b}])
         for actor, connection in self.clients.items():
-            expected = self.baseline[actor]["routed"] + TOTAL - 1
+            expected = self.baseline[actor]["routed"] + self.open_fixture_count()
             ensure(connection.call(API + ".get_my_followups_counts")["counts"]["approvals"] == expected,
                    "إظهار القاعدة بعد الاعتماد أعاد الموافقة المنتهية إلى العدد")
             page = connection.call(API + ".get_approvals", args={"search": self.routed, "search_scope": "doctype", "page_length": 25})
@@ -512,7 +783,7 @@ class PerformanceRunner:
         snapshot = {FIELD: state.get(FIELD), HIDE_FIELD: int(state.get(HIDE_FIELD) or 0)}
         self.journal.data["qa_routing_snapshot"] = {"workflow": workflow["name"], "state": self.pending,
                                                      "values": snapshot, "sha256": digest(snapshot)}
-        self.journal.data["native_approval_unchanged"] = True
+        self.journal.data["expected_open_fixture_actions"] = self.open_fixture_count()
         self.journal.flush()
 
     def delete_source_batch(self, client, dt, names):
@@ -554,10 +825,11 @@ class PerformanceRunner:
         insert batch whose HTTP result was lost. Never accept unrelated refs.
         """
         actions = self.journal.data.setdefault("workflow_actions", {})
+        live_actions = {}
         offset = 0
         while True:
             page = self.admin.call("frappe.client.get_list", args={"doctype": "Workflow Action",
-                "fields": json.dumps(["name", "reference_doctype", "reference_name"]),
+                "fields": json.dumps(["name", "reference_doctype", "reference_name", "status"]),
                 "filters": json.dumps({"reference_doctype": ["in", [self.routed, self.default]]}),
                 "limit_start": offset, "limit_page_length": 1000, "order_by": "name asc"})
             ensure(isinstance(page, list) and all(isinstance(row, dict) and all(
@@ -565,12 +837,14 @@ class PerformanceRunner:
                 "قراءة معرفات الموافقات غير صحيحة؛ لن يبدأ تنظيف المصادر")
             for row in page:
                 ensure(row["reference_name"] in self.owned_names(row["reference_doctype"]), "وجدت موافقة خارج مصادر manifest")
-                if row["name"] not in actions:
-                    actions[row["name"]] = {**row, "deleted": False}
+                ensure(row.get("status") in ("Open", "Completed"), "حالة موافقة غير معروفة")
+                actions[row["name"]] = {**row, "deleted": bool(actions.get(row["name"], {}).get("deleted"))}
+                live_actions[row["name"]] = actions[row["name"]]
             self.journal.flush()
             if len(page) < 1000:
                 break
             offset += len(page)
+        return live_actions
 
     def delete_action_batch(self, client, names):
         ensure(0 < len(names) <= 10, "لا يسمح بتجديل حذف الموافقات في الخلفية")
@@ -689,6 +963,7 @@ class PerformanceRunner:
         self.journal.flush()
         self.journal.event(state, workflow=self.workflows[self.routed])
         print(json.dumps({"state": state, "workflow": self.workflows[self.routed], "manifest": str(self.journal.path),
+                          "process_id": os.getpid(),
                           "performance_failures": self.journal.data.get("performance_failures", []),
                           "read_request_may_be_running": self.journal.data.get("read_request_may_be_running", False),
                           "cleanup_pending": True}, ensure_ascii=False, indent=2), flush=True)
@@ -705,7 +980,12 @@ def parse_args(argv=None):
     parser.add_argument("--confirm-site", default="")
     parser.add_argument("--env-file", type=Path, default=default_env_file())
     parser.add_argument("--state-dir", type=Path, default=Path.home() / ".local/state/namar_test/approval_visibility_performance")
-    parser.add_argument("--cleanup-manifest", type=Path)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--cleanup-manifest", type=Path)
+    mode.add_argument("--resume-measurements", type=Path, help="إعادة القياسات على نفس fixtures مع بديل واحد للمصدر المكتمل")
+    parser.add_argument("--expected-manifest-sha256", default="", help="بصمة manifest بعد التحقق من خروج العملية السابقة")
+    parser.add_argument("--stopped-run-evidence", default="", help="مرجع إثبات خروج عملية القياس السابقة؛ pause وحدها لا تكفي")
+    parser.add_argument("--runtime-ref", default="", help="commit للـruntime الجديد الذي تحقق root من نشره")
     parser.add_argument("--pause-before-cleanup", action="store_true",
                         help="وقفة PTY بعد القياسات للمراجعة البصرية/الأداء؛ تبقي fixtures حتى Enter")
     parser.add_argument("--settled-request-evidence", default="",
@@ -725,20 +1005,22 @@ def main(argv=None):
                           "child_rows_per_source": CHILD_ROWS, "total_child_rows": TOTAL * CHILD_ROWS,
                           "measurements_per_endpoint_per_scenario": SAMPLES, "page_length": 25, "max_seconds_each": MAX_SECONDS,
                           "normal_account": "existing TEST browser login", "cleanup_batch": 10,
+                          "resume_measurements": bool(args.resume_measurements),
                           "pause_before_cleanup": args.pause_before_cleanup,
                           "cleanup_workers": args.cleanup_workers, "no_sql_or_public_test_endpoint": True}, ensure_ascii=False, indent=2))
         return 0
-    runner = journal = None
+    runner = journal = file_lock = None
     try:
         env = config(args)
         directory = private_dir(args.state_dir)
-        if args.cleanup_manifest:
-            path = args.cleanup_manifest.expanduser().resolve()
-            ensure(path.parent == directory and not args.cleanup_manifest.is_symlink() and stat.S_IMODE(path.stat().st_mode) == 0o600,
-                   "manifest التنظيف يجب أن يكون خاصًا داخل مجلد السجل")
-            data = json.loads(path.read_text())
-            ensure(data.get("schema") == "approval_visibility_performance_v1" and data.get("site") == env["site"]
-                   and PREFIX_RE.fullmatch(data.get("prefix", "")), "manifest غير صالح للموقع")
+        existing = args.cleanup_manifest or args.resume_measurements
+        if existing:
+            path = existing.expanduser().resolve()
+            ensure(path.parent == directory and not existing.is_symlink(), "manifest يجب أن يكون داخل مجلد السجل الخاص")
+            file_lock = ManifestFileLock(path).acquire()
+            data, original_sha = load_existing_manifest(path, directory, env["site"],
+                expected_sha256=args.expected_manifest_sha256 if args.resume_measurements else "")
+            previous_snapshot = deepcopy(data)
             if data.get("mutation_outcome_unknown") or data.get("inflight_mutations"):
                 ensure(args.settled_request_evidence.strip(),
                        "لا يُستكمل التنظيف قبل إثبات انتهاء الطلب؛ مرر مرجع التحقق في --settled-request-evidence")
@@ -746,14 +1028,24 @@ def main(argv=None):
                 data["settled_inflight_history"] = deepcopy(data.get("inflight_mutations", {}))
                 data["inflight_mutations"] = {}
                 data["mutation_outcome_unknown"] = False
+            if args.resume_measurements:
+                validate_resume_manifest(data)
+                cli_ref = current_cli_ref()
+                archive_measurement_run(data, args.runtime_ref, original_sha, cli_ref=cli_ref,
+                                        stopped_evidence=args.stopped_run_evidence.strip(), previous_snapshot=previous_snapshot)
+                data["active_measurement_run"]["harness_sha256"] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
         else:
             prefix = "NAR Perf " + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S") + " " + uuid4().hex[:8]
             path = directory / (prefix.replace(" ", "-") + ".json")
             ensure(not path.exists(), "manifest موجود مسبقًا")
+            file_lock = ManifestFileLock(path).acquire()
             data = {"schema": "approval_visibility_performance_v1", "site": env["site"], "prefix": prefix,
                     "definitions": [], "source_batches": [], "baseline": {}, "measurements": [],
                     "payload_generator": {"version": 1, "total": TOTAL, "configured": CONFIGURED, "child_rows": CHILD_ROWS},
                     "cleanup_complete": False}
+            data["active_measurement_run"] = {"run_id": uuid4().hex, "runtime_ref": args.runtime_ref or "unverified",
+                "cli_ref": current_cli_ref(), "started_at": datetime.now(timezone.utc).isoformat(), "process_id": os.getpid(),
+                "harness_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
         journal = PerfJournal(path, data)
         journal.flush()
         runner = PerformanceRunner(env, args, journal)
@@ -762,12 +1054,20 @@ def main(argv=None):
             runner.cleanup()
             runner.verify_real_workflows()
         else:
-            runner.preflight()
-            setup_complete = False
+            if args.resume_measurements:
+                runner.resume_preflight()
+            else:
+                runner.preflight()
+            setup_complete = bool(args.resume_measurements)
             try:
-                runner.setup()
-                setup_complete = True
-                runner.exercise()
+                if args.resume_measurements:
+                    runner.ensure_replacement()
+                    runner.verify_retained_inventory(require_replacement=True)
+                    runner.exercise(resume=True)
+                else:
+                    runner.setup()
+                    setup_complete = True
+                    runner.exercise()
                 if args.pause_before_cleanup:
                     runner.pause_for_review()
             except Exception as exc:
@@ -805,6 +1105,8 @@ def main(argv=None):
         if runner:
             for client in runner.clients.values():
                 client.session.close()
+        if file_lock:
+            file_lock.release()
 
 
 if __name__ == "__main__":
