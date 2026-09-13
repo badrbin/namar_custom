@@ -11,7 +11,7 @@ import sys
 import unittest
 from unittest.mock import patch
 
-from namar_test.followups.permission_metadata import NativeLinkFieldScope, _known_body
+from namar_test.followups.permission_metadata import NativeLinkFieldScope, _known_body, _native_ast_dump
 
 
 class Base:
@@ -62,6 +62,22 @@ def fixture():
 
 
 class PermissionMetadataScopeTest(unittest.TestCase):
+    def test_native_ast_fingerprint_keeps_empty_fields_on_all_python_versions(self):
+        node = ast.parse("f()").body[0].value
+        self.assertEqual(_native_ast_dump(node), "Call(func=Name(id='f', ctx=Load()), args=[], keywords=[])")
+        original = ast.dump
+
+        def python_311_dump(node, *, include_attributes=False, **kwargs):
+            if "show_empty" in kwargs:
+                raise TypeError("unexpected keyword argument 'show_empty'")
+            try:
+                return original(node, include_attributes=include_attributes, show_empty=True)
+            except TypeError:
+                return original(node, include_attributes=include_attributes)
+
+        with patch("namar_test.followups.permission_metadata.ast.dump", python_311_dump):
+            self.assertEqual(_native_ast_dump(node), "Call(func=Name(id='f', ctx=Load()), args=[], keywords=[])")
+
     def test_original_identity_fresh_lists_and_native_permission_fields(self):
         f, doc, parent, child, bucket = fixture()
         with Scope(f).for_document(doc):
