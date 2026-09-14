@@ -103,4 +103,3 @@ for (const route of ["/app/sales-order/SO-1", "app/sales-order/SO-1", "https://t
 }
 
 console.log("My Followups document navigation new-tab tests passed.");
-
