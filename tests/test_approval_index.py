@@ -10,8 +10,10 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 
-def load_engine():
+def load_engine(*, frappe_version=None):
     frappe = types.ModuleType("frappe")
+    if frappe_version is not None:
+        frappe.__version__ = frappe_version
     frappe.whitelist = lambda **kwargs: lambda fn: fn
     frappe.conf = {"followup_approval_index_enabled": True}
     frappe.session = types.SimpleNamespace(user="employee@example.com")
@@ -42,15 +44,15 @@ class ApprovalIndexTests(unittest.TestCase):
     def ready_sql(self, query, values=None, as_dict=False):
         self.assertTrue(query.lstrip().startswith("SELECT"), query)
         if "SELECT * FROM `tabNamar Approval Index Control`" in query:
-            return [{"name": "current", "epoch": 4, "scan_complete": 1}]
-        if "SELECT epoch,scan_complete FROM" in query:
-            return [{"epoch": 4, "scan_complete": 1}]
+            return [{"name": "current", "epoch": 4, "scan_complete": 1, "engine_revision": self.index.ENGINE_REVISION}]
+        if "SELECT epoch,scan_complete,engine_revision FROM" in query:
+            return [{"epoch": 4, "scan_complete": 1, "engine_revision": self.index.ENGINE_REVISION}]
         if "WHERE state=" in query:
             return []
         if "COUNT(*)" in query:
             return [(3,)]
         if "a.projection" in query:
-            return [{"name": "WA-1", "reference_name": "MR-1", "routing": '{"mode":"Targets"}', "projection": '{"title":"A"}'}]
+            return [{"name": "WA-1", "reference_name": "MR-1", "routing": '{"mode":"Targets"}', "projection": '{"title":"A"}', "_index_revision": 3}]
         raise AssertionError(query)
 
     def test_count_read_never_enqueues_or_hydrates(self):
@@ -135,7 +137,7 @@ class ApprovalIndexTests(unittest.TestCase):
             with self.subTest(state=state):
                 def sql(query, values=None, as_dict=False):
                     if "SELECT *" in query:
-                        return [{"epoch": 8, "scan_complete": 1}]
+                        return [{"epoch": 8, "scan_complete": 1, "engine_revision": self.index.ENGINE_REVISION}]
                     return [("WA-pending",)] if f"state='{state}'" in query else []
                 self.frappe.db.sql.side_effect = sql
                 result = self.index.read_page("employee@example.com")
@@ -144,14 +146,14 @@ class ApprovalIndexTests(unittest.TestCase):
                 self.assertEqual(result["state"], "updating" if state == "Pending" else "error")
 
     def test_generation_seed_is_not_ready_even_when_no_pending_rows(self):
-        self.frappe.db.sql.return_value = [{"epoch": 9, "scan_complete": 0}]
+        self.frappe.db.sql.return_value = [{"epoch": 9, "scan_complete": 0, "engine_revision": self.index.ENGINE_REVISION}]
         self.assertEqual(self.index.read_counts("employee@example.com")["state"], "updating")
         self.assertEqual(self.frappe.db.sql.call_count, 1)
 
     def test_count_revoked_epoch_mid_read_returns_unknown_not_stale_count(self):
         def sql(query, values=None, as_dict=False):
             if "LOCK IN SHARE MODE" in query:
-                return [{"epoch": 5, "scan_complete": 0}]
+                return [{"epoch": 5, "scan_complete": 0, "engine_revision": self.index.ENGINE_REVISION}]
             return self.ready_sql(query, values, as_dict)
         self.frappe.db.sql.side_effect = sql
         result = self.index.read_counts("employee@example.com")
@@ -168,7 +170,7 @@ class ApprovalIndexTests(unittest.TestCase):
         for candidate in (row, {**row, "epoch": 5}, {**row, "requested_revision": 4}, {**row, "native_status": "Completed"}, {**row, "state": "Pending"}, None):
             with self.subTest(candidate=candidate):
                 self.frappe.db.sql.reset_mock()
-                self.frappe.db.sql.side_effect = [[{"epoch": 4, "scan_complete": 1}], [candidate] if candidate else []]
+                self.frappe.db.sql.side_effect = [[{"epoch": 4, "scan_complete": 1, "engine_revision": self.index.ENGINE_REVISION}], [candidate] if candidate else []]
                 result = self.index.verify_snapshot(4, {"WA-1": 3})
                 self.assertEqual(result, candidate == row)
                 for call in self.frappe.db.sql.call_args_list:
@@ -182,25 +184,26 @@ class ApprovalIndexTests(unittest.TestCase):
         self.frappe.db.sql.assert_not_called()
 
     def test_cas_rejects_changed_policy_source_and_deleted_action(self):
-        snapshot = {"epoch": 5, "requested_revision": 7}
+        snapshot = {"epoch": 5, "requested_revision": 7, "engine_revision": self.index.ENGINE_REVISION}
         current = dict(snapshot)
-        self.assertTrue(self.index.publication_matches({"epoch": 5}, current, snapshot))
-        self.assertFalse(self.index.publication_matches({"epoch": 6}, current, snapshot))
-        self.assertFalse(self.index.publication_matches({"epoch": 5}, {**current, "requested_revision": 8}, snapshot))
-        self.assertFalse(self.index.publication_matches({"epoch": 5}, None, snapshot))
+        control = {"epoch": 5, "engine_revision": self.index.ENGINE_REVISION}
+        self.assertTrue(self.index.publication_matches(control, current, snapshot))
+        self.assertFalse(self.index.publication_matches({**control, "epoch": 6}, current, snapshot))
+        self.assertFalse(self.index.publication_matches(control, {**current, "requested_revision": 8}, snapshot))
+        self.assertFalse(self.index.publication_matches(control, None, snapshot))
         self.assertFalse(self.index.publication_matches(None, current, snapshot))
 
     def test_stale_publish_makes_no_recipient_writes(self):
-        self.frappe.db.sql.side_effect = [[{"epoch": 6}], [{"epoch": 5, "requested_revision": 7}]]
-        snapshot = {"name": "WA-1", "epoch": 5, "requested_revision": 7}
+        self.frappe.db.sql.side_effect = [[{"epoch": 6, "engine_revision": self.index.ENGINE_REVISION}], [{"epoch": 5, "requested_revision": 7}]]
+        snapshot = {"name": "WA-1", "epoch": 5, "requested_revision": 7, "engine_revision": self.index.ENGINE_REVISION}
         self.assertFalse(self.index._publish(snapshot, {"state": "ready", "recipients": ["a@example.com"]}))
         self.assertEqual(self.frappe.db.sql.call_count, 2)
         for call in self.frappe.db.sql.call_args_list:
             self.assertTrue(call[0][0].startswith("SELECT"))
 
     def test_publish_deduplicates_users_and_replaces_atomically(self):
-        self.frappe.db.sql.side_effect = [[{"epoch": 5}], [{"epoch": 5, "requested_revision": 7}], [], [], []]
-        snapshot = {"name": "WA-1", "epoch": 5, "requested_revision": 7}
+        self.frappe.db.sql.side_effect = [[{"epoch": 5, "engine_revision": self.index.ENGINE_REVISION}], [{"epoch": 5, "requested_revision": 7}], [], [], []]
+        snapshot = {"name": "WA-1", "epoch": 5, "requested_revision": 7, "engine_revision": self.index.ENGINE_REVISION}
         self.assertTrue(self.index._publish(snapshot, {"state": "ready", "recipients": ["a@example.com", "a@example.com"], "title": "A"}))
         queries = self.frappe.db.sql.call_args_list
         self.assertIn("DELETE FROM", queries[2][0][0])
@@ -210,8 +213,8 @@ class ApprovalIndexTests(unittest.TestCase):
         self.frappe.db.commit.assert_not_called()
 
     def test_no_recipient_exception_settles_without_broad_fallback(self):
-        self.frappe.db.sql.side_effect = [[{"epoch": 5}], [{"epoch": 5, "requested_revision": 7}], [], []]
-        snapshot = {"name": "WA-1", "epoch": 5, "requested_revision": 7}
+        self.frappe.db.sql.side_effect = [[{"epoch": 5, "engine_revision": self.index.ENGINE_REVISION}], [{"epoch": 5, "requested_revision": 7}], [], []]
+        snapshot = {"name": "WA-1", "epoch": 5, "requested_revision": 7, "engine_revision": self.index.ENGINE_REVISION}
         self.index._publish(snapshot, {"state": "error", "reason": "no_eligible_recipients"})
         self.assertEqual(self.frappe.db.sql.call_args_list[-1][0][1][0], "Excluded")
         self.assertFalse(any("INSERT INTO" in call[0][0] for call in self.frappe.db.sql.call_args_list))
@@ -265,7 +268,7 @@ class ApprovalIndexTests(unittest.TestCase):
         self.frappe.cache.return_value.lock.return_value.acquire.assert_called_once_with(blocking=False)
 
     def test_scheduler_only_enqueues_durable_pending_no_evaluation(self):
-        with patch.object(self.index, "_has_pending_work", return_value=True), patch.object(self.index, "_enqueue") as enqueue:
+        with patch.object(self.index, "_adopt_runtime_revision", return_value=False), patch.object(self.index, "_has_pending_work", return_value=True), patch.object(self.index, "_enqueue") as enqueue:
             self.index.recover_pending()
             enqueue.assert_called_once()
         self.frappe.db.sql.assert_not_called()
