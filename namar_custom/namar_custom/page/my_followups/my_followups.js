@@ -1934,8 +1934,7 @@ class NamarMyFollowups {
 		return value;
 	}
 
-	open_reference() {
-		const detail = this.state.detail || {};
+	open_reference(detail = this.state.detail || {}) {
 		const doctype = this.reference_type(detail);
 		const name = this.reference_name(detail);
 		if (doctype && name) {
@@ -1970,11 +1969,14 @@ class NamarMyFollowups {
 		const doctype = this.reference_type(detail);
 		const name = this.reference_name(detail);
 		if (doctype && name) {
-			frappe.set_route("Form", doctype, name);
+			this.open_reference(detail);
 			return;
 		}
 		if (this.state.selected_name) {
-			frappe.set_route("Form", "Workflow Action", this.state.selected_name);
+			this.open_reference({
+				reference_doctype: "Workflow Action",
+				reference_name: this.state.selected_name,
+			});
 		}
 	}
 
