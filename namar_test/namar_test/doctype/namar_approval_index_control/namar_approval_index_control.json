@@ -7,6 +7,7 @@
  "engine": "InnoDB",
  "field_order": [
   "epoch",
+  "engine_revision",
   "scan_cursor",
   "scan_complete",
   "requested_at",
@@ -22,6 +23,13 @@
    "label": "Epoch",
    "read_only": 1,
    "reqd": 1
+  },
+  {
+   "fieldname": "engine_revision",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Engine Revision",
+   "read_only": 1
   },
   {
    "fieldname": "scan_cursor",

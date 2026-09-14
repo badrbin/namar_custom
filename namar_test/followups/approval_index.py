@@ -13,10 +13,42 @@ from __future__ import annotations
 from contextlib import suppress
 from hashlib import sha256
 import json
+from pathlib import Path
 import time
 from uuid import uuid4
 
 import frappe
+
+
+PROJECTION_SOURCE_FILES = (
+    "approval_index.py", "approval_index_policy.py", "approval_index_cache.py",
+    "approval_routing_settings.py", "approval_index_permission_events.py",
+)
+
+
+def _calculate_engine_revision():
+    """Fingerprint the running projection implementation, once at import.
+
+    Cloud can deploy pure Python changes without running migrate. No Git,
+    subprocess, environment secrets or per-HTTP filesystem reads are involved.
+    Labels/length prefixes make concatenation unambiguous across source files.
+    """
+    digest = sha256()
+    digest.update(str(getattr(frappe, "__version__", "")).encode())
+    root = Path(__file__).resolve().parent
+    for name in PROJECTION_SOURCE_FILES:
+        content = (root / name).read_bytes()
+        digest.update(name.encode() + b"\0" + str(len(content)).encode() + b"\0" + content)
+    return digest.hexdigest()
+
+
+# Immutable in each process: an old worker must never claim that it runs a newer
+# policy simply because another process changed the shared control record.
+ENGINE_REVISION = _calculate_engine_revision()
+
+
+def _revision_matches(control):
+    return bool(control and control.get("engine_revision") == ENGINE_REVISION)
 
 
 CONTROL = "Namar Approval Index Control"
@@ -105,7 +137,7 @@ def _ready_state(user=None):
     if not build_enabled():
         return _state("disabled")
     control = _control()
-    if not control or not control.get("scan_complete"):
+    if not _revision_matches(control) or not control.get("scan_complete"):
         return _state("updating", control.get("epoch") if control else None)
     epoch = int(control["epoch"])
     # Indexed existence probes, no business document loads and no per-user
@@ -230,10 +262,10 @@ def verify_snapshot(generation, action_revisions=None):
     except (TypeError, ValueError):
         return False
     control = frappe.db.sql(
-        f"SELECT epoch,scan_complete FROM `tab{CONTROL}` WHERE name=%s LOCK IN SHARE MODE",
+        f"SELECT epoch,scan_complete,engine_revision FROM `tab{CONTROL}` WHERE name=%s LOCK IN SHARE MODE",
         (CONTROL_NAME,), as_dict=True,
     )
-    if not control or int(control[0]["epoch"]) != epoch or not control[0].get("scan_complete"):
+    if not control or not _revision_matches(control[0]) or int(control[0]["epoch"]) != epoch or not control[0].get("scan_complete"):
         return False
     if not revisions:
         return True
@@ -315,6 +347,30 @@ def request_rebuild(reason="configuration_changed"):
     frappe.local.namar_approval_index_epoch_dirty = True
     _schedule()
     return _state("updating", _control()["epoch"])
+
+
+def _adopt_runtime_revision():
+    """Scheduler/migration/explicit rebuild: adopt code and invalidate once.
+
+    Ordinary evaluator workers NEVER call this function. An older in-flight
+    worker may finish its source read but cannot seed or publish into this stamp.
+    """
+    # A still-running scheduler from before an in-place source update must not
+    # replace a newer stamp with its old imported implementation. This disk
+    # check runs only at adoption, never in HTTP count/page reads or evaluators.
+    if _calculate_engine_revision() != ENGINE_REVISION:
+        return False
+    control = _control(for_update=True)
+    if not control or _revision_matches(control):
+        return False
+    frappe.db.sql(
+        f"UPDATE `tab{CONTROL}` SET epoch=epoch+1,engine_revision=%s,scan_cursor='',scan_complete=0,"
+        "requested_at=NOW(6),finished_at=NULL,last_error='engine_revision_changed',modified=NOW(6) WHERE name=%s",
+        (ENGINE_REVISION, CONTROL_NAME),
+    )
+    frappe.local.namar_approval_index_epoch_dirty = True
+    _schedule()
+    return True
 
 
 def invalidate_action(action_name):
@@ -454,6 +510,8 @@ def on_document_rename(doc, method=None, *args, **kwargs):
 
 
 def _seed_batch(control):
+    if not _revision_matches(control):
+        return
     epoch = int(control["epoch"])
     rows = frappe.db.sql(
         "SELECT name FROM `tabWorkflow Action` WHERE status='Open' AND name>%s ORDER BY name LIMIT %s",
@@ -462,7 +520,7 @@ def _seed_batch(control):
     # Serialize only the short seed publication against a concurrent policy
     # update. No recipient/document evaluation while holding the control lock.
     locked = _control(for_update=True)
-    if not locked or int(locked["epoch"]) != epoch:
+    if not _revision_matches(locked) or int(locked["epoch"]) != epoch:
         return
     if rows:
         names = tuple(row["name"] for row in rows)
@@ -527,6 +585,8 @@ def publication_matches(control, current, snapshot):
     """Pure CAS predicate also exercised without a Frappe installation."""
     return bool(
         control and current
+        and _revision_matches(control)
+        and snapshot.get("engine_revision") == ENGINE_REVISION
         and int(control["epoch"]) == int(snapshot["epoch"]) == int(current["epoch"])
         and int(current["requested_revision"]) == int(snapshot["requested_revision"])
     )
@@ -547,7 +607,7 @@ def _technical_failure(snapshot):
 
 def _has_pending_work():
     control = _control()
-    if not control:
+    if not _revision_matches(control):
         return False
     if not control.get("scan_complete"):
         return True
@@ -572,6 +632,8 @@ def process_pending():
         control = _control()
         if not control:
             return {"state": "schema_missing", "processed": 0}
+        if not _revision_matches(control):
+            return {"state": "engine_revision_mismatch", "processed": 0}
         if not control.get("scan_complete"):
             _seed_batch(control)
             frappe.db.commit()
@@ -580,6 +642,8 @@ def process_pending():
         evaluator = ApprovalIndexPolicyEvaluator(frappe)
 
         control = _control()
+        if not _revision_matches(control):
+            return {"state": "engine_revision_mismatch", "processed": 0}
         pending = frappe.db.sql(
             f"SELECT * FROM `tab{ACTION}` WHERE epoch=%s AND state='Pending' "
             "AND (retry_after IS NULL OR retry_after<=NOW(6)) ORDER BY modified,name LIMIT %s",
@@ -593,6 +657,7 @@ def process_pending():
                 if time.monotonic() - started >= WORKER_SECONDS:
                     break
                 try:
+                    snapshot["engine_revision"] = control["engine_revision"]
                     evaluation = evaluator.evaluate_action(snapshot["name"])
                     _publish(snapshot, evaluation)
                     frappe.db.commit()
@@ -625,18 +690,30 @@ def process_pending():
 
 def recover_pending():
     """Minute scheduler: cheap durable-outbox recovery, never evaluate inline."""
-    if build_enabled() and _has_pending_work():
-        _enqueue()
+    if any(frappe.conf.get(key) in (True, 1, "1") for key in (
+        "maintenance_mode", "pause_scheduler", "disable_scheduler",
+    )):
+        return
+    if build_enabled():
+        # A Pull deployment does not invoke after_migrate. Detection is isolated
+        # here; HTTP reads only report updating until the new stamp is built.
+        if _adopt_runtime_revision():
+            return
+        if _has_pending_work():
+            _enqueue()
 
 
 def invalidate_after_migrate():
     if build_enabled():
-        request_rebuild("application_or_metadata_changed")
+        if not _adopt_runtime_revision():
+            request_rebuild("application_or_metadata_changed")
 
 
 @frappe.whitelist(methods=["POST"])
 def rebuild():
     frappe.only_for("System Manager")
+    if build_enabled() and _adopt_runtime_revision():
+        return _state("updating", _control()["epoch"])
     return request_rebuild("administrator_requested")
 
 
@@ -644,7 +721,8 @@ def rebuild():
 def status():
     frappe.only_for("System Manager")
     if not build_enabled():
-        return {**_state("disabled"), "serving_enabled": False, "build_enabled": False}
+        return {**_state("disabled"), "serving_enabled": False, "build_enabled": False,
+                "runtime_engine_revision": ENGINE_REVISION, "stored_engine_revision": None}
     control = _control()
     states = frappe.db.sql(
         f"SELECT state,COUNT(*) AS count FROM `tab{ACTION}` WHERE epoch=%s GROUP BY state",
@@ -658,4 +736,6 @@ def status():
     return {
         **_ready_state(), "control": control, "states": states, "reasons": reasons,
         "serving_enabled": enabled(), "build_enabled": build_enabled(),
+        "runtime_engine_revision": ENGINE_REVISION,
+        "stored_engine_revision": control.get("engine_revision") if control else None,
     }
