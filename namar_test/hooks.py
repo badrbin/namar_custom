@@ -9,6 +9,10 @@ app_license = "MIT"
 
 boot_session = "namar_test.boot.boot_session"
 
+override_doctype_class = {
+    "Delivery Note": "namar_test.overrides.delivery_note.ScenarioDeliveryNote",
+}
+
 permission_query_conditions = {
     "Namar Mention Thread": (
         "namar_test.namar_test.doctype.namar_mention_thread."
