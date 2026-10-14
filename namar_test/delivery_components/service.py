@@ -83,11 +83,52 @@ def normalize_material_request(value: str | None) -> str:
 
 def ensure_material_request_access(material_request: str, *, allow_guest: bool = False) -> Any:
     mr_doc = frappe.get_doc("Material Request", material_request)
+    check_material_request_access(mr_doc, allow_guest=allow_guest)
+    return mr_doc
+
+
+def check_material_request_access(mr_doc: Any, *, allow_guest: bool = False) -> None:
     if allow_guest and frappe.session.user == "Guest":
-        return mr_doc
+        return
     if not frappe.has_permission("Material Request", ptype="read", doc=mr_doc):
         frappe.throw("لا تملك صلاحية الوصول إلى طلب المواد", frappe.PermissionError)
-    return mr_doc
+
+
+def locked_material_request_source(
+    material_request: str, *, allow_guest: bool = False,
+) -> tuple[Any, list[dict[str, Any]]]:
+    """Read current source and packages in the same order as row cancellation.
+
+    A preceding permission/metadata read may already have established a
+    REPEATABLE READ snapshot. Locking a name and subsequently using get_doc or
+    get_all would still return that old snapshot, so use the locking results.
+    The caller keeps these locks until its existing transaction boundary.
+    """
+    parents = frappe.db.sql(
+        "SELECT * FROM `tabMaterial Request` WHERE name = %s FOR UPDATE",
+        (material_request,), as_dict=True,
+    )
+    if not parents:
+        frappe.throw("طلب المواد غير موجود: " + material_request)
+    parent = dict(parents[0])
+    parent["doctype"] = "Material Request"
+    parent["items"] = frappe.db.sql(
+        "SELECT * FROM `tabMaterial Request Item` "
+        "WHERE parent = %s AND parenttype = 'Material Request' ORDER BY name FOR UPDATE",
+        (material_request,), as_dict=True,
+    )
+    parent["items"].sort(key=lambda row: cint(row.get("idx")))
+    mr_doc = frappe.get_doc(parent)
+    check_material_request_access(mr_doc, allow_guest=allow_guest)
+    packages = []
+    if frappe.db.exists("DocType", PACKAGE_DOCTYPE):
+        packages = frappe.db.sql(
+            "SELECT * FROM `tabMaterial Request Delivery Component Package` "
+            "WHERE parent = %s AND parentfield = %s ORDER BY name FOR UPDATE",
+            (material_request, PACKAGE_PARENTFIELD), as_dict=True,
+        )
+        packages.sort(key=lambda row: cint(row.get("idx")))
+    return mr_doc, packages
 
 
 def doctype_fields(doctype: str) -> set[str]:
@@ -111,9 +152,11 @@ def source_value(value: str | None) -> str:
 
 
 def parse_store_data(item_row: Any) -> list[dict[str, Any]]:
+    if cint(item_row.get("custom_is_cancelled_row")):
+        return []
+    # Callers provide complete MRI rows. An empty current value is authoritative;
+    # a plain fallback query could resurrect pre-lock data from an old snapshot.
     raw_value = item_row.get("custom_store_data") or ""
-    if not raw_value and item_row.get("name"):
-        raw_value = frappe.db.get_value("Material Request Item", item_row.get("name"), "custom_store_data") or ""
     if not raw_value:
         return []
     try:
@@ -350,6 +393,8 @@ def aggregate_components(mr_doc: Any, *, validate_colors: bool = False) -> list[
     missing_colors: list[dict[str, Any]] = []
     color_flags = load_component_color_flags()
     for item_row in mr_doc.items:
+        if cint(item_row.get("custom_is_cancelled_row")):
+            continue
         row_qty = flt(item_row.qty or 0)
         if row_qty <= 0:
             row_qty = 1
@@ -446,7 +491,7 @@ def packages_need_sync(mr_doc: Any, packages: list[dict[str, Any]] | None = None
     if saved_hash:
         return saved_hash != current_hash
     package_rows = packages if packages is not None else get_packages_for_summary(mr_doc.name)
-    return bool(aggregate_components(mr_doc) or package_rows)
+    return bool(aggregate_components(mr_doc) or any(package_is_active(row) for row in package_rows))
 
 
 def get_or_make_loading_prefix(mr_doc: Any, dry_run: bool) -> str:
@@ -488,12 +533,18 @@ def assign_loading_codes(package_rows: list[dict[str, Any]], loading_prefix: str
 def build_package_rows(
     mr_doc: Any,
     component_rows: list[dict[str, Any]] | None = None,
+    *,
+    existing_packages: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     rules = load_rules()
     component_rows = component_rows if component_rows is not None else aggregate_components(mr_doc, validate_colors=True)
     sort_map = load_component_sort_order()
     component_rows = sorted(component_rows, key=lambda row: component_sort_key(row, sort_map))
-    existing = get_existing_packages(mr_doc.name)
+    existing = (
+        {row.get("package_key"): row for row in existing_packages
+         if row.get("package_key") and package_is_active(row)}
+        if existing_packages is not None else get_existing_packages(mr_doc.name)
+    )
     package_fields = doctype_fields(PACKAGE_DOCTYPE)
     has_loading_code_field = PACKAGE_LOADING_CODE_FIELD in package_fields
     package_rows: list[dict[str, Any]] = []
@@ -730,10 +781,52 @@ def summarize_packages(package_rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def door_manufacturing_counts(mr_doc: Any) -> tuple[float, float]:
-    mr_meta = frappe.get_meta("Material Request")
-    total = flt(mr_doc.get("custom_manufacturing_total_count") or 0) if mr_meta.has_field("custom_manufacturing_total_count") else 0
-    remaining = flt(mr_doc.get("custom_manufacturing_remaining_count") or 0) if mr_meta.has_field("custom_manufacturing_remaining_count") else 0
-    return total, remaining
+    # Match the manufacturing scanner's quantity/policy rules. Persisted header
+    # counters may describe the source before a row was cancelled or restored.
+    total = manufactured = 0.0
+    policy_cache: dict[tuple[str, str], str] = {}
+    for row in mr_doc.get("items") or []:
+        if cint(row.get("custom_is_cancelled_row")):
+            continue
+        policy = str(row.get("custom_component_manufacturing_policy") or "").strip()
+        if policy not in ("يدخل في التصنيع", "لا يدخل في التصنيع"):
+            template = str(row.get("custom_cutting_template") or "").strip()
+            item_code = str(row.get("item_code") or "").strip()
+            key = (template, item_code)
+            if key not in policy_cache:
+                template_policy = ""
+                if template and item_code:
+                    template_policy = frappe.db.get_value(
+                        "Cutting Template Item", {"parent": template, "item_code": item_code},
+                        "custom_component_manufacturing_policy",
+                    ) or ""
+                    if not template_policy:
+                        item_group = frappe.db.get_value("Item", item_code, "item_group") or ""
+                        if item_group:
+                            template_policy = frappe.db.get_value(
+                                "Cutting Template Item", {"parent": template, "item_group": item_group},
+                                "custom_component_manufacturing_policy",
+                            ) or ""
+                policy_cache[key] = str(template_policy).strip()
+            policy = policy_cache[key]
+        if policy == "لا يدخل في التصنيع":
+            continue
+        numeric_dimensions = ("custom_result_leaf_w", "custom_result_leaf_h", "custom_result_panel_w", "custom_result_panel_h")
+        text_dimensions = ("custom_result_leaf_w_text", "custom_result_panel_w_text")
+        if not (
+            any(flt(row.get(fieldname)) > 0 for fieldname in numeric_dimensions)
+            or any(str(row.get(fieldname) or "").strip() not in ("", "-") for fieldname in text_dimensions)
+        ):
+            continue
+        qty = flt(row.get("qty") or 0)
+        if qty <= 0:
+            qty = 1
+        done = flt(row.get("custom_manufactured_qty") or 0)
+        if done <= 0 and cint(row.get("custom_is_manufactured")):
+            done = qty
+        total += qty
+        manufactured += min(max(done, 0), qty)
+    return total, max(total - manufactured, 0)
 
 
 def fulfillment_readiness(
@@ -759,11 +852,17 @@ def update_material_request_summary(
     package_rows: list[dict[str, Any]] | None = None,
     *,
     source_hash: str | None = None,
+    locked_source: Any | None = None,
 ) -> dict[str, Any]:
-    if package_rows is None:
-        package_rows = get_packages_for_summary(material_request)
+    if locked_source is None:
+        # Read APIs also persist this summary. Do not write supplied packages
+        # or headers that were read before waiting for cancellation/sync.
+        mr_doc, package_rows = locked_material_request_source(material_request, allow_guest=True)
+    else:
+        mr_doc = locked_source
+        if package_rows is None:
+            raise ValueError("Locked summary requires the current package rows")
     summary = summarize_packages(package_rows)
-    mr_doc = frappe.get_doc("Material Request", material_request)
     needs_sync = packages_need_sync(mr_doc, package_rows)
     if source_hash is not None:
         needs_sync = source_hash != build_source_hash(mr_doc)
@@ -937,9 +1036,10 @@ def upsert_package_rows(
     package_rows: list[dict[str, Any]],
     *,
     rotate_unregistered_barcodes: bool = False,
+    existing_rows: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     package_fields = doctype_fields(PACKAGE_DOCTYPE)
-    existing_rows = frappe.get_all(
+    existing_rows = existing_rows if existing_rows is not None else frappe.get_all(
         PACKAGE_DOCTYPE,
         filters={"parent": material_request, "parentfield": PACKAGE_PARENTFIELD},
         fields=selected_fields(
@@ -1201,12 +1301,14 @@ def sync_delivery_component_packages(material_request: str | None, dry_run: int 
     if not frappe.db.exists("DocType", PACKAGE_DOCTYPE):
         frappe.throw("جدول حزم مكونات التوريد غير مثبت على الموقع")
 
-    mr_doc = ensure_material_request_access(material_request)
+    mr_doc, existing_packages = locked_material_request_source(material_request)
     component_rows = aggregate_components(mr_doc, validate_colors=False)
     source_hash = build_source_hash(mr_doc, component_rows=component_rows)
     previous_source_hash = (mr_doc.get(MR_SOURCE_HASH_FIELD) or "").strip()
-    has_existing_packages = bool(get_packages(material_request))
-    package_rows = build_package_rows(mr_doc, component_rows=component_rows)
+    has_existing_packages = any(package_is_active(row) for row in existing_packages)
+    package_rows = build_package_rows(
+        mr_doc, component_rows=component_rows, existing_packages=existing_packages,
+    )
     loading_prefix = get_or_make_loading_prefix(mr_doc, dry_run_bool)
     package_rows = assign_loading_codes(package_rows, loading_prefix)
     summary = summarize_packages(package_rows)
@@ -1220,8 +1322,11 @@ def sync_delivery_component_packages(material_request: str | None, dry_run: int 
                 source_hash,
                 has_existing_packages=has_existing_packages,
             ),
+            existing_rows=existing_packages,
         )
-        summary = update_material_request_summary(material_request, package_rows, source_hash=source_hash)
+        summary = update_material_request_summary(
+            material_request, package_rows, source_hash=source_hash, locked_source=mr_doc,
+        )
         frappe.db.commit()
 
     return {
@@ -1329,22 +1434,22 @@ def mark_delivery_component_package_event(
         frappe.throw("اسم طلب المواد مطلوب")
     if not frappe.db.exists("Material Request", material_request):
         frappe.throw("طلب المواد غير موجود: " + material_request)
-    mr_doc = ensure_material_request_access(material_request, allow_guest=True)
+    mr_doc, current_packages = locked_material_request_source(material_request, allow_guest=True)
     if cint(mr_doc.docstatus) == 2:
         frappe.throw("طلب المواد ملغي ولا يمكن تسجيل الحزمة")
 
-    package_row = get_package(material_request, package_token)
+    # Token, activity and source checks occur after the package lock wait, using
+    # those current rows. Never fall back to a pre-lock package after deletion.
+    package_row = next(
+        (row for row in current_packages if package_is_active(row) and package_matches_token(row, package_token)),
+        None,
+    )
     if not package_row:
         frappe.throw("حزمة المكونات غير موجودة أو أن الملصق قديم. أعد طباعة الملصقات.")
 
-    if packages_need_sync(mr_doc):
+    if packages_need_sync(mr_doc, current_packages):
         frappe.throw("تغيرت مكونات الطلب بعد طباعة الملصق. أعد طباعة ملصقات المكونات.")
 
-    frappe.db.sql(
-        "SELECT name FROM `tab%s` WHERE name = %%s FOR UPDATE" % PACKAGE_DOCTYPE,
-        (package_row.get("name"),),
-    )
-    package_row = get_package(material_request, package_token) or package_row
     package_qty = flt(package_row.get("package_qty") or 0)
     current_ready_qty = flt(package_row.get("ready_qty") or 0)
     requested_qty = flt(ready_qty or 0)
@@ -1381,7 +1486,7 @@ def mark_delivery_component_package_event(
         frappe.throw(str(exc))
 
     if new_tracking_status == current_tracking_status and abs(new_ready_qty - current_ready_qty) <= 0.000001:
-        summary = update_material_request_summary(material_request)
+        summary = update_material_request_summary(material_request, current_packages, locked_source=mr_doc)
         package_row["tracking_status"] = current_tracking_status
         return {
             "status": "already_done",
@@ -1458,7 +1563,7 @@ def mark_delivery_component_package_event(
         event_at=stamp,
         user=user,
     )
-    summary = update_material_request_summary(material_request)
+    summary = update_material_request_summary(material_request, current_packages, locked_source=mr_doc)
     publish_package_changed_event(material_request, package_row, summary)
     frappe.db.commit()
 
@@ -1498,10 +1603,7 @@ def mark_delivery_component_package_ready(
 
 def get_material_request_fulfillment_readiness(material_request: str | None = None) -> dict[str, Any]:
     data = get_delivery_component_packages(material_request=material_request)
-    persisted = update_material_request_summary(
-        data.get("material_request"),
-        data.get("packages") or [],
-    )
+    persisted = update_material_request_summary(data.get("material_request"))
     frappe.db.commit()
     return {
         "material_request": data.get("material_request"),
