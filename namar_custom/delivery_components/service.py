@@ -101,8 +101,8 @@ def locked_material_request_source(
     """Read current source and packages in the same order as row cancellation.
 
     A preceding permission/metadata read may already have established a
-    REPEATABLE READ snapshot. Locking a name and subsequently using get_doc or
-    get_all would still return that old snapshot, so use the locking results.
+    REPEATABLE READ snapshot. Each source read must therefore be a locking
+    read, including the complete document used for User Permission checks.
     The caller keeps these locks until its existing transaction boundary.
     """
     parents = frappe.db.sql(
@@ -111,16 +111,11 @@ def locked_material_request_source(
     )
     if not parents:
         frappe.throw("طلب المواد غير موجود: " + material_request)
-    parent = dict(parents[0])
-    parent["doctype"] = "Material Request"
-    parent["items"] = frappe.db.sql(
+    frappe.db.sql(
         "SELECT * FROM `tabMaterial Request Item` "
         "WHERE parent = %s AND parenttype = 'Material Request' ORDER BY name FOR UPDATE",
         (material_request,), as_dict=True,
     )
-    parent["items"].sort(key=lambda row: cint(row.get("idx")))
-    mr_doc = frappe.get_doc(parent)
-    check_material_request_access(mr_doc, allow_guest=allow_guest)
     packages = []
     if frappe.db.exists("DocType", PACKAGE_DOCTYPE):
         packages = frappe.db.sql(
@@ -129,6 +124,11 @@ def locked_material_request_source(
             (material_request, PACKAGE_PARENTFIELD), as_dict=True,
         )
         packages.sort(key=lambda row: cint(row.get("idx")))
+    # Frappe passes for_update to the parent and every child-table read. Keep
+    # the complete document so linked fields in other children still enforce
+    # the same User Permissions as the original get_doc access check.
+    mr_doc = frappe.get_doc("Material Request", material_request, for_update=True)
+    check_material_request_access(mr_doc, allow_guest=allow_guest)
     return mr_doc, packages
 
 
@@ -1023,7 +1023,10 @@ def insert_package_event(
         return
     package_name = package_row.get("name") or ""
     event_key = "%s|%s|%s" % (package_name, cint(revision), action)
-    if frappe.db.exists(EVENT_DOCTYPE, {"event_key": event_key}):
+    if frappe.db.sql(
+        "SELECT name FROM `tabMaterial Request Component Package Event` "
+        "WHERE event_key = %s LIMIT 1 FOR UPDATE", (event_key,),
+    ):
         return
     event_fields = doctype_fields(EVENT_DOCTYPE)
     event_values = {
@@ -1068,7 +1071,10 @@ def ensure_package_event_baseline(material_request: str, package_row: dict[str, 
     if not frappe.db.exists("DocType", EVENT_DOCTYPE):
         return
     package_name = package_row.get("name") or ""
-    if not package_name or frappe.db.exists(EVENT_DOCTYPE, {"package_id": package_name}):
+    if not package_name or frappe.db.sql(
+        "SELECT name FROM `tabMaterial Request Component Package Event` "
+        "WHERE package_id = %s LIMIT 1 FOR UPDATE", (package_name,),
+    ):
         return
     package_qty = flt(package_row.get("package_qty") or 0)
     ready_qty = flt(package_row.get("ready_qty") or 0)
@@ -1196,7 +1202,19 @@ def upsert_package_rows(
                 update_modified=False,
             )
             continue
-        frappe.delete_doc(PACKAGE_DOCTYPE, existing.get("name"), ignore_permissions=True, force=True)
+        package_name = existing.get("name")
+        # delete_doc starts with a non-locking exists check. If an older RR
+        # snapshot hides this current row, fail and roll back instead of
+        # silently accepting a skipped deletion. Preserve all delete hooks.
+        frappe.delete_doc(
+            PACKAGE_DOCTYPE, package_name, ignore_permissions=True,
+            force=True, ignore_missing=False,
+        )
+        if frappe.db.sql(
+            "SELECT name FROM `tabMaterial Request Delivery Component Package` "
+            "WHERE name = %s FOR UPDATE", (package_name,),
+        ):
+            frappe.throw("تعذر حذف حزمة المكونات. أعد محاولة تحديث الحزم.")
 
     result: list[dict[str, Any]] = []
     for index, desired in enumerate(package_rows, start=1):
