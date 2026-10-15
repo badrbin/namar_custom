@@ -1221,6 +1221,14 @@ def upsert_package_rows(
         package_key = desired.get("package_key")
         existing = desired_matches.get(package_key)
         row = dict(desired)
+        # Optional non-barcode codes must use SQL NULL: the unique index treats
+        # an empty string as a real value shared by otherwise unrelated rows.
+        if (
+            PACKAGE_LOADING_CODE_FIELD in row
+            and not is_barcode_tracking_route(row.get("tracking_route"))
+            and not (row.get(PACKAGE_LOADING_CODE_FIELD) or "").strip()
+        ):
+            row[PACKAGE_LOADING_CODE_FIELD] = None
         if existing:
             row["name"] = existing.get("name")
             if rotate_unregistered_barcodes and not package_started(existing):
