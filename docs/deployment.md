@@ -14,11 +14,13 @@
 
 اجتاز الكود 30 اختبار Python و6 اختبارات JavaScript ببيانات مصطنعة. لم يُثبت التطبيق أو يُفعّل على الموقع بعد. السكربتان القديمان ما زالا المصدر العامل.
 
-منع اتصال GitHub المستخدم هنا إنشاء مستودع جديد (`Resource not accessible by integration`)، لذلك حُفظ التطبيق في فرع مستقل داخل المستودع الموجود والمصرح. كما أعادت واجهة `press.api.github.options` في Frappe Cloud خطأ HTTP 417 من نوع ValidationError، وتضمنت الرسالة المصنفة `Error fetching installations from GitHub` و`Bad credentials`. يحتاج اتصال GitHub داخل Frappe Cloud إعادة ربط قبل تسجيل مصدر التطبيق. لم تُغيّر صلاحيات أو مفاتيح أي اتصال.
+منع اتصال GitHub المستخدم هنا إنشاء مستودع جديد (`Resource not accessible by integration`)، لذلك حُفظ التطبيق في فرع مستقل داخل المستودع الموجود والمصرح. كما أعادت واجهة `press.api.github.options` في Frappe Cloud خطأ HTTP 417 من نوع ValidationError، وتضمنت الرسالة المصنفة `Error fetching installations from GitHub` و`Bad credentials`.
+
+بعد إفادة المستخدم بإعادة الربط، ظل اكتشاف حسابات GitHub يفشل، بينما نجح طلب `press.api.bench.branch_list` للمصدر الحالي وظهر فرع `demo`. هذا يثبت وصول اتصال Frappe Cloud الموجود إلى المستودع؛ العائق المتبقي هو اكتشاف معرّف تثبيت GitHub App لإضافة مصدر التطبيق. يمكن استخدام معرّف اتصال **Frappe Cloud** الذي يقدمه مالك الحساب من رابط **Configure** في `https://github.com/settings/installations`، ثم التحقق منه عبر `press.api.github.app`. لا يُخمن المعرّف ولا يُستبدل بمعرّف اتصال Codex. لم تُغيّر صلاحيات أو مفاتيح أي اتصال، ولم يُسجّل التطبيق في Cloud بعد.
 
 ## خطوات الاستكمال
 
-1. إعادة ربط GitHub داخل Frappe Cloud، ثم التحقق بالقراءة من إمكانية الوصول إلى فرع `demo` في المستودع.
+1. الحصول على معرّف اتصال Frappe Cloud من مالك الحساب أو من اكتشاف GitHub بعد إصلاح OAuth. نجح بالفعل التحقق بالقراءة من ظهور فرع `demo` في المستودع.
 2. فحص `press.api.github.app` وإقرار أنه يكتشف تطبيق `demo` والتوافق مع Frappe 15.
 3. إضافة التطبيق إلى `bench-46656` عبر `Release Group.add_app`، واستخدام مصدر خاص بالفرع.
 4. نشر البنش عبر `press.api.bench.deploy_and_update` مع إبقاء كل App Release حالي، وإضافة إصدار Demo فقط. تبقى النسخ الاحتياطية وفحوص التصحيحات مفعّلة.
