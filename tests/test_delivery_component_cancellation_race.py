@@ -586,9 +586,53 @@ class CancellationRaceTests(unittest.TestCase):
         self.assertFalse(result["overall"]["is_ready"])
         self.assertEqual(result["manufacturing_status"], "قيد التصنيع")
         self.assertEqual(self.db.parent["custom_fulfillment_ready"], 0)
+        self.assertEqual(self.db.parent["custom_manufacturing_total_count"], 4)
+        self.assertEqual(self.db.parent["custom_manufacturing_remaining_count"], 3)
         self.assertIsNone(self.db.parent["custom_manufacturing_completed_at"])
         self.assertEqual(self.db.commits, 0)
         self.frappe.get_all.assert_not_called()
+
+    def test_completed_doors_stay_complete_through_package_changes(self):
+        self.db.items[0].update(custom_manufactured_qty=4)
+        self.db.parent.update(custom_manufacturing_status="قيد التصنيع")
+        # Missing, ready, stale and reopened packages must only affect delivery
+        # readiness, never the persisted state used by manufacturing filters.
+        for ready_qty, needs_sync, fulfillment_ready in [
+            (0, False, False), (10, False, True),
+            (10, True, False), (0, False, False),
+        ]:
+            with self.subTest(ready_qty=ready_qty, needs_sync=needs_sync):
+                self.db.packages[0].update(ready_qty=ready_qty)
+                with patch.object(self.service, "packages_need_sync", return_value=needs_sync):
+                    result = self.service.update_material_request_summary(MR)
+                self.db.finish()
+                self.assertEqual(result["manufacturing_status"], "مصنع بالكامل")
+                self.assertEqual(self.db.parent["custom_manufacturing_status"], "مصنع بالكامل")
+                self.assertEqual(self.db.parent["custom_manufacturing_total_count"], 4)
+                self.assertEqual(self.db.parent["custom_manufacturing_remaining_count"], 0)
+                self.assertEqual(bool(self.db.parent["custom_fulfillment_ready"]), fulfillment_ready)
+                self.assertEqual(self.db.parent["custom_manufacturing_completed_at"], "old-stamp")
+                self.assertEqual(self.db.parent["custom_manufacturing_completed_by"], "old-user")
+
+    def test_package_refresh_does_not_invent_a_manufacturing_event(self):
+        self.db.items[0].update(custom_manufactured_qty=4)
+        self.db.parent.update(custom_manufacturing_completed_at=None,
+                              custom_manufacturing_completed_by="")
+        with patch.object(self.service, "packages_need_sync", return_value=True):
+            result = self.service.update_material_request_summary(MR)
+        self.assertEqual(result["manufacturing_status"], "مصنع بالكامل")
+        self.assertIsNone(result["manufacturing_completed_at"])
+        self.assertEqual(result["manufacturing_completed_by"], "")
+
+    def test_ready_packages_do_not_start_door_manufacturing(self):
+        self.db.items[0].update(custom_manufactured_qty=0)
+        self.db.packages[0].update(ready_qty=10)
+        with patch.object(self.service, "packages_need_sync", return_value=False):
+            result = self.service.update_material_request_summary(MR)
+        self.assertEqual(result["manufacturing_status"], "غير مصنع")
+        self.assertEqual(self.db.parent["custom_manufacturing_status"], "غير مصنع")
+        self.assertEqual(self.db.parent["custom_manufacturing_remaining_count"], 4)
+        self.assertFalse(result["overall"]["is_ready"])
 
 
 if __name__ == "__main__":
