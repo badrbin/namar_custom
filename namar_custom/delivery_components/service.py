@@ -826,12 +826,9 @@ def update_material_request_summary(
     manufacturing_status = combined_manufacturing_status(overall)
     manufacturing_completed_at = mr_doc.get("custom_manufacturing_completed_at")
     manufacturing_completed_by = mr_doc.get("custom_manufacturing_completed_by") or ""
-    if manufacturing_status == "مصنع بالكامل":
-        if not manufacturing_completed_at:
-            manufacturing_completed_at = now_datetime()
-        if not manufacturing_completed_by:
-            manufacturing_completed_by = frappe.session.user or "Guest"
-    else:
+    # Updating packages is not a door manufacturing event. Keep recorded
+    # completion metadata without assigning old work to the current viewer.
+    if manufacturing_status != "مصنع بالكامل":
         manufacturing_completed_at = None
         manufacturing_completed_by = ""
     mr_meta = frappe.get_meta("Material Request")

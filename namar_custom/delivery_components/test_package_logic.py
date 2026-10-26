@@ -163,7 +163,7 @@ class DeliveryComponentPackageLogicTestCase(unittest.TestCase):
         self.assertEqual(result["status"], "جاهز بالكامل")
         self.assertTrue(result["is_ready"])
 
-    def test_combined_manufacturing_waits_for_tracked_packages(self):
+    def test_completed_doors_do_not_wait_for_tracked_packages(self):
         readiness = build_fulfillment_readiness(
             door_total=4,
             door_remaining=0,
@@ -172,9 +172,25 @@ class DeliveryComponentPackageLogicTestCase(unittest.TestCase):
             package_loaded=0,
             package_delivered=0,
         )
-        self.assertEqual(combined_manufacturing_status(readiness), "قيد التصنيع")
+        self.assertEqual(combined_manufacturing_status(readiness), "مصنع بالكامل")
+        self.assertEqual(readiness["status"], "جاهزية جزئية")
+        self.assertFalse(readiness["is_ready"])
 
-    def test_combined_manufacturing_completes_after_doors_and_packages(self):
+    def test_completed_doors_stay_manufactured_when_packages_need_sync(self):
+        readiness = build_fulfillment_readiness(
+            door_total=4,
+            door_remaining=0,
+            package_total=2,
+            package_ready=2,
+            package_loaded=0,
+            package_delivered=0,
+            packages_need_sync=True,
+        )
+        self.assertEqual(combined_manufacturing_status(readiness), "مصنع بالكامل")
+        self.assertEqual(readiness["status"], "غير جاهز")
+        self.assertFalse(readiness["is_ready"])
+
+    def test_completed_doors_and_packages_keep_fulfillment_ready(self):
         readiness = build_fulfillment_readiness(
             door_total=4,
             door_remaining=0,
@@ -184,8 +200,35 @@ class DeliveryComponentPackageLogicTestCase(unittest.TestCase):
             package_delivered=0,
         )
         self.assertEqual(combined_manufacturing_status(readiness), "مصنع بالكامل")
+        self.assertTrue(readiness["is_ready"])
 
-    def test_combined_manufacturing_supports_package_only_requests(self):
+    def test_ready_packages_do_not_complete_partially_manufactured_doors(self):
+        readiness = build_fulfillment_readiness(
+            door_total=20,
+            door_remaining=13,
+            package_total=3,
+            package_ready=3,
+            package_loaded=0,
+            package_delivered=0,
+        )
+        self.assertEqual(combined_manufacturing_status(readiness), "قيد التصنيع")
+        self.assertEqual(readiness["door_ready"], 7)
+        self.assertFalse(readiness["is_ready"])
+
+    def test_ready_packages_do_not_start_door_manufacturing(self):
+        readiness = build_fulfillment_readiness(
+            door_total=20,
+            door_remaining=20,
+            package_total=3,
+            package_ready=3,
+            package_loaded=0,
+            package_delivered=0,
+        )
+        self.assertEqual(combined_manufacturing_status(readiness), "غير مصنع")
+        self.assertEqual(readiness["status"], "جاهزية جزئية")
+        self.assertFalse(readiness["is_ready"])
+
+    def test_package_only_request_has_no_manufactured_doors(self):
         readiness = build_fulfillment_readiness(
             door_total=0,
             door_remaining=0,
@@ -194,9 +237,10 @@ class DeliveryComponentPackageLogicTestCase(unittest.TestCase):
             package_loaded=0,
             package_delivered=0,
         )
-        self.assertEqual(combined_manufacturing_status(readiness), "مصنع بالكامل")
+        self.assertEqual(combined_manufacturing_status(readiness), "غير مصنع")
+        self.assertTrue(readiness["is_ready"])
 
-    def test_combined_manufacturing_without_trackable_units_is_not_manufactured(self):
+    def test_request_without_doors_or_packages_is_not_manufactured(self):
         readiness = build_fulfillment_readiness(
             door_total=0,
             door_remaining=0,
@@ -206,6 +250,27 @@ class DeliveryComponentPackageLogicTestCase(unittest.TestCase):
             package_delivered=0,
         )
         self.assertEqual(combined_manufacturing_status(readiness), "غير مصنع")
+
+    def test_door_completion_tolerates_rounding_but_not_an_unfinished_quantity(self):
+        for door_ready, expected in (
+            (4 - 0.0000005, "مصنع بالكامل"),
+            (4 - 0.000002, "قيد التصنيع"),
+        ):
+            with self.subTest(door_ready=door_ready):
+                readiness = {"door_total": 4, "door_ready": door_ready, "is_ready": False}
+                self.assertEqual(combined_manufacturing_status(readiness), expected)
+
+    def test_missing_or_nonpositive_door_counts_cannot_mark_manufacturing_complete(self):
+        for door_total, door_ready in ((None, None), (0, 4), (-1, 4), (4, 0), (4, -1)):
+            with self.subTest(door_total=door_total, door_ready=door_ready):
+                readiness = {
+                    "door_total": door_total,
+                    "door_ready": door_ready,
+                    "is_ready": True,
+                    "package_total": 3,
+                    "package_ready": 3,
+                }
+                self.assertEqual(combined_manufacturing_status(readiness), "غير مصنع")
 
     def test_legacy_ready_package_is_not_reset_by_new_default(self):
         self.assertEqual(normalize_tracking_status("غير جاهز", 4, 4), TRACKING_STATUS_READY)
