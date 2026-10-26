@@ -870,12 +870,10 @@ def update_material_request_summary(
     manufacturing_status = combined_manufacturing_status(overall)
     manufacturing_completed_at = mr_doc.get("custom_manufacturing_completed_at")
     manufacturing_completed_by = mr_doc.get("custom_manufacturing_completed_by") or ""
-    if manufacturing_status == "مصنع بالكامل":
-        if not manufacturing_completed_at:
-            manufacturing_completed_at = now_datetime()
-        if not manufacturing_completed_by:
-            manufacturing_completed_by = frappe.session.user or "Guest"
-    else:
+    # Package synchronization is not a door manufacturing event. Preserve the
+    # timestamp recorded by the scanner, without attributing old completed
+    # doors to the person who opens or refreshes their packages.
+    if manufacturing_status != "مصنع بالكامل":
         manufacturing_completed_at = None
         manufacturing_completed_by = ""
     mr_meta = frappe.get_meta("Material Request")
@@ -889,6 +887,8 @@ def update_material_request_summary(
         "custom_fulfillment_readiness_status": overall.get("status"),
         "custom_fulfillment_readiness_summary": overall.get("summary"),
         "custom_fulfillment_ready": 1 if overall.get("is_ready") else 0,
+        "custom_manufacturing_total_count": overall.get("door_total"),
+        "custom_manufacturing_remaining_count": overall.get("door_remaining"),
         "custom_manufacturing_status": manufacturing_status,
         "custom_manufacturing_completed_at": manufacturing_completed_at,
         "custom_manufacturing_completed_by": manufacturing_completed_by,
