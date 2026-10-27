@@ -1,0 +1,43 @@
+{
+ "doctype": "DocType",
+ "name": "Namar KDT Settings",
+ "module": "Namar KDT",
+ "issingle": 1,
+ "custom": 0,
+ "engine": "InnoDB",
+ "field_order": [
+  "enabled",
+  "activated_on",
+  "reference_sha256"
+ ],
+ "fields": [
+  {
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "label": "مسار القص في Namar KDT مفعل",
+   "default": "0",
+   "read_only": 1
+  },
+  {
+   "fieldname": "activated_on",
+   "fieldtype": "Datetime",
+   "label": "تاريخ التفعيل",
+   "read_only": 1
+  },
+  {
+   "fieldname": "reference_sha256",
+   "fieldtype": "Data",
+   "label": "بصمة النسخة المرجعية",
+   "read_only": 1
+  }
+ ],
+ "permissions": [
+  {
+   "role": "System Manager",
+   "read": 1
+  }
+ ],
+ "track_changes": 1,
+ "sort_field": "modified",
+ "sort_order": "DESC"
+}

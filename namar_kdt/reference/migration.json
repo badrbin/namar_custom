@@ -1,0 +1,66 @@
+{
+  "site": "testnamar.u.frappe.cloud",
+  "report_name": "نتائج التخصيم",
+  "module": "Namar KDT",
+  "settings": "Namar KDT Settings",
+  "records": [
+    {
+      "doctype": "Client Script",
+      "name": "KDT Cutting Desk Controls",
+      "hashes": {
+        "script": "c7418d450e95da26ea0f5741901a451c063644d80734caaeff0ecee7391f04d3"
+      },
+      "state": {
+        "enabled": 1,
+        "dt": "KDT Cutting Desk",
+        "view": "Form"
+      }
+    },
+    {
+      "doctype": "Server Script",
+      "name": "kdt_cutting_desk_api",
+      "hashes": {
+        "script": "637f410de80683fb07516aaa1da2491c32a250d301ea172eb79cefd421c7cb1b"
+      },
+      "state": {
+        "disabled": 0,
+        "script_type": "API",
+        "api_method": "kdt_cutting_desk_api",
+        "reference_doctype": null,
+        "doctype_event": "Before Insert"
+      }
+    },
+    {
+      "doctype": "Server Script",
+      "name": "kdt_cutting_desk_legacy_guard",
+      "hashes": {
+        "script": "43347fef353ec2fbdb482d56efaa85f5096583d6cdce746d8a4e2b3ba062500d"
+      },
+      "state": {
+        "disabled": 0,
+        "script_type": "DocType Event",
+        "api_method": null,
+        "reference_doctype": "KDT Cutting Batch",
+        "doctype_event": "Before Submit"
+      }
+    },
+    {
+      "doctype": "Report",
+      "name": "نتائج التخصيم",
+      "hashes": {
+        "javascript": "a845fce5efaadd0510b2aa07d9ec69f819940f751fdf00895157e8ace9986d42",
+        "report_script": "d7926cecbd037b7891b5781f8474b3e9dcdac82431d97945f17e29b1acb06f6e"
+      },
+      "state": {
+        "module": "Stock",
+        "is_standard": "No",
+        "report_type": "Script Report",
+        "ref_doctype": "Material Request",
+        "disabled": 0,
+        "prepared_report": 0,
+        "disable_prepared_report_automation": 1,
+        "letter_head": "فراغ"
+      }
+    }
+  ]
+}
