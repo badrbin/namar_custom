@@ -6,7 +6,10 @@ app_email = "developer@example.com"
 app_license = "Proprietary"
 
 required_apps = ["erpnext", "namar_test"]
-doctype_js = {"KDT Cutting Desk": "public/js/desk.js"}
+# Frappe 15 skips doctype_js for Custom DocTypes. Desk loads bootinfo and its
+# form bundle before app assets; the script's boot flag and registration guard
+# keep installation inactive and register only the KDT form after activation.
+app_include_js = ["/assets/namar_kdt/js/desk.js"]
 extend_bootinfo = "namar_kdt.boot.boot_session"
 override_whitelisted_methods = {
     "kdt_cutting_desk_api": "namar_kdt.api.legacy_call",

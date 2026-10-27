@@ -71,6 +71,44 @@ test("inactive install registers nothing; active desk registers once even if loa
     assert.deepEqual(Object.keys(inactive.registrations[0][1]), ["refresh"]);
 });
 
+test("inactive global asset leaves the document and form framework untouched", () => {
+    const context = vm.createContext({
+        frappe: { boot: { namar_kdt_enabled: false } },
+        document: new Proxy({}, { get() { throw new Error("Inactive asset touched the document"); } }),
+    });
+    vm.runInContext(deskSource, context);
+    assert.equal(context.frappe.namar_cutting_desk, undefined);
+    assert.equal(context.frappe.__namar_kdt_desk_registered, undefined);
+});
+
+test("global asset registers before opening a form without changing unrelated form handlers or routing", () => {
+    const unrelatedRefresh = () => {};
+    const handlers = new Map([["Material Request", { refresh: unrelatedRefresh }]]);
+    const listeners = [], selectors = [];
+    const context = vm.createContext({
+        frappe: {
+            boot: { namar_kdt_enabled: true },
+            ui: { form: { on: (doctype, events) => handlers.set(doctype, events) } },
+            call() { throw new Error("Loading an asset must not request data"); },
+            set_route() { throw new Error("Loading an asset must not navigate"); },
+        },
+        document: {
+            addEventListener: (...args) => listeners.push(args),
+            removeEventListener() { throw new Error("First load has no prior handler"); },
+            querySelectorAll(selector) { selectors.push(selector); return []; },
+        },
+    });
+    vm.runInContext(deskSource, context);
+    vm.runInContext(deskSource, context);
+    assert.deepEqual([...handlers.keys()], ["Material Request", "KDT Cutting Desk"]);
+    assert.equal(handlers.get("Material Request").refresh, unrelatedRefresh);
+    assert.deepEqual(Object.keys(handlers.get("KDT Cutting Desk")), ["refresh"]);
+    assert.equal(listeners.length, 1);
+    assert.equal(listeners[0][0], "click");
+    listeners[0][1]({ target: {}, preventDefault() { throw new Error("Unrelated click was blocked"); } });
+    assert.deepEqual(selectors, [".kcd .kcd-multi[open]"]);
+});
+
 test("desk and report RPCs use the native application endpoint", async () => {
     const { context, Desk } = deskContext();
     const requests = [];
