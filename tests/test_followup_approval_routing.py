@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from test_followup_approval_counts import FakeFrappeDict, load_service, workflow_action
+from test_followup_approval_counts import FakeFrappeDict, assert_v16_select_fields, load_service, workflow_action
 from namar_custom.followups.logic import page_window, pagination
 
 
@@ -112,6 +112,7 @@ class RoutingRuntime:
         return True
 
     def query(self, doctype, options, *, permission=False):
+        assert_v16_select_fields(options.get("fields"))
         rows = [row for row in self.data.get(doctype, ()) if self.matches(row, options.get("filters"))]
         if permission:
             rows = [row for row in rows if row.get("name") not in self.denied]
@@ -121,7 +122,7 @@ class RoutingRuntime:
                 str(pattern).strip("%").casefold() in str(row.get(field) or "").casefold()
                 for _, field, _, pattern in or_filters
             )]
-        if options.get("fields") == ["count(name) as count"]:
+        if options.get("fields") == [{"COUNT": "name", "as": "count"}]:
             return [FakeFrappeDict(count=len(rows))]
         if options.get("order_by") == "name asc":
             rows.sort(key=lambda row: row["name"])
@@ -174,7 +175,7 @@ class RoutingRuntime:
         if resolver.has_rules:
             visible = resolver.visible_actions(list(self.service.WORKFLOW_ACTION_FIELDS)) if visible is None else visible
             return {"open": len(visible)}
-        rows = self.get_list("Workflow Action", fields=["count(name) as count"], filters={"status": "Open"}, limit_page_length=1)
+        rows = self.get_list("Workflow Action", fields=[{"COUNT": "name", "as": "count"}], filters={"status": "Open"}, limit_page_length=1)
         return {"open": rows[0]["count"] if rows else 0}
 
     def approvals(self, *, search="", search_scope="all", limit_start=0, page_length=50):

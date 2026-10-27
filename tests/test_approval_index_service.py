@@ -16,7 +16,7 @@ from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import Mock, call, patch
 
-from test_followup_approval_counts import SERVICE_PATH, FakeFrappeDict, load_service, workflow_action
+from test_followup_approval_counts import SERVICE_PATH, FakeFrappeDict, assert_v16_select_fields, load_service, workflow_action
 
 
 USER = "employee@example.com"
@@ -82,6 +82,7 @@ class IndexedServiceRuntime:
             yield service
 
     def get_list(self, doctype, **options):
+        assert_v16_select_fields(options.get("fields"))
         self.query_calls.append((doctype, options))
         if doctype != "Workflow Action":
             raise AssertionError(f"Unexpected service query: {doctype}")
@@ -92,7 +93,7 @@ class IndexedServiceRuntime:
             rows = [row for row in rows if row.name in self_names]
         elif names:
             rows = [row for row in rows if row.name == names]
-        if options.get("fields") == ["count(name) as count"]:
+        if options.get("fields") == [{"COUNT": "name", "as": "count"}]:
             return [FakeFrappeDict(count=len(rows))]
         start = options.get("limit_start", 0)
         length = options.get("limit_page_length", len(rows))

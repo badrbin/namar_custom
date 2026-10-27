@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from copy import deepcopy
 import importlib.util
+import re
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -16,6 +17,13 @@ SERVICE_PATH = (
     / "followups"
     / "service.py"
 )
+
+
+def assert_v16_select_fields(fields):
+    """Model Frappe 16's rejection of SQL functions passed as field strings."""
+    for field in fields or ():
+        if isinstance(field, str) and re.match(r"\s*[A-Za-z_]\w*\s*\(", field):
+            raise AssertionError("Frappe 16 SELECT functions require dictionary fields")
 
 
 class FakeFrappeDict(dict):
@@ -102,8 +110,9 @@ def load_service(*, action_rows=None, count_rows=None):
         raise exc_type(message)
 
     def get_list(doctype, **kwargs):
+        assert_v16_select_fields(kwargs.get("fields"))
         fake_frappe.get_list_calls.append((doctype, kwargs))
-        if kwargs.get("fields") == ["count(name) as count"]:
+        if kwargs.get("fields") == [{"COUNT": "name", "as": "count"}]:
             return list(count_rows or [])
         return list(action_rows or [])
 
@@ -282,6 +291,49 @@ def run_complete_and_schedule_next(*, fail_transfer: bool = False):
 
 
 class ApprovalCountsTestCase(unittest.TestCase):
+    def test_query_stub_rejects_legacy_sql_function_strings(self):
+        _, fake_frappe = load_service()
+        with self.assertRaisesRegex(AssertionError, "dictionary fields"):
+            fake_frappe.get_list("Workflow Action", fields=["count(name) as count"])
+        self.assertEqual(fake_frappe.get_list_calls, [])
+
+    def test_disabled_index_unified_counts_use_v16_dictionary_aggregates(self):
+        module, fake_frappe = load_service(count_rows=[FakeFrappeDict(count=3)])
+        fake_frappe.conf.update({
+            "followup_approval_index_enabled": 0,
+            "followup_approval_index_build_enabled": 0,
+        })
+        mention_service = ModuleType("namar_custom.mentions.service")
+        mention_service.get_open_mention_count = lambda: 2
+        mention_package = ModuleType("namar_custom.mentions")
+        mention_package.service = mention_service
+        with patch.dict(sys.modules, {
+            "namar_custom.mentions": mention_package,
+            "namar_custom.mentions.service": mention_service,
+        }):
+            result = module.get_my_followups_counts()
+
+        self.assertEqual(result["counts"], {"mentions": 2, "followups": 3, "approvals": 3, "total": 8})
+        self.assertEqual(result["attention_counts"], result["counts"])
+        self.assertEqual(result["approval_status"], "ready")
+        self.assertEqual(fake_frappe.get_list_calls, [
+            ("Workflow Action", {
+                "fields": [{"COUNT": "name", "as": "count"}],
+                "filters": {"status": "Open"},
+                "limit_page_length": 1,
+            }),
+            ("ToDo", {
+                "fields": [{"COUNT": "name", "as": "count"}],
+                "filters": {"allocated_to": "employee@example.com", "status": "Open"},
+                "limit_page_length": 1,
+            }),
+            ("ToDo", {
+                "fields": [{"COUNT": "name", "as": "count"}],
+                "filters": {"allocated_to": "employee@example.com", "status": "Open", "date": ["<", "2026-08-19"]},
+                "limit_page_length": 1,
+            }),
+        ])
+
     def test_complete_followup_uses_exact_close_and_preserves_mention_unread(self):
         module, fake_frappe = load_service()
         thread = FakeFrappeDict(
@@ -410,7 +462,7 @@ class ApprovalCountsTestCase(unittest.TestCase):
 
         count_doctype, count_options = fake_frappe.get_list_calls[1]
         self.assertEqual(count_doctype, "Workflow Action")
-        self.assertEqual(count_options["fields"], ["count(name) as count"])
+        self.assertEqual(count_options["fields"], [{"COUNT": "name", "as": "count"}])
         self.assertEqual(count_options["filters"], {"status": "Open"})
         self.assertEqual(count_options["limit_page_length"], 1)
         self.assertNotIn("or_filters", count_options)
@@ -465,7 +517,7 @@ class ApprovalCountsTestCase(unittest.TestCase):
         self.assertEqual(module._followup_open_count("employee@example.com"), 4)
         doctype, options = fake_frappe.get_list_calls[-1]
         self.assertEqual(doctype, "ToDo")
-        self.assertEqual(options["fields"], ["count(name) as count"])
+        self.assertEqual(options["fields"], [{"COUNT": "name", "as": "count"}])
         self.assertEqual(
             options["filters"],
             {"allocated_to": "employee@example.com", "status": "Open"},
@@ -481,7 +533,7 @@ class ApprovalCountsTestCase(unittest.TestCase):
         )
         doctype, options = fake_frappe.get_list_calls[-1]
         self.assertEqual(doctype, "ToDo")
-        self.assertEqual(options["fields"], ["count(name) as count"])
+        self.assertEqual(options["fields"], [{"COUNT": "name", "as": "count"}])
         self.assertEqual(
             options["filters"],
             {

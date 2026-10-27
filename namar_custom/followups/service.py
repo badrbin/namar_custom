@@ -349,7 +349,7 @@ def _approval_counts() -> dict[str, Any]:
     # مع حقل تجميعي؛ لذلك يطابق العدد نفس نطاق العناصر المرئية للمستخدم.
     rows = frappe.get_list(
         "Workflow Action",
-        fields=["count(name) as count"],
+        fields=[{"COUNT": "name", "as": "count"}],
         filters={"status": "Open"},
         limit_page_length=1,
     )
@@ -361,7 +361,7 @@ def _followup_open_count(user: str) -> int:
     # get_list مقصودة حتى يبقى Permission Query مطبقًا، إضافة إلى قيد المكلّف.
     rows = frappe.get_list(
         "ToDo",
-        fields=["count(name) as count"],
+        fields=[{"COUNT": "name", "as": "count"}],
         filters={"allocated_to": user, "status": "Open"},
         limit_page_length=1,
     )
@@ -374,7 +374,7 @@ def _followup_overdue_count(user: str, current_date: str) -> int:
     # لعداد المفتوح، حتى لا يتسع نطاق العدد عن العناصر المرئية للمستخدم.
     rows = frappe.get_list(
         "ToDo",
-        fields=["count(name) as count"],
+        fields=[{"COUNT": "name", "as": "count"}],
         filters=_logic(todo_filters, "overdue", user, current_date),
         limit_page_length=1,
     )
