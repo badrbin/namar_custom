@@ -45,13 +45,240 @@ function getCuttingProductColorOptions(txt) {
     const columns = [...(report?.columns || []), ...(report?.raw_data?.columns || [])];
     const cached = report?.__kdt_component_order?.available_colors;
     const values = Array.isArray(cached) ? cached.slice() : columns.flatMap(column => Array.isArray(column._kdt_available_colors) ? column._kdt_available_colors : []);
-    values.push(...normalizeKdtPlannerFilterValues(getCuttingReportFilters(report).colors));
+    // Keep color search available before the first explicitly generated report.
+    values.push("أسود", "بني", "بني محروق", "فيراني", "دارك جراي", "فلاور", "رصاصي", "عسلي",
+        "بدون لون", "نيو سيلفر", "خشبي", "سيلفر", "تك", "أبيض", "قشر الجوز", "وايت تك", "بيج",
+        "بني 011", "وايت تك 022", "-", ...normalizeKdtPlannerFilterValues(getCuttingReportFilters(report).colors));
     const query = String(txt || "").trim().toLocaleLowerCase();
-    return [...new Set(values.map(value => String(value || "").trim()).filter(Boolean))]
+    const options = [...new Set(values.map(value => String(value || "").trim()).filter(Boolean))]
         .sort((left, right) => left.localeCompare(right, "ar"))
         .map(value => ({ value, label: value === "-" ? "غير محدد" : value }))
         .filter(option => !query || option.value.toLocaleLowerCase().includes(query) || option.label.toLocaleLowerCase().includes(query))
         .map(option => ({ value: option.value, label: kdtComponentOrderEscape(option.label) }));
+    return options.length || !query ? options : [{ value: String(txt).trim(), label: kdtComponentOrderEscape(String(txt).trim()) }];
+}
+
+function installCuttingMultiSelectPresentation(report) {
+    (report.filters || []).forEach(control => {
+        if (control.df.fieldtype !== "MultiSelectList" || control.__cuttingMultiSelectPresentation) return;
+        const label = control.df.label, getData = control.df.get_data;
+        const fallback = control.df.fieldname === "workflow_style" ? cuttingWorkflowStyleOptions
+            : control.df.fieldname === "colors" ? getCuttingProductColorOptions("") : [];
+        const findOption = (value, choices = []) => choices.concat(control._selected_values || [], control._options || [], fallback)
+            .find(option => option.value === value);
+        control.df = { ...control.df, get_data: async function(txt) {
+            const choices = (await getData.call(this, txt) || []).map(option => typeof option === "string"
+                ? { value: option, label: kdtComponentOrderEscape(option), description: "" } : { description: "", ...option });
+            const selected = (control.values || []).map(value => findOption(value, choices)
+                || { value, label: kdtComponentOrderEscape(value), description: "" });
+            return selected.concat(choices).filter((option, index, options) => options.findIndex(other => other.value === option.value) === index);
+        } };
+        control.update_status = function() {
+            const selected = this.values || [];
+            const detail = selected.length === 1 ? $("<div>").html(findOption(selected[0])?.label || kdtComponentOrderEscape(selected[0])).text()
+                : selected.length ? `${selected.length} اختيارات` : "";
+            this.$list_wrapper.find(".status-text").text(detail ? `${label}: ${detail}` : label);
+            const selectedOptions = selected.map(value => findOption(value) || { value, label: kdtComponentOrderEscape(value), description: "" });
+            this.set_selectable_items(selectedOptions.concat(this._options || [])
+                .filter((option, index, options) => options.findIndex(other => other.value === option.value) === index));
+        };
+        $(control.wrapper).attr({ dir: "rtl", title: label }).css("text-align", "right");
+        control.$list_wrapper.find(".select-all-options").remove();
+        control.$list_wrapper.find(".clear-selections").text("مسح الاختيارات");
+        control.$filter_input.attr({ placeholder: "بحث…", "aria-label": `بحث ${label}` });
+        control.$list_wrapper.find("[data-toggle=dropdown]").attr("aria-label", label);
+        control.update_status();
+        control.__cuttingMultiSelectPresentation = true;
+    });
+}
+
+function getCuttingManualReportState(report) {
+    return report.__cutting_manual_report || (report.__cutting_manual_report = {
+        installed: false, epoch: 0, dirty: true, has_result: false, active: null, applied_filters: null
+    });
+}
+
+function cuttingReportNeedsGeneration(report) {
+    if (report?.report_name !== "نتائج التخصيم") return false;
+    const manual = report?.__cutting_manual_report;
+    return Boolean(manual?.installed && (manual.dirty || !manual.has_result
+        || manual.applied_filters !== JSON.stringify(getCuttingReportFilters(report))));
+}
+
+function isCuttingManualRunCurrent(report, run) {
+    const manual = getCuttingManualReportState(report);
+    return report.report_name === "نتائج التخصيم" && manual.active === run && manual.epoch === run.epoch
+        && run.signature === JSON.stringify(getCuttingReportFilters(report));
+}
+
+function stopCuttingManualReportProgress(report) {
+    if (report.report_name !== "نتائج التخصيم") return;
+    if (report.interval != null) clearInterval(report.interval);
+    report.interval = null;
+    frappe.hide_progress?.();
+}
+
+function syncCuttingManualReportControls(report) {
+    if (report.report_name !== "نتائج التخصيم") return;
+    const manual = getCuttingManualReportState(report), state = getKdtComponentOrderState(report);
+    manual.button?.prop?.("disabled", Boolean(manual.active));
+    state.button?.prop?.("disabled", Boolean(cuttingReportNeedsGeneration(report) || state.report_loading
+        || state.busy || state.mutating || state.status_pending || (state.report_status && !state.report_status.can_create)
+        || (manual.has_result && !(report.data || []).some(isCuttingStoreSummaryRow))));
+    if (cuttingReportNeedsGeneration(report) && !manual.active) {
+        stopCuttingManualReportProgress(report);
+        report.toggle_report?.(false);
+        report.toggle_message?.(true);
+        report.$message?.html?.('<div class="msg-box" dir="rtl" style="text-align:right">اختر الفلاتر ثم اضغط «توليد التقرير». عند تغيير الفلاتر يلزم توليده من جديد.</div>');
+        clearCuttingComponentDashboard(report);
+    }
+}
+
+function finishCuttingManualRun(report, run, success) {
+    const manual = getCuttingManualReportState(report), state = getKdtComponentOrderState(report);
+    if (manual.active === run) {
+        const accepted = success && isCuttingManualRunCurrent(report, run);
+        manual.active = null;
+        manual.rendering_run = null;
+        manual.dirty = !accepted;
+        manual.has_result = Boolean(accepted);
+        manual.applied_filters = accepted ? run.signature : null;
+        state.report_loading = false;
+        state.loaded_filters = accepted ? run.signature : null;
+        if (report.report_name === "نتائج التخصيم") {
+            report.hide_loading_screen?.();
+            stopCuttingManualReportProgress(report);
+        }
+        syncCuttingManualReportControls(report);
+    }
+    run.resolve?.(Boolean(success));
+}
+
+function markCuttingReportFiltersDirty(report) {
+    if (!report || report.report_name !== "نتائج التخصيم") return;
+    const manual = getCuttingManualReportState(report), state = getKdtComponentOrderState(report);
+    manual.epoch += 1;
+    manual.dirty = true;
+    manual.applied_filters = null;
+    state.loaded_filters = null;
+    invalidateKdtComponentOrderPreview(report);
+    const active = manual.active;
+    if (active) {
+        finishCuttingManualRun(report, active, false);
+        active.request?.abort?.();
+    }
+    syncCuttingManualReportControls(report);
+}
+
+function generateCuttingReport(report) {
+    if (!report || report.report_name !== "نتائج التخصيم") return Promise.resolve(false);
+    const manual = getCuttingManualReportState(report), state = getKdtComponentOrderState(report);
+    if (manual.active) return manual.active.promise;
+    const run = { epoch: manual.epoch, signature: JSON.stringify(getCuttingReportFilters(report)), accepted: false };
+    run.promise = new Promise(resolve => { run.resolve = resolve; });
+    manual.active = run;
+    manual.dirty = true;
+    manual.has_result = false;
+    manual.applied_filters = null;
+    report.ignore_prepared_report = true;
+    report.prepared_report_name = null;
+    syncCuttingManualReportControls(report);
+    // QueryReport creates its RPC synchronously. Guard that one callback before
+    // core renders anything; restore the shared function before yielding control.
+    const originalCall = frappe.call;
+    let intercepted = false, result;
+    frappe.call = function(options) {
+        if (!intercepted && options?.method === "frappe.desk.query_report.run" && options.args?.report_name === "نتائج التخصيم") {
+            intercepted = true;
+            const guarded = { ...options,
+                callback(response) {
+                    if (!isCuttingManualRunCurrent(report, run) || response?.exc || !Array.isArray(response?.message?.result)) {
+                        finishCuttingManualRun(report, run, false);
+                        return;
+                    }
+                    run.accepted = true;
+                    manual.rendering_run = run;
+                    if (!response.message.result.length) report.data = [];
+                    const columns = response.message.columns;
+                    if (Array.isArray(columns)) state.available_colors = columns.flatMap(column => Array.isArray(column._kdt_available_colors) ? column._kdt_available_colors : []);
+                    return options.callback?.apply(this, arguments);
+                },
+                error() {
+                    const current = isCuttingManualRunCurrent(report, run);
+                    finishCuttingManualRun(report, run, false);
+                    if (current) return options.error?.apply(this, arguments);
+                },
+                always() {
+                    try {
+                        if (report.report_name === "نتائج التخصيم" && manual.epoch === run.epoch
+                            && (!manual.active || manual.active === run)) return options.always?.apply(this, arguments);
+                    }
+                    finally { if (!run.accepted) finishCuttingManualRun(report, run, false); }
+                }
+            };
+            run.request = originalCall.call(this, guarded);
+            return run.request;
+        }
+        return originalCall.apply(this, arguments);
+    };
+    try { result = manual.run_refresh.call(report); }
+    catch (error) { finishCuttingManualRun(report, run, false); throw error; }
+    finally { frappe.call = originalCall; }
+    if (!intercepted) {
+        finishCuttingManualRun(report, run, false);
+        return run.promise;
+    }
+    Promise.resolve(result).then(() => finishCuttingManualRun(report, run, run.accepted && isCuttingManualRunCurrent(report, run)),
+        () => finishCuttingManualRun(report, run, false));
+    return run.promise;
+}
+
+function installCuttingManualReport(report) {
+    const manual = getCuttingManualReportState(report);
+    if (!manual.installed) {
+        manual.run_refresh = report.refresh;
+        report.refresh = function() {
+            if (this.report_name !== "نتائج التخصيم") return manual.run_refresh.apply(this, arguments);
+            syncCuttingManualReportControls(this);
+            return Promise.resolve(false);
+        };
+        if (typeof report.load_report === "function") {
+            const originalLoad = report.load_report;
+            report.load_report = function() {
+                if (this.report_name === "نتائج التخصيم") markCuttingReportFiltersDirty(this);
+                return originalLoad.apply(this, arguments);
+            };
+        }
+        const originalExport = report.export_report;
+        report.export_report = function(fileFormatType) {
+            if (this.report_name !== "نتائج التخصيم") return originalExport?.apply(this, arguments);
+            return exportCuttingReport(this, fileFormatType || "Excel");
+        };
+        manual.installed = true;
+    }
+    markCuttingReportFiltersDirty(report);
+    (report.filters || []).forEach(control => {
+        control.on_change = () => markCuttingReportFiltersDirty(report);
+    });
+    manual.button = report.page.set_primary_action("توليد التقرير", () => generateCuttingReport(report));
+    report.refresh_button?.off?.("click").on?.("click", () => generateCuttingReport(report));
+    report.page.remove_menu_item?.(__("Refresh"));
+    report.page.add_menu_item?.(__("Refresh"), () => generateCuttingReport(report));
+    syncCuttingManualReportControls(report);
+}
+
+function installCuttingSynchronousReportRefresh(report) {
+    if (report.__cutting_sync_refresh) return;
+    const coreRefresh = frappe.views?.QueryReport?.prototype?.refresh;
+    if (typeof coreRefresh !== "function") return;
+    const original = report.refresh;
+    // QueryReport throttles its instance refresh. Manual generation already
+    // deduplicates requests, and must start the guarded RPC synchronously.
+    // Retain the framework's throttled refresh for every other report.
+    report.refresh = function() {
+        return (this.report_name === "نتائج التخصيم" ? coreRefresh : original).apply(this, arguments);
+    };
+    report.__cutting_sync_refresh = true;
 }
 
 function getCuttingVisibleRowIdx(report) {
@@ -101,6 +328,10 @@ function getCuttingExportFilename(report, extension) {
 }
 
 function exportCuttingReport(report, fileFormatType) {
+    if (cuttingReportNeedsGeneration(report) || getKdtComponentOrderState(report).report_loading) {
+        frappe.msgprint("ولّد التقرير بالفلاتر الحالية قبل التصدير.");
+        return;
+    }
     const filters = getCuttingReportFilters(report);
     const selectedFormat = fileFormatType === "CSV" ? "CSV" : "Excel";
 
@@ -114,6 +345,10 @@ function exportCuttingReport(report, fileFormatType) {
         freeze: true,
         freeze_message: __("جارٍ تجهيز التصدير..."),
         callback: async function(response) {
+            if (cuttingReportNeedsGeneration(report) || JSON.stringify(filters) !== JSON.stringify(getCuttingReportFilters(report))) {
+                frappe.msgprint("تغيرت الفلاتر أثناء تجهيز التصدير. ولّد التقرير ثم أعد التصدير.");
+                return;
+            }
             const message = response && response.message ? response.message : {};
             const rows = Array.isArray(message.result) ? message.result : [];
 
@@ -573,6 +808,11 @@ function kdtComponentOrderQty(value) {
 }
 
 function getKdtComponentOrderSelection(report) {
+    const currentState = getKdtComponentOrderState(report);
+    if (cuttingReportNeedsGeneration(report) || currentState.report_loading
+        || (currentState.loaded_filters && currentState.loaded_filters !== JSON.stringify(getCuttingReportFilters(report)))) {
+        throw new Error("ولّد التقرير بالفلاتر الحالية قبل تعديل أمر القص.");
+    }
     const selected = typeof report.get_checked_items === "function" ? report.get_checked_items(false) : [];
     const rows = [], keys = new Set(), requests = new Set();
     for (const row of selected) {
@@ -712,6 +952,7 @@ async function callKdtComponentOrder(action, payload) {
 
 function getKdtComponentReportScope(report) {
     const state = getKdtComponentOrderState(report), filters = getCuttingReportFilters(report);
+    if (cuttingReportNeedsGeneration(report)) throw new Error("ولّد التقرير بالفلاتر الحالية قبل إنشاء أمر القص.");
     if (state.report_loading || (state.loaded_filters && state.loaded_filters !== JSON.stringify(filters))) throw new Error("انتظر اكتمال تحديث نتائج التقرير قبل إنشاء أمر القص.");
     const rows = (report.data || []).filter(isCuttingStoreSummaryRow), keys = new Set(), requests = new Set();
     if (!rows.length) throw new Error("لا توجد مكونات في نتائج التقرير. اختر فلاتر التقرير لعرض المكونات المطلوبة.");
@@ -797,7 +1038,7 @@ function paintKdtComponentReportStatus(report) {
     (table?.datamanager?.rows || []).forEach(row => row.forEach(cell => { if (cell.column?.id === "المكون") delete cell.html; }));
     table?.rowmanager?.refreshRows?.();
     const state = getKdtComponentOrderState(report);
-    state.button?.prop("disabled", Boolean(state.report_loading || state.busy || state.mutating || state.status_pending || (state.report_status && !state.report_status.can_create)));
+    state.button?.prop("disabled", Boolean(cuttingReportNeedsGeneration(report) || state.report_loading || state.busy || state.mutating || state.status_pending || (state.report_status && !state.report_status.can_create)));
 }
 
 function applyKdtComponentReportStatus(report, snapshot, status) {
@@ -928,13 +1169,31 @@ async function openKdtComponentOrderPreview(report) {
         dialog.fields_dict.preview.$wrapper.html(renderKdtComponentOrderPreview(preview, snapshot));
         dialog.show(); dialog.get_primary_btn().prop("disabled", !preview.can_approve);
     } catch (error) { if (isKdtComponentOrderSelectionCurrent(report, snapshot)) frappe.msgprint(kdtComponentOrderEscape(error.message || "تعذرت معاينة المحدد.")); }
-    finally { state.busy = false; state.button?.prop("disabled", false); }
+    finally {
+        state.busy = false;
+        if (report.__cutting_manual_report?.installed) syncCuttingManualReportControls(report);
+        else state.button?.prop("disabled", false);
+    }
 }
 
 function afterKdtComponentOrderRender(report) {
     if (!report || report.report_name !== "نتائج التخصيم") return;
     const state = getKdtComponentOrderState(report), manager = report.datatable?.rowmanager;
-    state.report_loading = false; state.loaded_filters = JSON.stringify(getCuttingReportFilters(report));
+    const manual = report.__cutting_manual_report;
+    if (manual?.installed) {
+        const run = manual.rendering_run;
+        if (!run || !isCuttingManualRunCurrent(report, run)) {
+            syncCuttingManualReportControls(report);
+            return;
+        }
+        manual.dirty = false;
+        manual.has_result = true;
+        manual.applied_filters = run.signature;
+        state.loaded_filters = run.signature;
+    } else {
+        state.loaded_filters = JSON.stringify(getCuttingReportFilters(report));
+    }
+    state.report_loading = false;
     if (!manager) return;
     // Frappe DataTable preserves checkMap across refresh; indices must not move to new records.
     state.clearing = true;
@@ -960,6 +1219,7 @@ function syncKdtComponentOrderButton(report) {
     ["إنشاء أمر قص من المحدد", "تجهيز دفعة تشغيل"].forEach(oldLabel => { report.page.remove_inner_button?.(oldLabel); report.page.remove_menu_item?.(oldLabel); });
     state.button = report.page.add_inner_button(label, () => state.edit ? openKdtComponentOrderPreview(report) : createKdtComponentOrderFromResults(report));
     state.button?.attr("title", state.edit ? "حدد صفوف ملخص المكونات المطلوب حفظها في الأمر." : "ينشئ أمرًا للمكونات المتاحة في نتائج التقرير.");
+    state.button?.prop?.("disabled", Boolean(cuttingReportNeedsGeneration(report) || state.report_loading || state.busy || state.mutating));
 }
 
 function installKdtComponentOrderRouteGuard(report) {
@@ -972,6 +1232,7 @@ function installKdtComponentOrderRouteGuard(report) {
             invalidateKdtComponentOrderPreview(this);
             state.edit = edit?.name && edit.revision != null && Array.isArray(edit.component_scope?.component_keys) ? JSON.parse(JSON.stringify(edit)) : null;
             state.restore_edit_selection = Boolean(state.edit);
+            if (this.__cutting_manual_report?.installed) markCuttingReportFiltersDirty(this);
             if (state.edit) options = { ...state.edit.component_scope.filters, ignore_prepared_report: true };
         }
         return original.call(this, options);
@@ -1000,6 +1261,7 @@ function installKdtComponentOrderReport(report) {
         }
         const originalRefresh = report.refresh;
         report.refresh = function() {
+            const filtersAtRequest = JSON.stringify(getCuttingReportFilters(this));
             if (this.report_name === "نتائج التخصيم") {
                 invalidateKdtComponentOrderPreview(this);
                 state.report_loading = true; state.button?.prop("disabled", true);
@@ -1008,14 +1270,14 @@ function installKdtComponentOrderReport(report) {
             }
             const result = originalRefresh.apply(this, arguments);
             const request = this.last_ajax, generation = state.generation;
-            if (this.report_name === "نتائج التخصيم" && typeof request?.then === "function") {
+            if (this.report_name === "نتائج التخصيم" && !this.__cutting_manual_report?.installed && typeof request?.then === "function") {
                 // Frappe skips prepare_report_data on empty results, so preserve color metadata from the response itself.
                 request.then(response => {
                     if (this.report_name !== "نتائج التخصيم" || this.last_ajax !== request || state.generation !== generation) return;
                     const columns = response?.message?.columns;
                     if (Array.isArray(columns)) state.available_colors = columns.flatMap(column => Array.isArray(column._kdt_available_colors) ? column._kdt_available_colors : []);
                     if (Array.isArray(response?.message?.result) && !response.message.result.length) {
-                        state.report_loading = false; state.loaded_filters = JSON.stringify(getCuttingReportFilters(this));
+                        state.report_loading = false; state.loaded_filters = filtersAtRequest;
                         state.button?.prop("disabled", true);
                     }
                 }, () => {});
@@ -1115,12 +1377,12 @@ frappe.query_reports["نتائج التخصيم"] = {
     },
     onload: function (report) {
         report.ignore_prepared_report = true;
+        installCuttingSynchronousReportRefresh(report);
         installCuttingComponentDashboardRefreshGuard(report);
         installKdtComponentOrderReport(report);
+        installCuttingMultiSelectPresentation(report);
+        installCuttingManualReport(report);
 
-        report.export_report = function(fileFormatType) {
-            exportCuttingReport(report, fileFormatType || "Excel");
-        };
     },
     after_datatable_render: function(datatable) {
         renderCuttingComponentDashboard(datatable);
