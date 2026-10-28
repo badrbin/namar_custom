@@ -116,4 +116,9 @@ scheduler_events = {
     },
 }
 
-after_migrate = ["namar_custom.followups.approval_index.invalidate_after_migrate"]
+before_migrate = ["namar_custom.clone_isolation.disable_copied_integrations"]
+
+after_migrate = [
+    "namar_custom.clone_isolation.disable_copied_integrations",
+    "namar_custom.followups.approval_index.invalidate_after_migrate",
+]
