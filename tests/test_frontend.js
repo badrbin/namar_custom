@@ -245,3 +245,151 @@ test("component printing checks current revision, escapes source text, and does 
     assert.match(documents[0], /&lt;script&gt;bad&lt;\/script&gt;/);
     assert.doesNotMatch(documents[0], /<script>/);
 });
+
+function manufacturingSource(required = 5, done = 2, changes = {}) {
+    return { material_request: "MR-1", source_row: "ROW-1", door_row: 1, required_qty: required,
+        manufactured_qty: done, remaining_qty: Math.max(required - done, 0),
+        state: done >= required ? "completed" : "partial", excluded: true, ...changes };
+}
+
+function manufacturedRow(row, source, changes = {}) {
+    return { ...row, creation_state: "manufactured", available_quantity: 0, already_created_quantity: 0,
+        manufactured_quantity: row.quantity, blocked_quantity: 0, manufacturing_sources: [source],
+        sources: [{ material_request: source.material_request, source_row: source.source_row,
+            creation_state: "manufactured", manufacturing: source, issues: [] }], orders: [], ...changes };
+}
+
+function manufacturingReportFixture() {
+    const { context, messages, routes } = reportContext();
+    const report = reportFixture(), calls = [];
+    report.data[0].الكمية = 4;
+    report.data[1].الكمية = 1.25;
+    const status = { can_create: true, report_signature: "report-v1", status_signature: "availability-v1",
+        rows: report.data.slice(0, 2).map(row => ({ component_key: row._kdt_component_key,
+            quantity: row.الكمية, available_quantity: row.الكمية, creation_state: "available", orders: [] })) };
+    const button = { disabled: false, prop(name, value) { this[name] = value; } };
+    context.getKdtComponentOrderState(report).button = button;
+    context.renderCuttingComponentDashboard = () => {};
+    context.frappe.call = async request => {
+        assert.equal(request.method, "namar_kdt.api.call");
+        calls.push({ action: request.args.action, payload: JSON.parse(request.args.payload) });
+        return { message: request.args.action === "report_status" ? status : { created: true, order: { name: "CUT-NEW" } } };
+    };
+    return { context, report, status, button, calls, messages, routes };
+}
+
+test("fully manufactured sources stay visible and cannot create an empty or invented previous cutting order", async () => {
+    const f = manufacturingReportFixture();
+    f.status.can_create = false;
+    f.status.rows = f.status.rows.map(row => manufacturedRow(row, manufacturingSource(5, 5)));
+    await f.context.refreshKdtComponentReportStatus(f.report);
+    const html = f.context.renderKdtComponentCreationStatus([f.status.rows[0]]);
+    assert.match(html, /سبق تصنيعه؛ يُعتبر مقصوصًا/);
+    assert.match(html, /كمية المكوّن المستبعدة بسبب التصنيع: <bdi>4<\/bdi>/);
+    assert.doesNotMatch(html, /href=|أمر القص:|سبق إنشاؤه|يحتاج مراجعة/);
+    assert.equal(f.report.data[0].الكمية, 4);
+    assert.equal(f.button.disabled, true);
+    const formatter = f.context.frappe.query_reports["نتائج التخصيم"].formatter;
+    const formatted = formatter("حلق", null, { fieldname: "المكون" }, f.report.data[0], value => value);
+    assert.match(formatted, /مستبعدة بسبب التصنيع/);
+    assert.doesNotMatch(formatted, /أمر القص:/);
+    await f.context.createKdtComponentOrderFromResults(f.report);
+    assert.deepEqual(f.calls.map(call => call.action), ["report_status"]);
+    assert.equal(f.routes.length, 0);
+    assert.match(f.messages.at(-1).message, /مستبعدة بسبب التصنيع/);
+});
+
+test("partial manufacturing separates door counts from excluded component quantity and preserves real order links", () => {
+    const { context, status } = manufacturingReportFixture();
+    const row = manufacturedRow(status.rows[0], manufacturingSource(), {
+        quantity: 0.375, manufactured_quantity: 0.375, orders: [{ name: "CUT-REAL", doctype: "KDT Cut Order" }],
+    });
+    const html = context.renderKdtComponentCreationStatus([row]);
+    assert.match(html, /تم تصنيع <bdi>2<\/bdi> من <bdi>5<\/bdi> — المتبقي <bdi>3<\/bdi>/);
+    assert.match(html, /كمية المكوّن المستبعدة بسبب التصنيع: <bdi>0\.375<\/bdi>/);
+    assert.match(html, /السطر مستبعد مؤقتًا/);
+    assert.match(html, /href="\/app\/kdt-cutting-desk\?cut_order=CUT-REAL"/);
+    assert.match(html, /الباب 1/);
+    assert.doesNotMatch(html, /يحتاج مراجعة|اعتماد|الباركود/);
+});
+
+test("manufacturing notice counts each door source once across components and raw variants", () => {
+    const f = manufacturingReportFixture(), source = manufacturingSource();
+    f.status.can_create = false;
+    f.status.rows = f.status.rows.map(row => manufacturedRow(row, source));
+    f.status.rows.push(manufacturedRow({ component_key: "another-raw-variant", quantity: 100 }, source));
+    f.context.getKdtComponentOrderState(f.report).report_status = f.status;
+    const notice = f.context.renderKdtComponentReportNotice(f.report);
+    assert.match(notice, /1 من سطور الأبواب مستبعدة بسبب التصنيع/);
+    assert.match(notice, /السطر المصنّع جزئيًا مستبعد كاملًا مؤقتًا/);
+    assert.doesNotMatch(notice, /3 من سطور|100|لا تتوفر صلاحية/);
+    assert.equal(f.context.getKdtComponentManufacturingSources(f.status.rows).length, 1);
+    const html = f.context.renderKdtComponentManufacturingStatus(f.status.rows);
+    assert.equal((html.match(/class="kdt-report-manufacturing-source"/g) || []).length, 1);
+});
+
+test("manufacturing fallback is HTML-safe and zero component quantities do not hide excluded sources", () => {
+    const { context, status } = manufacturingReportFixture();
+    const source = manufacturingSource(5, 2, {
+        material_request: "<img src=x onerror=bad>", source_row: "ROW-<script>", door_label: 'باب <خاص> "أبيض"',
+    });
+    const row = manufacturedRow({ quantity: 0 }, source);
+    delete row.manufacturing_sources;
+    const html = context.renderKdtComponentCreationStatus([row]);
+    assert.match(html, /مستبعدة بسبب التصنيع: <bdi>0<\/bdi>/);
+    assert.match(html, /تم تصنيع/);
+    assert.match(html, /&lt;img/);
+    assert.match(html, /باب &lt;خاص&gt; &quot;أبيض&quot;/);
+    assert.doesNotMatch(html, /<img|<script|<خاص>/);
+    assert.equal(context.getKdtComponentManufacturingSources([row]).length, 1);
+    assert.doesNotMatch(context.renderKdtComponentCreationStatus([status.rows[0]]), /تصنيع|المتبقي/);
+});
+
+test("mixed manufactured and available sources use direct creation and keep report quantities and app routing", async () => {
+    const f = manufacturingReportFixture();
+    f.status.rows[0] = manufacturedRow(f.status.rows[0], manufacturingSource());
+    await f.context.refreshKdtComponentReportStatus(f.report);
+    assert.equal(f.button.disabled, false);
+    await f.context.createKdtComponentOrderFromResults(f.report);
+    assert.deepEqual(f.calls.map(call => call.action), ["report_status", "component_create_available"]);
+    assert.deepEqual(f.calls[1].payload.component_keys, f.report.data.slice(0, 2).map(row => row._kdt_component_key));
+    assert.equal(f.calls[1].payload.status_signature, "availability-v1");
+    assert.equal(f.report.data[0].الكمية, 4);
+    assert.deepEqual(f.routes, [["Form", "KDT Cutting Desk"]]);
+    assert.equal(f.context.frappe.route_options.cut_order, "CUT-NEW");
+});
+
+test("manufacturing completed during creation refreshes the report without opening an empty order", async () => {
+    const f = manufacturingReportFixture();
+    await f.context.refreshKdtComponentReportStatus(f.report);
+    const after = { ...f.status, can_create: false, status_signature: "availability-v2",
+        rows: f.status.rows.map(row => manufacturedRow(row, manufacturingSource(5, 5))) };
+    f.context.frappe.call = async request => {
+        assert.equal(request.method, "namar_kdt.api.call");
+        assert.equal(request.args.action, "component_create_available");
+        return { message: { created: false, order: null, report_status: after, availability_changed: true,
+            message: "المصادر مستبعدة بسبب التصنيع؛ لم يُنشأ أمر جديد." } };
+    };
+    await f.context.createKdtComponentOrderFromResults(f.report);
+    assert.equal(f.routes.length, 0);
+    assert.equal(f.button.disabled, true);
+    assert.equal(f.report.__kdt_component_order.report_status.rows[0].creation_state, "manufactured");
+    assert.equal(f.report.data[0].الكمية, 4);
+    assert.match(f.messages.at(-1).message, /مستبعدة بسبب التصنيع/);
+});
+
+test("manufacturing annotations cannot authorize stale manually generated results", async () => {
+    const f = manufacturingReportFixture();
+    f.report.__cutting_manual_report = { installed: true, has_result: true, dirty: false,
+        applied_filters: JSON.stringify(f.report.get_filter_values()) };
+    f.status.rows[0] = manufacturedRow(f.status.rows[0], manufacturingSource());
+    await f.context.refreshKdtComponentReportStatus(f.report);
+    assert.equal(f.button.disabled, false);
+    f.report.__cutting_manual_report.dirty = true;
+    f.context.paintKdtComponentReportStatus(f.report);
+    assert.equal(f.button.disabled, true);
+    await f.context.createKdtComponentOrderFromResults(f.report);
+    assert.deepEqual(f.calls.map(call => call.action), ["report_status"]);
+    assert.equal(f.routes.length, 0);
+    assert.match(f.messages.at(-1), /ولّد التقرير بالفلاتر الحالية/);
+});

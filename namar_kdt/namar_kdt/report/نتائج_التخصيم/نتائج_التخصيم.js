@@ -989,6 +989,52 @@ function hasKdtComponentBlockedSources(row) {
     return row.creation_state === "blocked" || (row.sources || []).some(source => source.creation_state === "blocked") || Number(row.blocked_quantity) > 0;
 }
 
+function getKdtComponentManufacturingSources(rows) {
+    const sources = new Map();
+    (rows || []).forEach(row => {
+        const explicit = row.manufacturing_sources || [];
+        const candidates = explicit.length ? explicit : (row.sources || []).filter(source => source.creation_state === "manufactured");
+        candidates.forEach(source => {
+            const manufacturing = source.manufacturing || source;
+            if (!manufacturing.excluded && !["partial", "completed"].includes(manufacturing.state)) return;
+            const materialRequest = source.material_request || manufacturing.material_request;
+            const sourceRow = source.source_row || manufacturing.source_row;
+            if (!materialRequest || !sourceRow) return;
+            const key = JSON.stringify([materialRequest, sourceRow]);
+            if (!sources.has(key)) sources.set(key, { ...manufacturing, material_request: materialRequest, source_row: sourceRow,
+                door_label: source.door_label || manufacturing.door_label, door_row: source.door_row || manufacturing.door_row });
+        });
+    });
+    return [...sources.values()];
+}
+
+function hasKdtComponentManufacturedSources(row) {
+    return row.creation_state === "manufactured" || Number(row.manufactured_quantity) > 0 || getKdtComponentManufacturingSources([row]).length > 0;
+}
+
+function renderKdtComponentManufacturingSource(source) {
+    const esc = kdtComponentOrderEscape;
+    const quantity = value => esc(kdtComponentOrderQty(Number.isFinite(Number(value)) ? Number(value) : 0));
+    const partial = source.state === "partial";
+    const description = partial
+        ? `مصنّع جزئيًا: تم تصنيع <bdi>${quantity(source.manufactured_qty)}</bdi> من <bdi>${quantity(source.required_qty)}</bdi> — المتبقي <bdi>${quantity(source.remaining_qty)}</bdi>`
+        : `سبق تصنيعه؛ يُعتبر مقصوصًا (<bdi>${quantity(source.manufactured_qty)}</bdi> من <bdi>${quantity(source.required_qty)}</bdi>)`;
+    const sourceLabel = source.door_label || (source.door_row ? `الباب ${source.door_row}` : source.source_row);
+    return `<div class="kdt-report-manufacturing-source" style="margin-top:6px;overflow-wrap:anywhere"><div>${description}</div>
+        <div><bdi>${esc(source.material_request)}</bdi> · ${esc(sourceLabel)}</div>
+        ${partial ? "<div>السطر مستبعد مؤقتًا من أمر القص الجديد.</div>" : ""}</div>`;
+}
+
+function renderKdtComponentManufacturingStatus(rows) {
+    if (!(rows || []).some(hasKdtComponentManufacturedSources)) return "";
+    const sources = getKdtComponentManufacturingSources(rows);
+    const quantity = (rows || []).reduce((total, row) => total + (Number(row.manufactured_quantity) || 0), 0);
+    const detail = sources.map(renderKdtComponentManufacturingSource).join("");
+    return `<div class="kdt-report-manufacturing-status" style="margin-top:6px">
+        <div>كمية المكوّن المستبعدة بسبب التصنيع: <bdi>${kdtComponentOrderEscape(kdtComponentOrderQty(quantity))}</bdi></div>
+        ${sources.length > 1 ? `<details><summary>تفاصيل تصنيع ${sources.length} من سطور الأبواب</summary>${detail}</details>` : detail}</div>`;
+}
+
 function renderKdtComponentCreationStatus(rows) {
     if (!rows?.length) return "";
     const sum = field => rows.reduce((total, row) => total + (Number(row[field]) || 0), 0);
@@ -1011,6 +1057,7 @@ function renderKdtComponentCreationStatus(rows) {
     return `<div class="kdt-report-creation-status" dir="rtl" style="font-size:12px;line-height:1.7;text-align:right;overflow-wrap:anywhere;margin-top:6px">
         ${created ? `<div>سبق إنشاؤه: <bdi>${kdtComponentOrderQty(created)}</bdi></div>` : ""}
         <div>المتاح لإنشاء أمر: <bdi>${kdtComponentOrderQty(available)}</bdi></div>
+        ${renderKdtComponentManufacturingStatus(rows)}
         ${needsReview ? `<div>يحتاج مراجعة${blocked ? `: <bdi>${kdtComponentOrderQty(blocked)}</bdi>` : ""}</div>` : ""}
         ${orders.size ? `<div>أمر القص: ${[...orders.values()].map(kdtReportOrderLink).join("، ")}</div>` : ""}
         ${issueGroups.size ? `<details><summary>سبب المراجعة</summary>${[...issueGroups.values()].map(issue => `<div style="margin-top:8px">${kdtComponentOrderEscape(issue.message)}${[...issue.sources.values()].map(source => renderKdtComponentIssueSource(source, issue.code)).join("")}</div>`).join("")}</details>` : ""}</div>`;
@@ -1022,13 +1069,17 @@ function renderKdtComponentReportNotice(report) {
     const status = state.report_status, rows = status?.rows || [];
     const created = rows.filter(row => Number(row.already_created_quantity) > 0).length;
     const blocked = rows.filter(hasKdtComponentBlockedSources).length;
+    const manufactured = getKdtComponentManufacturingSources(rows), hasManufactured = rows.some(hasKdtComponentManufacturedSources);
+    const partial = manufactured.some(source => source.state === "partial");
     return `<div class="kdt-report-creation-notice" dir="rtl" style="text-align:right;font-size:13px;line-height:1.7;margin:0 0 12px;overflow-wrap:anywhere">
         <div>ينشئ أمرًا للمكونات المتاحة في نتائج التقرير.</div>
-        ${state.status_pending ? "<div>جارٍ التحقق من أوامر القص المرتبطة…</div>" : ""}
+        ${state.status_pending ? "<div>جارٍ التحقق من التصنيع وأوامر القص المرتبطة…</div>" : ""}
         ${state.status_error ? `<div role="alert">${kdtComponentOrderEscape(state.status_error)}</div>` : ""}
         ${created ? `<div>${created} من صفوف المكونات سبق إنشاء أمر لها كليًا أو جزئيًا؛ تبقى ظاهرة، ولن تُضاف كمياتها السابقة مرة أخرى.</div>` : ""}
+        ${hasManufactured ? `<div>${manufactured.length ? `${manufactured.length} من سطور الأبواب` : "مصادر الأبواب"} مستبعدة بسبب التصنيع؛ تبقى مكوّناتها ظاهرة ولن تدخل في أمر قص جديد.</div>` : ""}
+        ${partial ? "<div>السطر المصنّع جزئيًا مستبعد كاملًا مؤقتًا؛ يظهر المصنّع والمتبقي في تفاصيله.</div>" : ""}
         ${blocked ? `<div role="alert">${blocked} من صفوف المكونات تحتاج مراجعة بيانات المصدر قبل إنشاء الأمر.</div>` : ""}
-        ${status && !status.can_create && !blocked && !created ? "<div>لا تتوفر صلاحية أو مكونات متاحة لإنشاء الأمر.</div>" : ""}</div>`;
+        ${status && !status.can_create && !blocked && !created && !hasManufactured ? "<div>لا تتوفر صلاحية أو مكونات متاحة لإنشاء الأمر.</div>" : ""}</div>`;
 }
 
 function paintKdtComponentReportStatus(report) {
@@ -1090,7 +1141,11 @@ async function createKdtComponentOrderFromResults(report) {
         if (!status) throw new Error(state.status_error || "تعذر التحقق من حالة المكونات. أعد المحاولة.");
         if (!status.can_create) {
             const blocked = status.rows.some(hasKdtComponentBlockedSources);
-            const message = blocked ? "تحتاج بعض المكونات إلى مراجعة بيانات المصدر. تظهر الأسباب مع المكونات في التقرير." : "لا توجد مكونات متاحة لإنشاء أمر جديد، أو لا تتوفر صلاحية الإنشاء.";
+            const hasManufactured = status.rows.some(hasKdtComponentManufacturedSources);
+            const available = status.rows.some(row => Number(row.available_quantity) > 0 || (row.sources || []).some(source => source.creation_state === "available"));
+            const message = blocked ? "تحتاج بعض المكونات إلى مراجعة بيانات المصدر. تظهر الأسباب مع المكونات في التقرير."
+                : hasManufactured && !available ? "المصادر مستبعدة بسبب التصنيع أو مرتبطة بأوامر قص سابقة؛ لم يُنشأ أمر جديد."
+                : "لا توجد مكونات متاحة لإنشاء أمر جديد، أو لا تتوفر صلاحية الإنشاء.";
             if (frappe.show_alert) frappe.show_alert({ message, indicator: "orange" }); else frappe.msgprint(message);
             return;
         }
@@ -1365,7 +1420,8 @@ frappe.query_reports["نتائج التخصيم"] = {
         value = default_formatter(value, row, column, data);
         if (column.fieldname === "المكون" && data?._kdt_creation_status) {
             const links = (data._kdt_creation_status.orders || []).map(kdtReportOrderLink).filter(Boolean);
-            return `${value}${links.length ? ` <span class="kdt-report-cell-order">· أمر القص: ${links.join("، ")}</span>` : ""}`;
+            const manufactured = hasKdtComponentManufacturedSources(data._kdt_creation_status);
+            return `${value}${manufactured ? ' <span class="kdt-report-cell-manufacturing">· يتضمن مصادر مستبعدة بسبب التصنيع</span>' : ""}${links.length ? ` <span class="kdt-report-cell-order">· أمر القص: ${links.join("، ")}</span>` : ""}`;
         }
         if (column.fieldname === "الحالة" && data) {
             const style = data._workflow_style || "__blank__";

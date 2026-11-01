@@ -1,9 +1,9 @@
 """Native KDT service migrated from the verified TEST Server Script.
 
-Business rules, source locks, idempotency and saved machine payloads are kept
-unchanged. The only lifetime change is request-local cancellation state: the
-legacy Safe Exec namespace was fresh for every invocation, while an imported
-Python module persists across requests.
+Saved machine payloads, source locks and idempotency are preserved. Source
+cancellation and manufacturing reads share request-local state: the legacy
+Safe Exec namespace was fresh for every invocation, while an imported Python
+module persists across requests.
 """
 from contextvars import ContextVar
 import json
@@ -19,7 +19,10 @@ machine payloads must never contain a request, batch or tracking identifier.
 """
 
 
-KDT_CANCELLED_SOURCE_FIELDS = ["name", "parent", "custom_is_cancelled_row"]
+KDT_CANCELLED_SOURCE_FIELDS = [
+    "name", "parent", "qty", "custom_is_cancelled_row",
+    "custom_manufactured_qty", "custom_is_manufactured",
+]
 
 
 def kdt_current_source_rows(item_names, source_fields=KDT_CANCELLED_SOURCE_FIELDS):
@@ -41,7 +44,10 @@ def kdt_current_source_rows(item_names, source_fields=KDT_CANCELLED_SOURCE_FIELD
             (parent,),
         )
     rows = []
-    columns = ", ".join("`" + fieldname + "`" for fieldname in source_fields)
+    meta = frappe.get_meta("Material Request Item")
+    fields = [fieldname for fieldname in source_fields
+              if fieldname in ("name", "parent", "qty") or meta.has_field(fieldname)]
+    columns = ", ".join("`" + fieldname + "`" for fieldname in fields)
     for name in names:
         current_rows = frappe.db.sql(
             "SELECT " + columns + " FROM `tabMaterial Request Item` WHERE name = %s FOR UPDATE",
@@ -118,6 +124,50 @@ def kdt_source_is_cancelled(row, request_name="",
         current = current_rows.get(name)
         return not current or bool(frappe.utils.cint(current.get("custom_is_cancelled_row")))
     return bool(frappe.utils.cint(row.get("custom_is_cancelled_row")))
+
+
+def kdt_normalize_manufacturing(row):
+    """Current door completion only; component ledgers are not door evidence."""
+    required = frappe.utils.flt(row.get("qty") or 0)
+    if required <= 0:
+        required = 1
+    manufactured = frappe.utils.flt(row.get("custom_manufactured_qty") or 0)
+    if manufactured <= 0 and frappe.utils.cint(row.get("custom_is_manufactured") or 0):
+        manufactured = required
+    manufactured = min(max(manufactured, 0), required)
+    remaining = max(required - manufactured, 0)
+    return {"required_qty": required, "manufactured_qty": manufactured,
+            "remaining_qty": remaining,
+            "state": ("completed" if manufactured >= required else
+                      ("partial" if manufactured > 0 else "none")),
+            "excluded": manufactured > 0}
+
+
+def kdt_source_manufacturing(row, request_name="",
+                            normalize=kdt_normalize_manufacturing,
+                            current_rows=None, locked_requests=None):
+    request_rows, request_locks = _cancellation_state()
+    if current_rows is None:
+        current_rows = request_rows
+    if locked_requests is None:
+        locked_requests = request_locks
+    parent = request_name or row.get("parent") or row.get("material_request") or ""
+    name = row.get("source_row") or row.get("name") or row.get("material_request_item") or ""
+    # A locking read is authoritative even when an earlier consistent read of
+    # the source document belongs to an older repeatable-read snapshot.
+    source = (current_rows.get(name) or {}) if parent in locked_requests else row
+    result = normalize(source)
+    result.update({"source_row": name, "material_request": parent})
+    return result
+
+
+def kdt_manufacturing_note(info):
+    if not info.get("excluded"):
+        return ""
+    if info.get("state") == "partial":
+        return ("تم تصنيع %g من %g — المتبقي %g؛ استُبعد المصدر كاملًا منعًا لتكرار القص."
+                % (info["manufactured_qty"], info["required_qty"], info["remaining_qty"]))
+    return "سبق تصنيع كامل كمية هذا السطر؛ يُعتبر مقصوصًا."
 
 
 def cut_part_float(value):
@@ -247,7 +297,8 @@ def cut_part_machine(rule, station, panel_h, panel_w, leaf_h, leaf_w,
 def build_cut_parts(mr_doc, to_float=cut_part_float, to_int=cut_part_int,
                     widths_for=cut_part_widths, color_for=cut_part_color,
                     rule_for=cut_part_rule, machine_for=cut_part_machine,
-                    cancelled_source=kdt_source_is_cancelled):
+                    cancelled_source=kdt_source_is_cancelled,
+                    manufacturing_for=kdt_source_manufacturing):
     """Return stable unit/part candidates from saved request fields only.
 
     Callers must load the saved document and check its read permission. Invalid
@@ -273,6 +324,7 @@ def build_cut_parts(mr_doc, to_float=cut_part_float, to_int=cut_part_int,
         if cancelled_source(item, request_name):
             continue
         row_name = str(item.get("name") or "")
+        manufacturing = manufacturing_for(item, request_name)
         item_code = item.get("item_code") or ""
         if item_code not in group_cache:
             group_cache[item_code] = frappe.db.get_value("Item", item_code, "item_group") or ""
@@ -399,6 +451,7 @@ def build_cut_parts(mr_doc, to_float=cut_part_float, to_int=cut_part_int,
                     "kalon_thickness_mm": lock.get("thickness_mm"),
                     "without_kalon": without_kalon, "label_mode": label_mode,
                     "source_signature": source_signature,
+                    "manufacturing": dict(manufacturing),
                     "eligible": 0 if blockers else 1,
                     "blocker": "، ".join(dict.fromkeys(blockers)),
                 })
@@ -995,6 +1048,9 @@ def kd_annotate(parts):
             part["state"] = "completed" if done or row.execution_status == "مكتمل" else "reserved"
             part["order"] = row.order_name
             part["legacy"] = 1
+        elif (part.get("manufacturing") or {}).get("excluded"):
+            part["state"] = "blocked"
+            part["blocker"] = kdt_manufacturing_note(part["manufacturing"])
         elif not part.get("eligible"):
             part["state"] = "blocked"
     return parts
@@ -1178,13 +1234,22 @@ def kd_select(payload, parts, retained=None):
         kd_error("حدد قطعة واحدة على الأقل.")
     part_map = {part.get("piece_key"): part for part in parts}
     for key in keys:
-        if retained and key in retained and retained[key].state == "completed":
+        if retained and key in retained:
             continue
         if key not in part_map:
             kd_error("القطعة لم تعد موجودة ضمن الطلبات المحددة. حدّث المعاينة.")
         if not part_map[key].get("eligible"):
             kd_error(part_map[key].get("blocker") or "بيانات باركود القطعة تحتاج مراجعة.")
     return keys, part_map
+
+
+def kd_assert_not_manufactured(part):
+    # Writers call this only after kdt_lock_request_sources has locked every
+    # source row. Never trust manufacturing metadata saved in an old order.
+    info = kdt_source_manufacturing(part)
+    if info.get("excluded"):
+        kd_error(kdt_manufacturing_note(info) + " لا يمكن تخصيصه لقص جديد.")
+    return info
 
 
 def kd_assert_available(key, states, legacy, own_order=""):
@@ -1249,6 +1314,7 @@ def kd_mutate(action, payload):
             keys = selection[0]
             part_map = selection[1]
             for key in keys:
+                kd_assert_not_manufactured(part_map[key])
                 kd_assert_available(key, states, legacy)
             doc = frappe.get_doc({"doctype": "KDT Cut Order", "status": "معتمد", "revision": 1,
                                   "source_requests": kd_dump(names), "request_id": request_id, "items": []})
@@ -1267,14 +1333,18 @@ def kd_mutate(action, payload):
             if action in ("revise", "recut", "correct", "cancel"):
                 kd_reason(payload)
             if action == "revise":
-                selection = kd_select(payload, current_parts, active)
+                protected = {key: row for key, row in active.items()
+                             if row.state == "completed"
+                             or kdt_source_manufacturing(kd_json(row.details, {})).get("excluded")}
+                selection = kd_select(payload, current_parts, protected)
                 keys = selection[0]
                 part_map = selection[1]
                 for key, row in active.items():
-                    if row.state == "completed" and key not in keys:
-                        kd_error("لا يمكن حذف قطعة مقصوصة. استخدم تصحيح تسجيل القص إذا كان التسجيل خاطئًا.")
+                    if key in protected and key not in keys:
+                        kd_error("لا يمكن استبعاد قطعة مقصوصة أو مصدر تم تصنيعه. تبقى نسخته محفوظة داخل الأمر.")
                 for key in keys:
-                    if key not in active or active[key].state != "completed":
+                    if key not in protected:
+                        kd_assert_not_manufactured(part_map[key])
                         kd_assert_available(key, states, legacy, doc.name)
                 for key, row in active.items():
                     before = kd_item_snapshot(row)
@@ -1282,7 +1352,7 @@ def kd_mutate(action, payload):
                         row.state = "released"
                         kd_piece_record(row, doc.name)
                         kd_event(doc, "استبعاد", key, before, kd_item_snapshot(row), payload)
-                    elif row.state == "reserved":
+                    elif row.state == "reserved" and key not in protected:
                         kd_apply_part(row, part_map[key])
                         kd_piece_record(row, doc.name)
                         if before != kd_item_snapshot(row):
@@ -1325,6 +1395,7 @@ def kd_mutate(action, payload):
                             current = current_map.get(key)
                             if not current or not current.get("eligible"):
                                 kd_error("بيانات القطعة الحالية غير صالحة لإعادة القص.")
+                            kd_assert_not_manufactured(current)
                             kd_assert_available(key, states, legacy, doc.name)
                             kd_apply_part(row, current)
                             row.attempt = int(row.attempt or 1) + 1
@@ -1586,8 +1657,10 @@ def kc_report(names, filters):
 def kc_build(scope, own_order=""):
     names = scope["request_names"]
     cancelled_sources = {}
+    manufacturing = {}
     for request_name in names:
         for source_item in kd_source(request_name).get("items") or []:
+            manufacturing[source_item.get("name")] = kdt_source_manufacturing(source_item, request_name)
             if kdt_source_is_cancelled(source_item, request_name):
                 cancelled_sources[source_item.get("name")] = 1
     # Check every current component before selecting a subset. A changed raw
@@ -1611,7 +1684,8 @@ def kc_build(scope, own_order=""):
         prior = frappe.get_all("KDT Cut Piece", filters={"material_request": name},
                                fields=["piece_key", "current_order", "state", "details", "source_row"])
         for record in prior:
-            if record.get("source_row") in cancelled_sources:
+            if (record.get("source_row") in cancelled_sources
+                    or (manufacturing.get(record.get("source_row")) or {}).get("excluded")):
                 continue
             if record.get("state") == "released":
                 continue
@@ -1708,25 +1782,33 @@ def kc_build(scope, own_order=""):
             allocation["source_signature"] = kd_dump({"source": source,
                                                        "component_label": group["component_label"],
                                                        "panels": [{"piece_key": part["piece_key"], "signature": part["source_signature"]} for part in linked]})
+            allocation["manufacturing"] = dict(manufacturing.get(source["source_row"]) or {})
             allocations[key] = allocation
             group["allocation_keys"].append(key)
     parts = list(allocations.values()) + list(panels.values())
     if len(allocations) > 5000 or len(panels) > 5000:
         kd_error("اختيار المكونات يتجاوز 5000 مصدر أو حبة. قلّل عدد الطلبات المحددة.")
-    return {"groups": groups, "allocations": allocations, "panels": panels, "parts": parts}
+    return {"groups": groups, "allocations": allocations, "panels": panels, "parts": parts,
+            "manufacturing": manufacturing}
 
 
 def kc_retain_completed(build, doc):
     if not doc:
         return build
-    snapshots = {row.piece_key: row for row in doc.get("items") or [] if row.state == "completed"}
+    snapshots = {}
+    for row in doc.get("items") or []:
+        saved = kd_json(row.details, {})
+        manufacturing = build.get("manufacturing", {}).get(saved.get("source_row")) or {}
+        if row.state != "released" and (row.state == "completed" or manufacturing.get("excluded")):
+            snapshots[row.piece_key] = row
     for key, row in snapshots.items():
         saved = kd_json(row.details, {})
         if saved.get("record_kind") != "component":
             continue
         latest = build["allocations"].get(key)
         saved["source_changed"] = not latest or latest.get("source_signature") != saved.get("source_signature")
-        saved["state"] = "completed"
+        saved["state"] = row.state
+        saved["manufacturing"] = dict(build.get("manufacturing", {}).get(saved.get("source_row")) or {})
         saved["attempt"] = int(row.attempt or 1)
         saved["completed_at"] = row.completed_at
         saved["completed_by"] = row.completed_by
@@ -1867,7 +1949,7 @@ def kc_add_reference(references, reference):
 def kc_report_data(scope, build, states, legacy):
     keys = kc_report_keys(scope, build)
     allocations = []
-    totals = {"available": 0, "already_created": 0, "blocked": 0}
+    totals = {"available": 0, "already_created": 0, "manufactured": 0, "blocked": 0}
     for key in keys:
         allocation = dict(build["allocations"][key])
         references = []
@@ -1892,16 +1974,19 @@ def kc_report_data(scope, build, states, legacy):
                 kc_add_reference(references, reference)
         references.sort(key=lambda reference: (reference["doctype"], reference["name"]))
         lineage_blocked = any(issue.get("code") == "orphan_source" for issue in allocation.get("issues") or [])
-        creation_state = ("blocked" if lineage_blocked else ("already_created" if references else
-                          ("available" if allocation.get("eligible") else "blocked")))
+        manufacturing = allocation.get("manufacturing") or {}
+        creation_state = ("manufactured" if manufacturing.get("excluded") else
+                          ("blocked" if lineage_blocked else ("already_created" if references else
+                           ("available" if allocation.get("eligible") else "blocked"))))
         coverage = ("full" if allocation_claimed or (claimed_panels and len(claimed_panels) == len(allocation["linked_piece_keys"]))
                     else ("partial" if claimed_panels else "none"))
         allocation.update({"creation_state": creation_state, "orders": references, "coverage": coverage,
                            "state": ("completed" if references and all(reference["state"] == "completed" for reference in references)
                                      else ("reserved" if references else "available")),
                            "order": references[0]["name"] if references else "",
-                           "creation_note": ("بعض حبات المصدر مرتبطة بأمر سابق؛ استُبعد المصدر كاملًا دون تقسيم كميته."
-                                             if coverage == "partial" else ("سبق إنشاء أمر قص لهذا المصدر." if references else ""))})
+                           "creation_note": (kdt_manufacturing_note(manufacturing) if manufacturing.get("excluded") else
+                                             ("بعض حبات المصدر مرتبطة بأمر سابق؛ استُبعد المصدر كاملًا دون تقسيم كميته."
+                                              if coverage == "partial" else ("سبق إنشاء أمر قص لهذا المصدر." if references else "")))})
         allocations.append(allocation)
         totals[creation_state] = totals[creation_state] + 1
     rows = kc_rows(allocations)
@@ -1912,16 +1997,24 @@ def kc_report_data(scope, build, states, legacy):
                                                     if source["creation_state"] == "already_created"), 3)
         row["blocked_quantity"] = round(sum(source["quantity"] for source in row["sources"]
                                             if source["creation_state"] == "blocked"), 3)
+        row["manufactured_quantity"] = round(sum(source["quantity"] for source in row["sources"]
+                                                 if source["creation_state"] == "manufactured"), 3)
+        row["manufacturing_sources"] = []
+        for source in row["sources"]:
+            if source["creation_state"] == "manufactured":
+                info = dict(source["manufacturing"])
+                info["door_row"] = source.get("door_row") or 0
+                row["manufacturing_sources"].append(info)
         row["orders"] = []
         for source in row["sources"]:
             for reference in source["orders"]:
                 kc_add_reference(row["orders"], dict(reference))
-        row["creation_state"] = ("blocked" if any(source["creation_state"] == "blocked" for source in row["sources"])
-                                 else ("available" if all(source["creation_state"] == "available" for source in row["sources"])
-                                       else ("already_created" if all(source["creation_state"] == "already_created" for source in row["sources"])
-                                             else "mixed")))
+        creation_states = set(source["creation_state"] for source in row["sources"])
+        row["creation_state"] = ("blocked" if "blocked" in creation_states else
+                                 (list(creation_states)[0] if len(creation_states) == 1 else "mixed"))
     availability = [{"key": source["piece_key"], "creation_state": source["creation_state"],
-                     "coverage": source["coverage"], "orders": source["orders"]}
+                     "coverage": source["coverage"], "orders": source["orders"],
+                     "manufacturing": source.get("manufacturing") or {}}
                     for source in sorted(allocations, key=lambda source: source["piece_key"])]
     return {"scope": scope, "request_names": scope["request_names"], "rows": rows, "counts": totals,
             "report_signature": kc_signature(scope, build, keys), "status_signature": kc_hash(availability),
@@ -1949,9 +2042,9 @@ def kc_command_result(command, fingerprint, payload):
 def kc_created_result(order, status, skipped, changed):
     return {"created": bool(order), "order": order, "report_status": status,
             "skipped_sources": skipped, "availability_changed": changed,
-            "message": ("تم إنشاء أمر القص للمصادر المتاحة، مع استبعاد المصادر التي لها أوامر سابقة."
+            "message": ("تم إنشاء أمر القص للمصادر المتاحة، مع استبعاد السابق تصنيعها أو المرتبطة بأوامر سابقة."
                         if order and skipped else ("تم إنشاء أمر القص من نتائج التقرير."
-                        if order else ("كل المصادر لها أوامر قص سابقة؛ لم يُنشأ أمر جديد." if skipped
+                        if order else ("لا توجد مصادر متاحة؛ سبق تصنيعها أو إنشاء أوامر قص لها، ولم يُنشأ أمر جديد." if skipped
                                        else "لا توجد مصادر مكونات متاحة لإنشاء أمر قص.")))}
 
 
@@ -1972,6 +2065,12 @@ def kc_preview(payload):
     for key in keys:
         allocation = dict(build["allocations"][key])
         allocation["issues"] = [dict(issue) for issue in allocation.get("issues") or []]
+        manufacturing = allocation.get("manufacturing") or {}
+        owned = bool(doc and any(row.piece_key == key and row.state != "released" for row in doc.get("items") or []))
+        if manufacturing.get("excluded") and not owned:
+            kc_add_issue(allocation["issues"], "source_manufactured", kdt_manufacturing_note(manufacturing),
+                         {"material_request": allocation["material_request"], "source_row": allocation["source_row"],
+                          "door_row": allocation.get("door_row") or 0, "allocation_key": key})
         allocation["state"] = "available"
         allocation["order"] = ""
         for checked in [key] + allocation["linked_piece_keys"]:
@@ -1996,11 +2095,12 @@ def kc_preview(payload):
     rows = kc_rows(allocations)
     if doc:
         retained = set(keys)
-        missing = [row for row in doc.get("items") or [] if row.state == "completed"
+        missing = [row for row in doc.get("items") or [] if row.state != "released"
+                   and (row.state == "completed" or (build.get("manufacturing", {}).get(kd_json(row.details, {}).get("source_row")) or {}).get("excluded"))
                    and kd_json(row.details, {}).get("record_kind") == "component" and row.piece_key not in retained]
         if missing:
             for row in rows:
-                row["blocker"] = "لا يمكن استبعاد مكون تم قصه من الأمر. أبقِ الصفوف المكتملة ضمن التحديد."
+                row["blocker"] = "لا يمكن استبعاد مكون تم قصه أو تصنيع مصدره من الأمر. أبقِ هذه الصفوف ضمن التحديد."
                 row["state"] = "blocked"
     return {"rows": rows, "request_names": scope["request_names"], "component_scope": scope,
             "preview_signature": kc_signature(scope, build, keys),
@@ -2130,7 +2230,7 @@ def kc_mutate(action, payload):
             status = kc_report_data(report_scope, build, states, legacy_references)
             availability_changed = bool(payload.get("status_signature") and payload["status_signature"] != status["status_signature"])
             skipped = [dict(source) for group in status["rows"] for source in group["sources"]
-                       if source["creation_state"] == "already_created"]
+                       if source["creation_state"] in ("already_created", "manufactured")]
             blocked = [source for group in status["rows"] for source in group["sources"]
                        if source["creation_state"] == "blocked"]
             if blocked:
@@ -2165,23 +2265,24 @@ def kc_mutate(action, payload):
                 kd_error("لا توجد مصادر مكونات محددة لإنشاء الأمر أو تعديله.")
             if action == "revise":
                 for key, row in before_active.items():
-                    if row.state == "completed" and saved[key].get("record_kind") == "component" and key not in keys:
-                        kd_error("لا يمكن استبعاد مكون تم قصه. استخدم تصحيح التسجيل إذا كان التنفيذ سُجل بالخطأ.")
+                    if (row.state == "completed" or kdt_source_manufacturing(saved[key]).get("excluded")) and saved[key].get("record_kind") == "component" and key not in keys:
+                        kd_error("لا يمكن استبعاد مكون تم قصه أو تصنيع مصدره. أبقِ سجله ضمن الأمر.")
             final_parts = {}
             for key in keys:
                 old = before_active.get(key)
-                if old and old.state == "completed":
+                if old and (old.state == "completed" or kdt_source_manufacturing(saved[key]).get("excluded")):
                     for retained in [key] + saved[key].get("linked_piece_keys", []):
                         final_parts[retained] = saved[retained]
                     continue
                 allocation = build["allocations"][key]
+                kd_assert_not_manufactured(allocation)
                 if not allocation.get("eligible"):
                     kd_error(allocation.get("blocker") or "مصدر المكون غير صالح للاعتماد.")
                 final_parts[key] = allocation
                 for panel_key in allocation["linked_piece_keys"]:
                     final_parts[panel_key] = build["panels"][panel_key]
             for key in final_parts:
-                if key in before_active and before_active[key].state == "completed":
+                if key in before_active and (before_active[key].state == "completed" or kdt_source_manufacturing(saved[key]).get("excluded")):
                     continue
                 kd_assert_available(key, states, legacy, doc.name or "")
             if action == "approve":
@@ -2196,7 +2297,7 @@ def kc_mutate(action, payload):
                 kd_event(doc, "استبعاد", key, before, kd_item_snapshot(row), payload)
             for key, part in final_parts.items():
                 old = before_active.get(key)
-                if old and old.state == "completed":
+                if old and (old.state == "completed" or kdt_source_manufacturing(saved[key]).get("excluded")):
                     continue
                 before = kd_item_snapshot(old) if old else None
                 row = old or doc.append("items", {"state": "reserved", "attempt": int((states.get(key) or {}).get("attempt") or 1)})
@@ -2228,6 +2329,7 @@ def kc_mutate(action, payload):
                 next_attempt = int(row.attempt or 1) + 1
                 affected = [key] + old_links
                 if action == "recut":
+                    kd_assert_not_manufactured(current)
                     for removed in old_links:
                         if removed not in changed_links:
                             kd_error("تغيرت هوية حبات البنل بعد القص؛ لا يمكن تبديل الحبات المنفذة دون مراجعة المصدر.")
