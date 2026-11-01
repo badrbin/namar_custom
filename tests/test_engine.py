@@ -50,6 +50,7 @@ def fake_frappe():
     framework.new_doc = lambda dt: SimpleNamespace(has_permission=lambda p: p in framework.allowed_permissions)
     framework.utils = SimpleNamespace(
         cint=lambda value: int(value or 0),
+        flt=lambda value: float(value or 0),
         sha256_hash=lambda value: hashlib.sha256(value.encode()).hexdigest(),
     )
     framework.db = SimpleNamespace(
@@ -57,6 +58,7 @@ def fake_frappe():
         exists=lambda *args, **kwargs: False,
     )
     framework.get_all = lambda *args, **kwargs: []
+    framework.get_meta = lambda *args: SimpleNamespace(has_field=lambda fieldname: True)
     return framework
 
 
@@ -218,7 +220,7 @@ class EngineBusinessTests(unittest.TestCase):
         build = {"groups": [{"component_key": "GROUP1"}], "allocations": sources, "panels": {}}
         scope = {"request_names": ["SYNTHETIC-MR"], "component_keys": ["GROUP1"]}
         result = self.engine.kc_report_data(scope, build, {}, {})
-        self.assertEqual(result["counts"], {"available": 1, "already_created": 0, "blocked": 1})
+        self.assertEqual(result["counts"], {"available": 1, "already_created": 0, "manufactured": 0, "blocked": 1})
         self.assertFalse(result["can_create"])
 
     def test_component_grouping_keeps_precision_and_completed_sources_noneditable(self):
