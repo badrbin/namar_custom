@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
-TARGET = "namar15-frankfurt.f.frappe.cloud"
+TARGET = "namar15-frankfurt-standby.f.frappe.cloud"
 
 
 class Database:

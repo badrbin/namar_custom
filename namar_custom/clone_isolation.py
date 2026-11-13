@@ -9,7 +9,7 @@ from __future__ import annotations
 import frappe
 
 
-CLONE_SITE = "namar15-frankfurt.f.frappe.cloud"
+CLONE_SITE = "namar15-frankfurt-standby.f.frappe.cloud"
 ISOLATION_FLAG = "namar_frankfurt_clone_isolation"
 DISABLED_FIELDS = (
     ("Company", ("custom_zatca_invoice_enabled",)),
